@@ -32,7 +32,7 @@ import { fileURLToPath } from 'node:url'
 // Re-exported rather than restated: the browser half of this contract lives in
 // a module with no imports, because it is inlined into the client bundle, and
 // two spellings of the registry global would be two registries.
-import { compareCodeUnits } from './order.mjs'
+import { compareCodePoints } from './order.mjs'
 import { isServerModuleId, parseServerReference } from './rsc-client-runtime.mjs'
 
 export {
@@ -426,5 +426,5 @@ export function mergeServerReferences(...lists) {
   for (const list of lists) {
     for (const reference of list ?? []) merged.set(reference.id, reference)
   }
-  return [...merged.values()].sort((left, right) => compareCodeUnits(left.id, right.id))
+  return [...merged.values()].sort((left, right) => compareCodePoints(left.id, right.id))
 }

@@ -79,6 +79,13 @@ const WORKER_RUNTIME_FILES: &[&str] = &[
     // hooks lives here — so a change to the dispatch changes rendered output
     // exactly like a change to the compiler does.
     "plugin-http.mjs",
+    // Reached through `plugin-http.mjs`, which scopes every HTTP hook by the
+    // path this module canonicalises — there is one answer to "what is this
+    // request's path" and both the router and the plugin stage read it here.
+    // Nothing the worker runs asks it anything, so this is the list being wider
+    // than the closure needs, which `the_worker_runtime_list_covers_everything_the_worker_imports`
+    // permits and a narrower list would not.
+    "route-match.mjs",
 ];
 
 pub(crate) fn content_hash(input: &str) -> String {
@@ -249,6 +256,20 @@ pub(crate) fn load_prerender_artifact(
     valid.then_some(artifact.html)
 }
 
+/// Record one rendered document against the files it was rendered from.
+///
+/// `inputs` are keyed as given. Both callers pass `stable_prerender_inputs`
+/// output, which has already resolved every worker-reported path against the
+/// project root and canonicalized it, and `normalized_canonical_path` is a
+/// `canonicalize` syscall each time — the expensive filesystem call on Windows.
+/// Repeating it here answered identically by construction while costing a second
+/// syscall per input on every stored artifact, so a dynamic route expanded to
+/// thousands of paths paid `2 × modules` of them per path. A caller with
+/// unresolved paths canonicalizes before calling; this is the hot loop and that
+/// is not. Held by `store_prerender_artifact_keys_by_the_paths_it_is_given`.
+///
+/// The sibling [`store_server_component_entry`] deliberately still normalizes:
+/// it takes its inputs straight out of the worker response with nothing between.
 pub(crate) fn store_prerender_artifact(
     cache: &PrerenderArtifactCache,
     job: &PrerenderJob,
@@ -261,12 +282,11 @@ pub(crate) fn store_prerender_artifact(
     }
     let files = inputs
         .iter()
-        .map(|path| ruvyxa_diagnostics::normalized_canonical_path(path))
         .filter_map(|path| {
             cache
                 .fingerprints
-                .fingerprint(&path)
-                .map(|fingerprint| (path, fingerprint))
+                .fingerprint(path)
+                .map(|fingerprint| (path.clone(), fingerprint))
         })
         .collect::<BTreeMap<_, _>>();
     if files.is_empty() {

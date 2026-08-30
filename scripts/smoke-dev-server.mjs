@@ -23,18 +23,28 @@
  * not byte-identical afterwards — a smoke test that leaves the tree dirty is a
  * smoke test nobody will run twice.
  */
-import { spawn } from 'node:child_process'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
+/**
+ * Whether this file was run, rather than imported by a test of its teardown.
+ *
+ * The teardown below is the whole reason this module can be imported at all,
+ * and it could not be tested while reading `process.argv` and starting a dev
+ * server were the first things the file did.
+ */
+const runningAsScript =
+  process.argv[1] !== undefined && path.resolve(process.argv[1]) === import.meta.filename
+
 const [appRootArg, portArg] = process.argv.slice(2)
-if (!appRootArg || !portArg) {
+if (runningAsScript && (!appRootArg || !portArg)) {
   console.error('usage: node scripts/smoke-dev-server.mjs <appRoot> <port>')
   process.exit(1)
 }
 
-const appRoot = path.resolve(appRootArg)
-const port = Number(portArg)
+const appRoot = path.resolve(appRootArg ?? '.')
+const port = Number(portArg ?? 0)
 const origin = `http://127.0.0.1:${port}`
 
 /** The HMR wire contract both ends are held to. */
@@ -44,6 +54,15 @@ const contract = JSON.parse(
 
 /** Source files this run edits, with the bytes they must be restored to. */
 const originals = new Map()
+
+/**
+ * The route this run adds and deletes, to watch the generated sitemap follow it.
+ *
+ * Created rather than edited, so it is outside the `originals` restore and gets
+ * its own removal in the `finally` below.
+ */
+const addedRoutePath = '/smoke-sitemap'
+const addedRouteFile = path.join(appRoot, 'app', 'smoke-sitemap', 'page.tsx')
 
 let output = ''
 let child = null
@@ -66,7 +85,16 @@ function start() {
       ]
   child = spawn(command, args, {
     cwd: path.resolve(new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')),
-    env: { ...process.env, NO_COLOR: '1', RUVYXA_TELEMETRY: '0' },
+    // The fixture configures nothing on purpose, and a sitemap needs an origin
+    // to write absolute locations with. The environment variable is the
+    // documented way to supply one, and supplying it here keeps the fixture the
+    // default configuration it exists to be.
+    env: {
+      ...process.env,
+      NO_COLOR: '1',
+      RUVYXA_TELEMETRY: '0',
+      RUVYXA_SITE_URL: 'https://smoke.example',
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   child.stdout.on('data', (chunk) => {
@@ -280,6 +308,13 @@ async function checkServerFunctions() {
       'x-ruvyxa-action': reference,
       // What `encodeReply` produces for a single string argument.
       'content-type': 'text/plain;charset=UTF-8',
+      // The endpoint fails closed when a request carries neither `Origin` nor
+      // `Sec-Fetch-Site`, on the argument that its only callers are browsers and
+      // a browser always sends one. A smoke that omitted both was asserting an
+      // exemption no real caller gets, so it sends what a same-origin fetch
+      // sends.
+      origin,
+      'sec-fetch-site': 'same-origin',
     },
     body: '["smoke"]',
   })
@@ -290,7 +325,12 @@ async function checkServerFunctions() {
 
   const unguarded = await fetch(`${origin}/__ruvyxa/rsc?path=/rsc`, {
     method: 'POST',
-    headers: { 'x-ruvyxa-rsc': '1', 'content-type': 'text/plain;charset=UTF-8' },
+    headers: {
+      'x-ruvyxa-rsc': '1',
+      'content-type': 'text/plain;charset=UTF-8',
+      origin,
+      'sec-fetch-site': 'same-origin',
+    },
     body: '["smoke"]',
   })
   await unguarded.arrayBuffer()
@@ -439,11 +479,84 @@ async function checkRecoversFromABrokenEdit() {
   socket.close()
 }
 
+/**
+ * The generated `sitemap.xml` has to follow the routes that exist right now.
+ *
+ * `dev` writes it into `.ruvyxa/cache/discovery`, a directory that survives
+ * every route change and every restart, through the same function the build
+ * uses to stage `assets/`. That function refused to overwrite an existing file
+ * — correct for staging, where a project's own `public/sitemap.xml` must win,
+ * and wrong here, where the only thing that could already be there is the
+ * function's own output from an older route set. The command a project runs
+ * while working on its SEO answered with a snapshot, and a wrong answer reads
+ * as an answer.
+ */
+async function checkSitemapFollowsTheRoutes() {
+  const before = await text('/sitemap.xml')
+  if (before.response.status !== 200) {
+    fail(`GET /sitemap.xml answered ${before.response.status}`)
+  }
+  if (before.body.includes(addedRoutePath)) {
+    fail(`the sitemap already listed ${addedRoutePath} before the route existed`)
+  }
+  ok('the generated sitemap is served in dev')
+
+  createRoute()
+  if (!(await sitemapListsAddedRoute(true))) {
+    fail(`the sitemap never listed ${addedRoutePath} after the route was added`)
+  }
+  ok('a route added while the server runs reaches the sitemap')
+
+  removeAddedRoute()
+  if (!(await sitemapListsAddedRoute(false))) {
+    fail(`the sitemap still listed ${addedRoutePath} after the route was removed`)
+  }
+  ok('a route removed while the server runs leaves the sitemap')
+}
+
+/**
+ * Poll until the sitemap does or does not list the added route.
+ *
+ * The new page is requested first on every attempt: the sitemap is a static
+ * file the discovery observer writes, so asking for it does not itself make the
+ * server rediscover the routes — a request for a page does.
+ */
+async function sitemapListsAddedRoute(expected) {
+  const deadline = Date.now() + 30_000
+  while (Date.now() < deadline) {
+    const page = await fetch(`${origin}${addedRoutePath}`)
+    await page.arrayBuffer()
+    const { response, body } = await text('/sitemap.xml')
+    if (response.status === 200 && body.includes(`${addedRoutePath}</loc>`) === expected) {
+      return true
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  return false
+}
+
+function createRoute() {
+  mkdirSync(path.dirname(addedRouteFile), { recursive: true })
+  writeFileSync(
+    addedRouteFile,
+    'export default function SmokeSitemapPage() {\n  return <h1>smoke sitemap</h1>\n}\n',
+    'utf8',
+  )
+}
+
+/** Remove the added route and the directory holding it, if they are still there. */
+function removeAddedRoute() {
+  rmSync(path.dirname(addedRouteFile), { force: true, recursive: true })
+}
+
 function checkTreeIsClean() {
   for (const [file, expected] of originals) {
     if (readFileSync(file, 'utf8') !== expected) {
       fail(`${path.relative(appRoot, file)} was left edited`)
     }
+  }
+  if (existsSync(addedRouteFile)) {
+    fail(`${path.relative(appRoot, addedRouteFile)} was left behind`)
   }
   ok('every edited file was restored')
 }
@@ -460,11 +573,46 @@ try {
   checks += 6
   await checkRecoversFromABrokenEdit()
   checks += 3
+  await checkSitemapFollowsTheRoutes()
+  checks += 3
   restoreAll()
   checkTreeIsClean()
   checks += 1
   console.log(`[ok] dev server passed ${checks} checks`)
 } finally {
   restoreAll()
-  child?.kill()
+  removeAddedRoute()
+  await stopDevServer(child)
+}
+
+/**
+ * Stop the dev server and wait for it to actually be gone.
+ *
+ * `child.kill()` alone signals only the process this script spawned. Without
+ * `RUVYXA_CLI` that process is `cargo`, and `ruvyxa dev` is *its* child — so the
+ * server outlived the step, kept `target\debug\ruvyxa.exe` open, and held a
+ * watcher on the fixture while the next CI steps ran. On Windows that surfaces
+ * as an "Access is denied" link failure in a later job, which reads as a flaky
+ * runner rather than as this script.
+ *
+ * So: signal, wait for the exit, and escalate to the process *tree* if the wait
+ * expires.
+ */
+async function stopDevServer(process_) {
+  if (!process_) return
+  process_.kill()
+  const exited = await Promise.race([
+    new Promise((resolve) => process_.once('exit', () => resolve(true))),
+    new Promise((resolve) => setTimeout(() => resolve(false), 2_000)),
+  ])
+  if (exited || process_.pid === undefined) return
+  if (process.platform === 'win32') {
+    spawnSync('taskkill', ['/pid', String(process_.pid), '/T', '/F'], { stdio: 'ignore' })
+  } else {
+    try {
+      process.kill(-process_.pid, 'SIGKILL')
+    } catch {
+      // The group is already gone, which is the outcome we wanted.
+    }
+  }
 }

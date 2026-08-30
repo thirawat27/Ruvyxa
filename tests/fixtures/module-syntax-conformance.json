@@ -196,6 +196,41 @@
       "why": "The expression form, wrapped."
     },
     {
+      "name": "export default of a multi-line template literal",
+      "dependency": "export default `line one\n  indented two\nline three`\n",
+      "entry": "import text from './dep.js'\nexport const value = JSON.stringify(text)\n",
+      "expect": "\"line one\\n  indented two\\nline three\"",
+      "why": "A template contributes no bracket depth, so a collector counting only brackets calls line 0 complete and puts the statement's `;` inside the string. Asserted by value, not by line count, because the injected character does not change the count."
+    },
+    {
+      "name": "export default of a multi-line tagged template",
+      "dependency": "const tag = (s) => s.raw.join('')\nexport default tag`x\n  y`\n",
+      "entry": "import text from './dep.js'\nexport const value = JSON.stringify(text)\n",
+      "expect": "\"x\\n  y\"",
+      "why": "The tag does not move where the literal ends, so the same `;` lands inside it."
+    },
+    {
+      "name": "export default of an object holding a multi-line template",
+      "dependency": "export default { css: `a {\n  color: red;\n}` }\n",
+      "entry": "import shape from './dep.js'\nexport const value = JSON.stringify(shape.css)\n",
+      "expect": "\"a {\\n  color: red;\\n}\"",
+      "why": "The braces balance so every line is collected, and then each is trimmed — which rewrites the author's indentation into the string it exported."
+    },
+    {
+      "name": "a module body's multi-line template literal keeps its own indentation",
+      "dependency": "export const css = `a {\n  color: red;\n}`\n",
+      "entry": "import { css } from './dep.js'\nexport const value = JSON.stringify(css)\n",
+      "expect": "\"a {\\n  color: red;\\n}\"",
+      "why": "Every module body is indented into its wrapper a physical line at a time. A continuation line of a template literal is string content, so the two spaces land in the exported string — silently, because the Rust linker adds the same two and the two halves agree with each other."
+    },
+    {
+      "name": "a backslash-continued string keeps its own indentation",
+      "dependency": "export const s = 'x\\\n  y'\n",
+      "entry": "import { s } from './dep.js'\nexport const value = JSON.stringify(s)\n",
+      "expect": "\"x  y\"",
+      "why": "The other construct whose continuation line is text rather than code. The author's two spaces are the string's; the wrapper's two are not."
+    },
+    {
       "name": "two statements sharing one line",
       "dependency": "export const a = 1; export const b = 2\n",
       "entry": "import { a, b } from './dep.js'\nexport const value = String(a + b)\n",

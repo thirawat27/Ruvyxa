@@ -160,9 +160,13 @@ export default config({
 ```
 
 PWA plugin ใช้ `/manifest.webmanifest`, `/sw.js` และ `/pwa-register.js` โดยปริยาย; path
-ทั้งสามต้องต่างกัน `openApi` ใช้ `/openapi.json` โดยปริยาย, ต้องมี title/version ที่ไม่ว่าง
-และปฏิเสธ method/path กับ `operationId` ที่ซ้ำ รัน production build และตรวจ generated output
-ทุกครั้งที่เพิ่ม build plugin
+ทั้งสามต้องต่างกัน `scope` ต้องอยู่ภายใน directory ของ `serviceWorkerPath` ถ้าไม่ใช่จะถูกปฏิเสธตอน
+config: header `Service-Worker-Allowed` ที่ขยายขอบเขตของ worker ถูกเขียนโดย request handler ของ
+plugin เองเท่านั้น ไม่มีอะไรฝั่ง downstream เขียนให้ ดังนั้น build ที่ publish `sw.js` เป็น asset
+ธรรมดาให้ CDN เสิร์ฟจะ register ผ่านตอน development แล้วพังตอน production ด้วย `SecurityError`
+worker ที่ `/sw.js` อ้าง `/` ได้อยู่แล้ว ค่าปริยายจึงไม่ได้รับผลกระทบ `openApi` ใช้ `/openapi.json`
+โดยปริยาย, ต้องมี title/version ที่ไม่ว่าง และปฏิเสธ method/path กับ `operationId` ที่ซ้ำ รัน
+production build และตรวจ generated output ทุกครั้งที่เพิ่ม build plugin
 
 ## Build artifact ตอน development
 
@@ -226,6 +230,16 @@ export default config({
 ถูกถอดออกจะถอยไปใช้ `Sec-Fetch-Site: same-origin` และถ้าไม่มีทั้งสองอย่างจะ fail closed `webVitals`
 publish client script เป็น build asset แล้วโหลดด้วย `src` จึงไม่บังคับให้ policy `script-src`
 ต้องเปิด `'unsafe-inline'`
+
+ตัวเก็บข้อมูลเป็น `POST` endpoint สาธารณะ จึงมีเพดานกำกับด้วย `rateLimit` มีค่าปริยาย 120
+เรกคอร์ดต่อหนึ่ง client ต่อนาที และห้าสิบเท่าของค่านั้นเมื่อรวมทุก client ส่วน beacon
+ที่เกินเพดานจะได้ `429` งบต่อ client ต้องรู้ว่า client คือใคร และมีแต่ฝั่ง deployment
+เท่านั้นที่รู้ว่าเชื่อ forwarded header ได้หรือไม่ ถ้าอยู่หลัง proxy หรือ platform edge ให้ส่ง
+`clientIp` เข้ามา — `webVitals({ clientIp: (request) => request.headers.get('cf-connecting-ip') })`
+ถ้าไม่ส่งจะไม่มี bucket ต่อ client เหลือแต่เพดานรวมของ endpoint สำหรับเว็บที่ทราฟฟิกสูงให้เพิ่ม
+`rateLimit.max` แทนที่จะลด เพราะเพดานที่แคบพอจะกัน flood ก็แคบพอจะตัด beacon ของ shared egress
+ขนาดใหญ่ทิ้ง ซึ่งทำให้ค่าที่วัดได้เอียงไปทางคนที่ไม่ได้อยู่หลัง NAT และใช้ `rateLimit: false`
+เพื่อปิดทั้งหมดเมื่อมี WAF คุมเพดานให้อยู่แล้ว
 
 ## Content-Security-Policy
 

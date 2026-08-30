@@ -14,8 +14,9 @@
  * - **Emitted code** differing is a real defect and fails this check.
  * - **Build telemetry** (`cacheHits`, `durationMs`, and the rest of the fields
  *   `ruvyxa bench` reads) describes how the build *ran*. It varies with cache
- *   state and scheduling by design, and it currently sits inside
- *   `client/manifest.json` alongside deployment data.
+ *   state and scheduling by design, and it currently sits inside the client
+ *   build report — `client-report.json` at the build root — alongside the
+ *   module graph and the rest of the data that describes the build machine.
  * - **Prerendered HTML** differing usually means the page itself renders a
  *   clock or a random value. That is the application's nondeterminism, not the
  *   framework's, so it is reported without failing.
@@ -36,11 +37,31 @@ import { fileURLToPath } from 'node:url'
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
 /**
- * Fields `ruvyxa bench` reads out of the client manifest.
+ * Fields that record how a build ran rather than what it produced.
  *
- * Kept in step with `TELEMETRY_FIELDS` in `crates/ruvyxa_cli/src/bench.rs`.
+ * `crates/ruvyxa_cli/src/bench.rs` declares a list under the same name, and a
+ * comment here used to claim the two were kept in step. They were not — nine
+ * entries against five — and nothing could see the pair, because the
+ * cross-language constants scan did not reach `scripts/`. It does now, and the
+ * two are registered as `unrelated` with the reason spelled out there, because
+ * they are two removal strategies for two different comparisons:
+ *
+ * - `bench.rs` normalizes the client build report — `client-report.json` at the
+ *   build root — across a *cold* and a *warm* build, and removes the entire
+ *   `cache` object, so the counters inside it (`graphHits`, `hits`, `misses`)
+ *   never need naming. It does not read `build.json`, so `createdAtUnix` is not
+ *   its problem.
+ * - This script compares two *cold* builds across every emitted JSON file. It
+ *   keeps the `cache` object — a deployed build reads it — so each counter is
+ *   named here, and `build.json`'s wall-clock stamp is in reach and stripped.
+ *
+ * The one direction that is a defect rather than a difference is this list
+ * failing to cover the Rust one: a field `bench.rs` calls telemetry describes
+ * how a build ran whichever comparison is asking.
+ * `tests/packages/ruvyxa/verify-reproducible-telemetry.test.mjs` reads both
+ * sources and holds that direction.
  */
-const TELEMETRY_FIELDS = new Set([
+export const TELEMETRY_FIELDS = new Set([
   'artifactCacheHit',
   'cacheHit',
   'cacheHits',
@@ -59,14 +80,14 @@ const TELEMETRY_FIELDS = new Set([
  * listed one by one — `build.json` carries a whole `timing` object of them and
  * a new phase should not silently start failing this check.
  */
-function isTelemetryField(key) {
+export function isTelemetryField(key) {
   return TELEMETRY_FIELDS.has(key) || key.endsWith('Ms')
 }
 
 /** Emitted trees that are build state rather than deployable output. */
 const SKIPPED_DIRECTORIES = ['cache/']
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const options = { root: 'examples/demo', keep: false, strict: false }
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
@@ -118,7 +139,7 @@ function fingerprint(outDir) {
 }
 
 /** Recursively drop every known telemetry field so the rest can be compared. */
-function withoutTelemetry(value) {
+export function withoutTelemetry(value) {
   if (Array.isArray(value)) return value.map(withoutTelemetry)
   if (value && typeof value === 'object') {
     const stripped = {}
@@ -137,7 +158,7 @@ function withoutTelemetry(value) {
  * Returns false for anything that is not JSON, or that still differs — those
  * are real artifact differences.
  */
-function differsOnlyInTelemetry(file, before, after) {
+export function differsOnlyInTelemetry(file, before, after) {
   if (!file.endsWith('.json')) return false
   try {
     const a = withoutTelemetry(JSON.parse(before.toString('utf8')))
@@ -256,9 +277,14 @@ function main() {
   process.exitCode = 1
 }
 
-try {
-  main()
-} catch (error) {
-  console.error(`verify-reproducible: ${error instanceof Error ? error.message : error}`)
-  process.exitCode = 1
+// Running the file builds the project twice; importing it hands the telemetry
+// classifier and the argument parser to a test. Nothing may run on import —
+// two cargo builds are not a side effect a test file can absorb.
+if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === import.meta.filename) {
+  try {
+    main()
+  } catch (error) {
+    console.error(`verify-reproducible: ${error instanceof Error ? error.message : error}`)
+    process.exitCode = 1
+  }
 }

@@ -187,7 +187,40 @@ const ACTION_RATE_LIMIT_MAX: usize = 600;
 const ACTION_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 pub const MAX_ACTION_RATE_LIMIT_REQUESTS: usize = 10_000;
 pub const MAX_ACTION_RATE_LIMIT_WINDOW_SECS: u64 = 86_400;
-const SERVER_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+/// How long in-flight work may finish after a shutdown signal, before the
+/// remaining connections are dropped.
+///
+/// The standalone host's default, read from the same `RUVYXA_SHUTDOWN_GRACE`,
+/// so one project is bounded the same way under `ruvyxa start` as it is under
+/// its own build. It was 5 s here and 25 s there, which cut a six-second render
+/// off on one host and let it finish on the other. Platforms send SIGTERM and
+/// then SIGKILL after their own grace period — commonly 30 s — so this stays
+/// under the usual floor.
+const SERVER_SHUTDOWN_GRACE: Duration = Duration::from_secs(25);
+
+/// How long the host keeps accepting, and answering, after a shutdown signal
+/// before it stops accepting.
+///
+/// Closing the listener on the tick the drain flag is set makes the draining
+/// status unreachable: a readiness probe is by definition a fresh connection,
+/// so it is refused rather than told to stop routing here, and everything the
+/// orchestrator sends while it is still deregistering fails instead of being
+/// retried against another instance. `standalone-server.ts` fixed exactly this
+/// and the fix landed only on the JavaScript side.
+const SERVER_DRAIN_DELAY: Duration = Duration::from_secs(5);
+
+/// Waiters allowed per admitted request before the host sheds load.
+///
+/// The standalone host's ratio, for the standalone host's reason: four waiters
+/// per slot absorbs an ordinary burst, and past that a caller is told to come
+/// back rather than being parked on memory this process would have to keep.
+const ADMISSION_QUEUE_PER_SLOT: usize = 4;
+
+/// The floor and ceiling on the default admission width.
+///
+/// A render is CPU-bound, so admitting more than the machine can run only slows
+/// down the ones already going; the same two bounds the standalone host uses.
+const ADMISSION_DEFAULT_BOUNDS: std::ops::RangeInclusive<usize> = 2..=8;
 
 /// JavaScript runtime used for Ruvyxa's config, render, and plugin processes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -643,6 +676,8 @@ pub(crate) struct AppState {
     worker_pool: Arc<NodeWorkerPool>,
     render_cache: Arc<RenderCache>,
     isr_revalidating: render_pipeline::IsrRevalidationSet,
+    /// One render per cache key, however many requests are asking for it.
+    single_flight: Arc<render_pipeline::RenderSingleFlight>,
     hmr_tracker: Arc<HmrTracker>,
     plugin_runtime: Option<Arc<PluginHost>>,
     realtime: Option<RealtimeRuntime>,
@@ -956,28 +991,40 @@ impl RuntimeCache {
 
     /// The stylesheet URL `ruvyxa build` recorded, read once per cache
     /// generation rather than per request.
+    ///
+    /// The generation is captured in the read-lock block, before the manifest
+    /// is read, exactly as `asset_links` does. It used to be read from inside
+    /// the write lock it was about to write through, which made
+    /// `insert_if_current` a tautology — a guard that cannot refuse anything.
     async fn built_style_asset(&self, config: &ServerConfig) -> Option<Arc<str>> {
-        {
-            let cached = self.style_asset.read().await;
+        loop {
+            let generation = {
+                let cached = self.style_asset.read().await;
+                if let Some(value) = cached.value.as_ref() {
+                    return value.clone();
+                }
+                cached.generation
+            };
+
+            let manifest_path = config.client_dir.join("route-manifest.json");
+            let discovered = tokio::task::spawn_blocking(move || {
+                let source = std::fs::read(&manifest_path).ok()?;
+                let manifest: serde_json::Value = serde_json::from_slice(&source).ok()?;
+                let url = manifest.get("styles")?.as_array()?.first()?.as_str()?;
+                Some(Arc::<str>::from(url))
+            })
+            .await
+            .ok()
+            .flatten();
+
+            let mut cached = self.style_asset.write().await;
             if let Some(value) = cached.value.as_ref() {
                 return value.clone();
             }
+            if cached.insert_if_current(generation, discovered.clone()) {
+                return discovered;
+            }
         }
-        let manifest_path = config.client_dir.join("route-manifest.json");
-        let discovered = tokio::task::spawn_blocking(move || {
-            let source = std::fs::read(&manifest_path).ok()?;
-            let manifest: serde_json::Value = serde_json::from_slice(&source).ok()?;
-            let url = manifest.get("styles")?.as_array()?.first()?.as_str()?;
-            Some(Arc::<str>::from(url))
-        })
-        .await
-        .ok()
-        .flatten();
-
-        let mut cached = self.style_asset.write().await;
-        let generation = cached.generation;
-        cached.insert_if_current(generation, discovered.clone());
-        discovered
     }
 
     async fn styles(&self, config: &ServerConfig) -> Result<String> {
@@ -1050,10 +1097,17 @@ impl RuntimeCache {
         intersects
     }
 
+    /// Every slot, including `style_asset`.
+    ///
+    /// `style_asset` was left out, so a `ruvyxa start` that was redeployed in
+    /// place went on linking the stylesheet URL from the manifest the previous
+    /// build wrote — and its generation, never moving off zero, hid that
+    /// `built_style_asset`'s staleness guard could not refuse anything either.
     fn invalidate(&self) {
         // Use blocking_write for sync context (file watcher callback)
         self.routes.blocking_write().invalidate();
         self.styles.blocking_write().invalidate();
+        self.style_asset.blocking_write().invalidate();
         self.asset_links.blocking_write().invalidate();
         self.client_routes.blocking_write().invalidate();
     }
@@ -1062,6 +1116,7 @@ impl RuntimeCache {
     async fn invalidate_async(&self) {
         self.routes.write().await.invalidate();
         self.styles.write().await.invalidate();
+        self.style_asset.write().await.invalidate();
         self.asset_links.write().await.invalidate();
         self.client_routes.write().await.invalidate();
     }
@@ -1179,10 +1234,27 @@ async fn start_plugin_runtime(config: &ServerConfig) -> Result<Option<Arc<Plugin
 /// Registering over a reserved framework route would panic inside axum's
 /// router, so a bad descriptor has to become a diagnostic before the route
 /// table is built.
+///
+/// The alphabet is an allowlist, not a denylist, because a denylist is only
+/// correct while it tracks the router's own syntax and nothing makes it. This
+/// rejected `?`, `#`, and `*` — the axum 0.7 wildcard set — long after the
+/// workspace moved to axum 0.8, where a capture is `{name}` and a catch-all
+/// `{*rest}`: `/{room}` passed and registered a single-segment wildcard that
+/// shadowed every one-segment project page, and `/{` passed and panicked
+/// `matchit` inside `Router::route`, which is precisely the outcome this
+/// function exists to prevent. One or more `/`-prefixed segments of RFC 3986
+/// unreserved characters is a literal path in every router version and can
+/// never acquire a meaning.
+///
+/// `packages/ruvyxa/runtime/plugin-http.mjs` decides the same question first,
+/// inside the plugin host, and the two are held level by `transportPaths` in
+/// `tests/fixtures/framework-endpoint-conformance.json`.
 fn validate_socket_path(path: &str, kind: &str) -> Result<()> {
-    if !path.starts_with('/') || path.contains(['?', '#', '*']) {
+    if !is_literal_transport_path(path) {
         return Err(RuvyxaError::Message(format!(
-            "RUV1701 TypeScript plugin host returned invalid {kind} configuration"
+            "RUV1701 TypeScript plugin host returned invalid {kind} configuration: \
+             path {path:?} must be one or more `/`-prefixed segments of letters, \
+             digits, `-`, `.`, `_`, or `~`"
         )));
     }
     if RESERVED_FRAMEWORK_ROUTES.contains(&path) {
@@ -1191,6 +1263,22 @@ fn validate_socket_path(path: &str, kind: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// One or more `/`-prefixed segments of RFC 3986 unreserved characters.
+///
+/// The twin of `isLiteralTransportPath` in
+/// `packages/ruvyxa/runtime/plugin-http.mjs`.
+fn is_literal_transport_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix('/') else {
+        return false;
+    };
+    rest.split('/').all(|segment| {
+        !segment.is_empty()
+            && segment.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
+            })
+    })
 }
 
 /// Build the realtime transport a plugin declared, if any.
@@ -1291,6 +1379,158 @@ fn assert_transport_paths_distinct(
     Ok(())
 }
 
+/// How many page requests may run at once, and how many may wait.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AdmissionLimits {
+    concurrency: usize,
+    queue: usize,
+}
+
+/// The semaphore and waiter count one host shares across every connection.
+///
+/// Nothing bounded this. Every request that arrived got a render started for
+/// it, so a burst larger than the machine turned into unbounded queueing:
+/// latency grew without limit, nothing was refused, and `/__ruvyxa/health` kept
+/// answering `200` because it does not read queue depth. The same application
+/// deployed through a self-hosted adapter sheds load correctly — this is that
+/// controller, on the host that was missing it.
+#[derive(Clone)]
+struct AdmissionControl {
+    permits: Arc<tokio::sync::Semaphore>,
+    waiting: Arc<std::sync::atomic::AtomicUsize>,
+    limits: AdmissionLimits,
+}
+
+impl AdmissionControl {
+    fn new(limits: AdmissionLimits) -> Self {
+        Self {
+            permits: Arc::new(tokio::sync::Semaphore::new(limits.concurrency)),
+            waiting: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            limits,
+        }
+    }
+
+    /// Take a slot, or refuse. `None` means the queue is full.
+    ///
+    /// The waiter count is raised before the wait and lowered after it, so the
+    /// queue bounds requests parked on memory this process would have to keep
+    /// rather than requests it is actually working on.
+    async fn acquire(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        use std::sync::atomic::Ordering;
+
+        if let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() {
+            return Some(permit);
+        }
+        if self.waiting.fetch_add(1, Ordering::SeqCst) >= self.limits.queue {
+            self.waiting.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        let permit = Arc::clone(&self.permits).acquire_owned().await.ok();
+        self.waiting.fetch_sub(1, Ordering::SeqCst);
+        permit
+    }
+}
+
+/// The answer to a request this host has decided not to start.
+///
+/// `503` and not `500`: nothing failed, the server declined to begin, and a
+/// caller that retries may well be served. `Retry-After` says so in the one
+/// place a proxy reads. The same body and headers the standalone host sends,
+/// so a client sees one answer whichever host is in front of it.
+fn admission_refused() -> Response {
+    use axum::http::{HeaderValue, header};
+
+    let mut response = (StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable").into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    headers.insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+/// Take a slot, run the request, and give the slot back.
+///
+/// The slot is released when the **response** exists, not when its body has
+/// finished — the same boundary the standalone host uses, and for the same
+/// reason: a server-sent-event stream holds its body open for hours, and a slot
+/// held that long would take the pool down to nothing after a handful of
+/// subscribers. What is being bounded is the render, which is the part that
+/// competes for the CPU.
+async fn admit(
+    control: AdmissionControl,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let Some(_permit) = control.acquire().await else {
+        warn!(
+            concurrency = control.limits.concurrency,
+            queue = control.limits.queue,
+            path = %request.uri().path(),
+            "refused: admission queue is full"
+        );
+        return admission_refused();
+    };
+    next.run(request).await
+}
+
+/// Read a positive count from an environment value, mirroring the standalone
+/// host's `positiveNumber`: anything absent, unparseable, or non-positive falls
+/// back rather than turning a typo into a limit of zero.
+fn positive_count(raw: Option<&str>) -> Option<usize> {
+    let value = raw?.trim().parse::<f64>().ok()?;
+    (value.is_finite() && value > 0.0).then(|| value.trunc() as usize)
+}
+
+/// The machine's share of cores, bounded, as the default admission width.
+fn default_admission_concurrency() -> usize {
+    std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(*ADMISSION_DEFAULT_BOUNDS.start())
+        .clamp(
+            *ADMISSION_DEFAULT_BOUNDS.start(),
+            *ADMISSION_DEFAULT_BOUNDS.end(),
+        )
+}
+
+/// Resolve `RUVYXA_MAX_CONCURRENCY` / `RUVYXA_MAX_QUEUE`, or `None` for "off".
+///
+/// `RUVYXA_MAX_CONCURRENCY=0` turns admission off for a deployment that has
+/// something else in front of it doing this, and `ruvyxa dev` defaults to off:
+/// one developer with a browser is not a load event, and a refused request in
+/// the middle of an edit loop looks like a broken framework.
+fn resolve_admission_limits(
+    concurrency: Option<&str>,
+    queue: Option<&str>,
+    watch: bool,
+) -> Option<AdmissionLimits> {
+    let default_concurrency = if watch {
+        0
+    } else {
+        default_admission_concurrency()
+    };
+    let concurrency = match concurrency.map(str::trim) {
+        Some("0") => 0,
+        other => positive_count(other).unwrap_or(default_concurrency),
+    };
+    if concurrency == 0 {
+        return None;
+    }
+    let queue = positive_count(queue).unwrap_or(concurrency * ADMISSION_QUEUE_PER_SLOT);
+    Some(AdmissionLimits { concurrency, queue })
+}
+
+fn admission_control(config: &ServerConfig) -> Option<AdmissionControl> {
+    resolve_admission_limits(
+        std::env::var("RUVYXA_MAX_CONCURRENCY").ok().as_deref(),
+        std::env::var("RUVYXA_MAX_QUEUE").ok().as_deref(),
+        config.watch,
+    )
+    .map(AdmissionControl::new)
+}
+
 /// Assemble the route table: framework endpoints, the optional transports, then
 /// the page fallback.
 ///
@@ -1300,7 +1540,6 @@ fn build_app_router(config: &ServerConfig, state: Arc<AppState>) -> Router {
     let realtime_path = state.realtime.as_ref().map(|runtime| runtime.path.clone());
     let presence_path = state.presence.as_ref().map(|runtime| runtime.path.clone());
     let mut app = Router::new()
-        .route("/__ruvyxa/hmr", get(hmr_ws))
         .route("/__ruvyxa/client", get(client_bundle))
         .route("/__ruvyxa/hydration-loader.js", get(hydration_loader))
         .route("/__ruvyxa/client/route-manifest.json", get(client_manifest))
@@ -1326,7 +1565,15 @@ fn build_app_router(config: &ServerConfig, state: Arc<AppState>) -> Router {
                 .layer(DefaultBodyLimit::max(1_024)),
         );
     if config.watch {
+        // Dev-only surface, gated at registration. `/__ruvyxa/hmr` was
+        // registered here unconditionally while the endpoint contract recorded
+        // it `"native": "dev"`, so a production `ruvyxa start` let any
+        // unauthenticated client open unbounded WebSockets that carry nothing,
+        // are never heartbeated, and are never timed out. It stays in
+        // `RESERVED_FRAMEWORK_ROUTES`, so `validate_socket_path` keeps refusing
+        // a plugin transport on the path in both modes.
         app = app
+            .route("/__ruvyxa/hmr", get(hmr_ws))
             .route("/__ruvyxa/devtools", get(devtools_dashboard))
             .route("/__ruvyxa/devtools/data", get(devtools_data));
     }
@@ -1336,7 +1583,40 @@ fn build_app_router(config: &ServerConfig, state: Arc<AppState>) -> Router {
     if let Some(path) = presence_path {
         app = app.route(&path, get(presence_ws));
     }
-    app.fallback(handle_request).with_state(state)
+
+    let page = Router::new()
+        .fallback(handle_request)
+        .with_state(Arc::clone(&state));
+    compose_app_router(app, page, admission_control(config)).with_state(state)
+}
+
+/// Put the page fallback behind admission and the framework routes in front.
+///
+/// Admission stands in front of the page fallback and nothing else, so
+/// `/__ruvyxa/health` is answered before it. A probe that queues behind the
+/// renders it exists to report on says "unhealthy" exactly when the process is
+/// merely busy, and the orchestrator restarts something that was working.
+///
+/// This is a function rather than four lines inside [`build_app_router`] so the
+/// saturation test can drive the composition this host actually runs. A test
+/// that assembles its own router asserts a shape nothing holds the real one to,
+/// and the one line that matters here is which of the two routers the layer
+/// lands on.
+fn compose_app_router<S>(
+    framework: Router<S>,
+    page: Router,
+    admission: Option<AdmissionControl>,
+) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    let page = match admission {
+        Some(control) => page.layer(axum::middleware::from_fn(move |request, next| {
+            admit(control.clone(), request, next)
+        })),
+        None => page,
+    };
+    framework.fallback_service(page)
 }
 
 /// Resolve the configured host and port into one socket address.
@@ -1414,6 +1694,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         worker_pool: worker_pool.clone(),
         render_cache,
         isr_revalidating: Arc::new(std::sync::Mutex::new(HashSet::new())),
+        single_flight: Arc::default(),
         hmr_tracker,
         plugin_runtime,
         realtime,
@@ -1465,11 +1746,66 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     }
     print_server_ready(&config, &manifest, bound_address, startup_started.elapsed());
     print_native_only_capabilities(&native_only);
-    let server_result = serve_until_shutdown(listeners, app, draining).await;
+    let server_result = serve_until_shutdown(
+        listeners,
+        app,
+        draining,
+        ShutdownTiming::from_env(config.watch),
+    )
+    .await;
 
     worker_pool.shutdown().await;
     server_result?;
     Ok(())
+}
+
+/// The two shutdown windows this host observes, resolved once at startup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ShutdownTiming {
+    /// How long in-flight work may finish once the listeners stop accepting.
+    grace: Duration,
+    /// How long the listeners keep accepting after the drain flag is raised.
+    drain_delay: Duration,
+}
+
+impl ShutdownTiming {
+    fn from_env(watch: bool) -> Self {
+        Self::resolve(
+            std::env::var("RUVYXA_SHUTDOWN_GRACE").ok().as_deref(),
+            std::env::var("RUVYXA_DRAIN_DELAY").ok().as_deref(),
+            watch,
+        )
+    }
+
+    /// Both windows are milliseconds, spelled the way `standalone-server.ts`
+    /// spells them, because they are the same two variables on the same
+    /// deployment. The delay is capped at half the grace so in-flight work
+    /// keeps a budget of its own however the two are configured, and
+    /// `RUVYXA_DRAIN_DELAY=0` closes straight away — which is right where
+    /// nothing is load-balancing this process, and is the default under
+    /// `ruvyxa dev`, where a five-second wait on Ctrl-C reads as a hang.
+    fn resolve(grace: Option<&str>, drain: Option<&str>, watch: bool) -> Self {
+        let grace = positive_millis(grace).unwrap_or(SERVER_SHUTDOWN_GRACE);
+        let default_delay = if watch {
+            Duration::ZERO
+        } else {
+            SERVER_DRAIN_DELAY
+        };
+        let drain_delay = match drain.map(str::trim) {
+            Some("0") => Duration::ZERO,
+            other => positive_millis(other).unwrap_or(default_delay),
+        };
+        Self {
+            grace,
+            drain_delay: drain_delay.min(grace / 2),
+        }
+    }
+}
+
+/// Read a positive millisecond duration from an environment value.
+fn positive_millis(raw: Option<&str>) -> Option<Duration> {
+    let value = raw?.trim().parse::<f64>().ok()?;
+    (value.is_finite() && value > 0.0).then(|| Duration::from_secs_f64(value / 1_000.0))
 }
 
 /// Accept connections until a termination signal arrives, then drain.
@@ -1481,7 +1817,29 @@ async fn serve_until_shutdown(
     listeners: Vec<tokio::net::TcpListener>,
     app: Router,
     draining: Arc<std::sync::atomic::AtomicBool>,
+    timing: ShutdownTiming,
 ) -> std::io::Result<()> {
+    serve_with_signals(listeners, app, draining, timing, shutdown_signal).await
+}
+
+/// The body of [`serve_until_shutdown`], with the signal source as a parameter.
+///
+/// `signal` is called once per signal awaited: the first ends the serving
+/// phase, and a second — an operator pressing Ctrl-C twice, or a platform
+/// escalating — means now, and must not be held for a window that exists for a
+/// load balancer. A test can hand this an ordinary channel; nothing else about
+/// the sequence changes.
+async fn serve_with_signals<Signal, Wait>(
+    listeners: Vec<tokio::net::TcpListener>,
+    app: Router,
+    draining: Arc<std::sync::atomic::AtomicBool>,
+    timing: ShutdownTiming,
+    mut signal: Signal,
+) -> std::io::Result<()>
+where
+    Signal: FnMut() -> Wait,
+    Wait: std::future::Future<Output = &'static str>,
+{
     let (shutdown_tx, _) = tokio::sync::watch::channel(false);
     // One server per address the host answers to, over one router. They share
     // the shutdown channel, so a signal drains all of them together rather than
@@ -1501,22 +1859,61 @@ async fn serve_until_shutdown(
     let servers = drain_servers(servers);
     tokio::pin!(servers);
 
+    let first = tokio::select! {
+        result = &mut servers => return result,
+        signal = signal() => signal,
+    };
+    info!(
+        signal = first,
+        drain_delay_ms = timing.drain_delay.as_millis() as u64,
+        "draining Ruvyxa server connections"
+    );
+    // Before the listeners stop accepting, so a probe on a connection that is
+    // already open learns this too rather than only the ones that fail to
+    // connect afterwards.
+    draining.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    let forced = await_drain_window(timing.drain_delay, &mut signal).await;
+    let _ = shutdown_tx.send(true);
+    if forced {
+        return Ok(());
+    }
     tokio::select! {
-        result = &mut servers => result,
-        signal = shutdown_signal() => {
-            info!(signal, "shutting down Ruvyxa server");
-            // Before the listeners stop accepting, so a probe on a connection
-            // that is already open learns this too rather than only the ones
-            // that fail to connect afterwards.
-            draining.store(true, std::sync::atomic::Ordering::Relaxed);
-            let _ = shutdown_tx.send(true);
-            match tokio::time::timeout(SERVER_SHUTDOWN_GRACE, &mut servers).await {
-                Ok(result) => result,
-                Err(_) => {
-                    warn!("server shutdown timed out; closing remaining connections");
-                    Ok(())
-                }
+        result = tokio::time::timeout(timing.grace, &mut servers) => match result {
+            Ok(result) => result,
+            Err(_) => {
+                warn!("server shutdown timed out; closing remaining connections");
+                Ok(())
             }
+        },
+        second = signal() => {
+            warn!(signal = second, "shutdown forced; closing remaining connections");
+            Ok(())
+        }
+    }
+}
+
+/// Keep serving for the drain window. `true` means a second signal cut it short.
+///
+/// The host is still listening, and still answering, for this whole window: the
+/// readiness probe opens a fresh connection, reads the `503`, and stops routing
+/// here before the socket goes away. Raising the drain flag and closing the
+/// listener on the same tick made that answer unreachable — the probe got
+/// `ECONNREFUSED`, and everything the orchestrator was still sending failed in a
+/// browser instead of being retried against another instance.
+async fn await_drain_window<Signal, Wait>(delay: Duration, signal: &mut Signal) -> bool
+where
+    Signal: FnMut() -> Wait,
+    Wait: std::future::Future<Output = &'static str>,
+{
+    if delay.is_zero() {
+        return false;
+    }
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => false,
+        second = signal() => {
+            warn!(signal = second, "shutdown forced; ending the drain window");
+            true
         }
     }
 }
@@ -1708,6 +2105,31 @@ fn request_body_too_large(error: impl std::fmt::Display) -> Response {
     response
 }
 
+/// The request target the plugin stage is handed.
+///
+/// A plugin hook is scoped by path, and the JavaScript registry answers "does
+/// this hook apply?" against whatever path string arrives here. The router
+/// answers the same question against the canonical segment form, so handing
+/// over the raw request line gave the two stages different answers: `//api/x`
+/// routed to `/api/x` and read as out of scope for `['/api/*']`, which is the
+/// default scope of `originGuard()`. A cross-site form POST to that address
+/// reached the handler with the session cookie and no guard ran.
+///
+/// The query string is carried over untouched. It is not part of the scoping
+/// decision, but this target becomes the request target for the rest of the
+/// pipeline once a plugin has run, so dropping it would drop every query
+/// parameter for any project with request middleware.
+///
+/// Held to `tests/fixtures/plugin-path-scope-conformance.json` together with
+/// the deployed host, which makes the same decision inside
+/// `packages/ruvyxa/runtime/plugin-http.mjs`.
+fn plugin_request_target(request_path: &str, request_target: &str) -> String {
+    match request_target.split_once('?') {
+        Some((_, query)) => format!("{request_path}?{query}"),
+        None => request_path.to_string(),
+    }
+}
+
 async fn handle_request(
     State(state): State<Arc<AppState>>,
     request: Request<Body>,
@@ -1757,7 +2179,7 @@ async fn handle_request(
     {
         let initial_request = PluginHttpRequest {
             method: method.clone(),
-            path: request_target.clone(),
+            path: plugin_request_target(&request_path, &request_target),
             headers: headers_to_plugin_pairs(&headers),
             body_base64: request_body.as_deref().map(encode_plugin_body),
         };
@@ -1823,7 +2245,7 @@ async fn handle_request(
                     let body = if is_dev {
                         dev_error_overlay(&error.to_string(), None, None, None)
                     } else {
-                        plain_error_page("Internal server error")
+                        plain_error_page(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
                     };
                     html_response(StatusCode::INTERNAL_SERVER_ERROR, body)
                 }
@@ -1840,7 +2262,7 @@ async fn handle_request(
     {
         let request_payload = plugin_request.unwrap_or_else(|| PluginHttpRequest {
             method: method.clone(),
-            path: request_target.clone(),
+            path: plugin_request_target(&request_path, &request_target),
             headers: headers_to_plugin_pairs(&headers),
             body_base64: request_body.as_deref().map(encode_plugin_body),
         });
@@ -2050,6 +2472,583 @@ mod tests {
         }
     }
 
+    /// Both hosts answer `transportPaths` the same way.
+    ///
+    /// The JavaScript half is replayed by
+    /// `tests/packages/ruvyxa/framework-endpoints.test.mjs`. This half matters
+    /// more, because a path the plugin host let through does not produce a
+    /// diagnostic here: it panics `matchit` inside `Router::route`, before the
+    /// server can report anything.
+    #[test]
+    fn a_transport_path_is_accepted_or_refused_as_the_contract_says() {
+        let contract: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/framework-endpoint-conformance.json"
+        ))
+        .expect("the framework endpoint contract must be valid JSON");
+
+        let cases = contract["transportPaths"]
+            .as_array()
+            .expect("transportPaths must be an array");
+        assert!(
+            !cases.is_empty(),
+            "the transport path table must not be empty"
+        );
+
+        for case in cases {
+            let path = case["path"].as_str().expect("every case must have a path");
+            let valid = case["valid"]
+                .as_bool()
+                .expect("every case must state whether it is valid");
+            let why = case["why"].as_str().unwrap_or("");
+
+            for kind in ["realtime", "presence"] {
+                let accepted = validate_socket_path(path, kind).is_ok();
+                assert_eq!(
+                    accepted, valid,
+                    "validate_socket_path({path:?}, {kind:?}) answered {accepted}, \
+                     the contract says {valid}: {why}"
+                );
+            }
+        }
+    }
+
+    /// The crate sources this test family reads, keyed by top-level function.
+    ///
+    /// Read from the source for the same reason
+    /// `every_contract_endpoint_is_registered_on_the_native_router` does: axum
+    /// cannot enumerate its own paths, and a `ServerConfig` needs a project on
+    /// disk. Every item here is at column zero in rustfmt's output, so a
+    /// signature line starts with no indentation and the body ends at the
+    /// first line that is exactly `}`.
+    fn crate_function_bodies() -> std::collections::HashMap<String, String> {
+        const SOURCES: [&str; 4] = [
+            include_str!("lib.rs"),
+            include_str!("framework_endpoints.rs"),
+            include_str!("realtime_endpoints.rs"),
+            include_str!("action_security.rs"),
+        ];
+
+        let mut bodies = std::collections::HashMap::new();
+        for source in SOURCES {
+            let mut current: Option<(String, String)> = None;
+            for line in source.lines() {
+                if let Some((_, body)) = current.as_mut() {
+                    body.push_str(line);
+                    body.push('\n');
+                    if line == "}" {
+                        let (name, body) = current.take().expect("a function was being read");
+                        bodies.insert(name, body);
+                    }
+                    continue;
+                }
+                if line.starts_with(char::is_whitespace) {
+                    continue;
+                }
+                let Some((_, rest)) = line.split_once("fn ") else {
+                    continue;
+                };
+                let name = rest
+                    .split(['(', '<'])
+                    .next()
+                    .expect("split always yields one element");
+                if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    continue;
+                }
+                current = Some((name.to_string(), format!("{line}\n")));
+            }
+        }
+        bodies
+    }
+
+    /// Functions that decide something on `config.watch`, and their callers.
+    ///
+    /// `/__ruvyxa/trace` is gated in its handler rather than at registration,
+    /// and the guard is one call away — `debug_traces_enabled`. Closing over
+    /// callers rather than callees is what makes that count and keeps a plain
+    /// helper like `with_security_headers` out: a function is guarded when it
+    /// *calls* a guarded one, never when a guarded one calls it.
+    fn watch_guarded_functions(
+        bodies: &std::collections::HashMap<String, String>,
+    ) -> std::collections::HashSet<String> {
+        let mut guarded = bodies
+            .iter()
+            .filter(|(_, body)| body.contains("config.watch"))
+            .map(|(name, _)| name.clone())
+            .collect::<std::collections::HashSet<_>>();
+        loop {
+            let grown = bodies
+                .iter()
+                .filter(|(name, _)| !guarded.contains(*name))
+                .filter(|(_, body)| {
+                    guarded
+                        .iter()
+                        .any(|name| body.contains(&format!("{name}(")))
+                })
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>();
+            if grown.is_empty() {
+                return guarded;
+            }
+            guarded.extend(grown);
+        }
+    }
+
+    /// The `.route(…)` call whose argument list contains `at`.
+    ///
+    /// A route path never contains a parenthesis, so balancing them is exact
+    /// here and stays exact when rustfmt breaks an entry across lines.
+    fn route_call_around(router: &str, at: usize) -> &str {
+        let opened = router[..at]
+            .rfind(".route(")
+            .expect("the path must sit inside a .route( call")
+            + ".route".len();
+        let mut depth = 0usize;
+        for (offset, character) in router[opened..].char_indices() {
+            match character {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &router[opened..=opened + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("the .route( call around byte {at} is never closed");
+    }
+
+    /// No endpoint the contract marks `dev` is served by a production host.
+    ///
+    /// `native: "dev"` was honoured three different ways — devtools at
+    /// registration, `/__ruvyxa/trace` in the handler, and `/__ruvyxa/hmr`
+    /// nowhere. `every_contract_endpoint_is_registered_on_the_native_router`
+    /// asserts only that a contract endpoint *is* registered, so the one
+    /// endpoint that was never gated at all was invisible to the gate that
+    /// existed: `ruvyxa start` accepted unauthenticated WebSocket upgrades on
+    /// `/__ruvyxa/hmr` that carry nothing, are never heartbeated, and are never
+    /// timed out. This is the other direction — a `dev` endpoint has to be
+    /// registered under `if config.watch {`, or handled by a function that
+    /// reaches a `config.watch` guard.
+    #[test]
+    fn no_dev_only_endpoint_is_served_in_production() {
+        let contract: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/framework-endpoint-conformance.json"
+        ))
+        .expect("the framework endpoint contract must be valid JSON");
+        let source = include_str!("lib.rs");
+        let (_, router) = source
+            .split_once("fn build_app_router(")
+            .expect("build_app_router must exist");
+        let router = router
+            .split_once("\nfn ")
+            .map_or(router, |(function, _)| function);
+        let gate = router
+            .find("if config.watch {")
+            .expect("build_app_router must gate its dev-only routes on config.watch");
+
+        let bodies = crate_function_bodies();
+        let guarded = watch_guarded_functions(&bodies);
+
+        for endpoint in contract["endpoints"]
+            .as_array()
+            .expect("endpoints must be an array")
+        {
+            if endpoint["native"].as_str() != Some("dev") {
+                continue;
+            }
+            let path = endpoint["path"].as_str().expect("path must be a string");
+            let quoted = format!("\"{path}\"");
+            let at = router.find(&quoted).unwrap_or_else(|| {
+                panic!("{path} is marked native: dev but build_app_router never registers it")
+            });
+            if at > gate {
+                continue;
+            }
+
+            // Registered in every mode, so the handlers have to carry the gate.
+            // The entry is the `.route(…)` call around the path, read by
+            // balancing its parentheses — a window ending at the next `.route(`
+            // swallows the comments after the last entry in the chain.
+            let entry = route_call_around(router, at);
+            let handlers = entry
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .filter(|word| bodies.contains_key(*word))
+                .collect::<Vec<_>>();
+            assert!(
+                !handlers.is_empty(),
+                "{path} is registered outside the config.watch block and no handler \
+                 for it could be read out of the route chain"
+            );
+            for handler in handlers {
+                assert!(
+                    guarded.contains(handler),
+                    "{path} is marked native: dev, is registered outside the \
+                     `if config.watch {{` block, and {handler} has no config.watch \
+                     guard, so a production `ruvyxa start` serves a dev endpoint"
+                );
+            }
+        }
+    }
+
+    /// The two shutdown windows, and what each environment value means.
+    ///
+    /// Milliseconds, and the same two variable names, because these are the
+    /// same two knobs on the same deployment as `standalone-server.ts`.
+    #[test]
+    fn shutdown_windows_resolve_the_way_the_standalone_host_resolves_them() {
+        let production = ShutdownTiming::resolve(None, None, false);
+        assert_eq!(production.grace, Duration::from_secs(25));
+        assert_eq!(production.drain_delay, Duration::from_secs(5));
+
+        // A five-second wait on Ctrl-C reads as a hung dev server.
+        assert_eq!(
+            ShutdownTiming::resolve(None, None, true).drain_delay,
+            Duration::ZERO
+        );
+        // Explicit still wins in dev.
+        assert_eq!(
+            ShutdownTiming::resolve(None, Some("2000"), true).drain_delay,
+            Duration::from_secs(2)
+        );
+
+        assert_eq!(
+            ShutdownTiming::resolve(Some("30000"), Some("0"), false),
+            ShutdownTiming {
+                grace: Duration::from_secs(30),
+                drain_delay: Duration::ZERO,
+            }
+        );
+        // In-flight work keeps a budget of its own however the two are set.
+        assert_eq!(
+            ShutdownTiming::resolve(Some("4000"), Some("9000"), false).drain_delay,
+            Duration::from_secs(2)
+        );
+        // Unparseable, negative, and empty all fall back rather than turning a
+        // typo into "close immediately".
+        for raw in ["", "  ", "later", "-1"] {
+            assert_eq!(
+                ShutdownTiming::resolve(Some(raw), Some(raw), false),
+                production,
+                "{raw:?} must fall back to the defaults"
+            );
+        }
+    }
+
+    /// One awaited signal, boxed so the source is a plain `FnMut`.
+    type TestSignal = std::pin::Pin<Box<dyn std::future::Future<Output = &'static str> + Send>>;
+
+    /// A signal source a test can fire, one signal per call.
+    ///
+    /// `serve_with_signals` calls its source again to watch for a second
+    /// signal, so a latch would resolve that one immediately and no drain
+    /// window would ever be observed. A queue consumes one message per await,
+    /// which is what an operator pressing Ctrl-C twice actually is.
+    fn test_signals() -> (
+        tokio::sync::mpsc::UnboundedSender<()>,
+        impl FnMut() -> TestSignal,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let rx = Arc::new(tokio::sync::Mutex::new(rx));
+        let source = move || {
+            let rx = Arc::clone(&rx);
+            Box::pin(async move {
+                let _ = rx.lock().await.recv().await;
+                "TEST"
+            }) as TestSignal
+        };
+        (tx, source)
+    }
+
+    /// A readiness probe is a fresh connection, so the drain has to outlive the
+    /// signal that starts it.
+    ///
+    /// `draining.store(true, …)` and `shutdown_tx.send(true)` were adjacent
+    /// statements, so `axum::serve` stopped accepting on the tick the flag was
+    /// set: the probe got `ECONNREFUSED` and the `503 {"status":"draining"}`
+    /// the health handler builds, `Retry-After` and all, was unreachable code.
+    /// Everything the orchestrator sent while it was still deregistering then
+    /// failed in a browser instead of being retried against another instance.
+    ///
+    /// Read off a socket rather than through a `Router`, for the reason
+    /// `the_connection_close_on_a_413_reaches_the_client` does it: what is
+    /// under test is whether a new TCP connection is still accepted, which a
+    /// response object cannot show. Not gated on platform — the 2026-08-28
+    /// drain defect was missed because the equivalent test was Windows-skipped.
+    #[tokio::test]
+    async fn a_fresh_connection_reads_the_drain_status_before_the_socket_closes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let draining = Arc::new(AtomicBool::new(false));
+        // Stands in for `health_endpoint`, whose draining branch reads this
+        // same flag out of `AppState` — a real one needs a worker pool and a
+        // project on disk. What this test owns is the window, not the body.
+        let flag = Arc::clone(&draining);
+        let health = move || {
+            let flag = Arc::clone(&flag);
+            async move {
+                if flag.load(Ordering::Relaxed) {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        [(header::RETRY_AFTER, "1")],
+                        "{\"status\":\"draining\",\"host\":\"native\"}",
+                    )
+                        .into_response()
+                } else {
+                    (StatusCode::OK, "{\"status\":\"ok\",\"host\":\"native\"}").into_response()
+                }
+            }
+        };
+        let app = Router::new().route("/__ruvyxa/health", get(health));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let (signals, source) = test_signals();
+        let timing = ShutdownTiming {
+            grace: Duration::from_secs(10),
+            drain_delay: Duration::from_secs(5),
+        };
+        let served = tokio::spawn(serve_with_signals(
+            vec![listener],
+            app,
+            Arc::clone(&draining),
+            timing,
+            source,
+        ));
+
+        assert!(
+            probe_path(address, "/__ruvyxa/health")
+                .await
+                .starts_with("HTTP/1.1 200"),
+            "the host must answer 200 before any signal arrives"
+        );
+
+        signals.send(()).unwrap();
+        // The flag is raised before the drain window opens, so waiting on it
+        // times the probe without racing a fixed sleep against a scheduler.
+        for _ in 0..200 {
+            if draining.load(Ordering::Relaxed) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            draining.load(Ordering::Relaxed),
+            "the drain flag must be raised as soon as the signal arrives"
+        );
+
+        let response = probe_path(address, "/__ruvyxa/health").await;
+        let shown = single_log_line(&response);
+        assert!(
+            response.starts_with("HTTP/1.1 503"),
+            "a probe connecting during the drain window must be accepted and told \
+             this process is draining: {shown}"
+        );
+        assert!(
+            response
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("retry-after: 1")),
+            "the draining answer carries Retry-After: {shown}"
+        );
+
+        // A second signal means now, so the drain window is not a five-second
+        // wait on the operator's second Ctrl-C.
+        signals.send(()).unwrap();
+        let stopped = tokio::time::timeout(Duration::from_secs(5), served).await;
+        assert!(
+            stopped.is_ok(),
+            "a second signal must end the drain window immediately"
+        );
+        stopped.unwrap().unwrap().unwrap();
+    }
+
+    /// One request over one fresh connection, returned as raw bytes.
+    async fn probe_path(address: SocketAddr, path: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut client = tokio::net::TcpStream::connect(address)
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "a fresh connection to {path} was refused ({error}); the host \
+                     stopped accepting before anything could read its answer"
+                )
+            });
+        client
+            .write_all(
+                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = String::new();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            client.read_to_string(&mut response),
+        )
+        .await
+        .expect("the host must answer a probe rather than hanging")
+        .unwrap();
+        response
+    }
+
+    /// `RUVYXA_MAX_CONCURRENCY` / `RUVYXA_MAX_QUEUE`, resolved the standalone
+    /// host's way — including the two values that mean "off".
+    #[test]
+    fn admission_limits_resolve_the_way_the_standalone_host_resolves_them() {
+        assert_eq!(
+            resolve_admission_limits(Some("4"), None, false),
+            Some(AdmissionLimits {
+                concurrency: 4,
+                queue: 16,
+            })
+        );
+        assert_eq!(
+            resolve_admission_limits(Some("2"), Some("3"), false),
+            Some(AdmissionLimits {
+                concurrency: 2,
+                queue: 3,
+            })
+        );
+        // Off, both ways: explicitly, and because one developer with a browser
+        // is not a load event.
+        assert_eq!(resolve_admission_limits(Some("0"), None, false), None);
+        assert_eq!(resolve_admission_limits(None, None, true), None);
+        // Explicit still wins in dev.
+        assert_eq!(
+            resolve_admission_limits(Some("1"), Some("1"), true),
+            Some(AdmissionLimits {
+                concurrency: 1,
+                queue: 1,
+            })
+        );
+        // Bounded by the machine, never zero, so a production host always has a
+        // limit rather than inheriting one from `available_parallelism`.
+        let default = resolve_admission_limits(None, None, false).expect("production admits");
+        assert!(ADMISSION_DEFAULT_BOUNDS.contains(&default.concurrency));
+        assert_eq!(
+            default.queue,
+            default.concurrency * ADMISSION_QUEUE_PER_SLOT
+        );
+        // A typo is not a limit of zero.
+        assert_eq!(
+            resolve_admission_limits(Some("plenty"), Some("plenty"), false),
+            Some(default)
+        );
+    }
+
+    /// Past the limit and the queue, the host refuses — and health still answers.
+    ///
+    /// There was no concurrency limit, no queue cap, and no overload answer on
+    /// this host, while the standalone server — the same long-lived self-hosted
+    /// shape — has `WorkerAdmissionController` and answers `503`. Under a cheap
+    /// unauthenticated flood `ruvyxa start` degraded to unbounded queueing:
+    /// every request waited, none was refused, and `/__ruvyxa/health` kept
+    /// answering `200` because it does not read queue depth.
+    ///
+    /// The framework routes and the page fallback are composed by
+    /// `compose_app_router`, the same function `build_app_router` calls, so
+    /// "admission wraps the page fallback only" is asserted about the host
+    /// rather than about a router this test assembled to match it. Moving the
+    /// layer onto the framework router fails here.
+    #[tokio::test]
+    async fn a_saturated_host_sheds_load_and_still_answers_health() {
+        use tokio::io::AsyncWriteExt;
+
+        let control = AdmissionControl::new(AdmissionLimits {
+            concurrency: 1,
+            queue: 1,
+        });
+        let release = Arc::new(tokio::sync::Notify::new());
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let holding = Arc::clone(&release);
+        let counter = Arc::clone(&started);
+        let page = Router::new().fallback(move || {
+            let release = Arc::clone(&holding);
+            let started = Arc::clone(&counter);
+            async move {
+                started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                release.notified().await;
+                "page"
+            }
+        });
+        let admitted = Arc::clone(&control.waiting);
+        let app = compose_app_router(
+            Router::new().route("/__ruvyxa/health", get(async || "ok")),
+            page,
+            Some(control),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, server_make_service(app)).await.ok();
+        });
+
+        // One request in the single slot, held inside the handler.
+        let mut running = tokio::net::TcpStream::connect(address).await.unwrap();
+        running
+            .write_all(b"GET /slow HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        wait_for("the first request never reached the handler", || {
+            started.load(std::sync::atomic::Ordering::SeqCst) == 1
+        })
+        .await;
+
+        // One more filling the single queue slot.
+        let mut queued = tokio::net::TcpStream::connect(address).await.unwrap();
+        queued
+            .write_all(b"GET /queued HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        wait_for(
+            "the second request was never queued, so either nothing bounds how many \
+             requests this host starts at once, or admission is not in front of \
+             the page fallback",
+            || admitted.load(std::sync::atomic::Ordering::SeqCst) == 1,
+        )
+        .await;
+
+        let refused = probe_path(address, "/refused").await;
+        let shown = single_log_line(&refused);
+        assert!(
+            refused.starts_with("HTTP/1.1 503"),
+            "past the limit and the queue the host must refuse rather than park \
+             the caller on memory it has to keep: {shown}"
+        );
+        assert!(
+            refused
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("retry-after: 1")),
+            "a refusal a caller can act on carries Retry-After: {shown}"
+        );
+
+        let health = probe_path(address, "/__ruvyxa/health").await;
+        assert!(
+            health.starts_with("HTTP/1.1 200"),
+            "readiness is answered before admission, or an orchestrator restarts \
+             a process that was merely busy: {}",
+            single_log_line(&health)
+        );
+
+        release.notify_waiters();
+        server.abort();
+        let _ = server.await;
+    }
+
+    /// Poll a condition rather than sleeping a fixed span against a scheduler.
+    async fn wait_for(expected: &str, mut ready: impl FnMut() -> bool) {
+        for _ in 0..500 {
+            if ready() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("{expected}");
+    }
+
     #[test]
     fn composes_react_rendered_html_documents() {
         let rendered = r#"<!doctype html><html lang="en"><body><main>Hello</main></body></html>"#;
@@ -2105,7 +3104,10 @@ mod tests {
 
     #[test]
     fn plain_error_page_escapes_message() {
-        let html = plain_error_page("<script>alert(1)</script>");
+        let html = plain_error_page(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "<script>alert(1)</script>",
+        );
 
         assert!(html.contains("<main class=\"error-card\""));
         assert!(html.contains("src=\"/ruvyxa.png\""));
@@ -2142,7 +3144,7 @@ mod tests {
 
     #[test]
     fn plain_error_page_uses_centered_404_state_and_logo() {
-        let html = plain_error_page("Route not found");
+        let html = plain_error_page(StatusCode::NOT_FOUND, "Route not found");
 
         assert!(html.contains("<main class=\"error-card\""));
         assert!(html.contains("<span class=\"code\">404</span>"));
@@ -2179,6 +3181,58 @@ mod tests {
         assert_eq!(env.get("EXPORTED_TOKEN"), Some(&"shell-style".to_string()));
         assert!(!env.contains_key("export EXPORTED_TOKEN"));
         assert_eq!(env.get("export"), Some(&"literal-export-key".to_string()));
+    }
+
+    /// A quoted value that spans lines is one value, not a truncation plus
+    /// junk.
+    ///
+    /// A PEM key in `.env` is routine for the auth and deploy integrations this
+    /// framework ships. A line-based parser gave `PRIVATE_KEY` the opening
+    /// fence with its quote still attached, and then read the base64 body — it
+    /// contains `=` — as further variables, which went into every worker
+    /// process and into `build_dependency_hash`.
+    #[test]
+    fn parses_multi_line_and_commented_env_values() {
+        let env = parse_env_source(
+            "PRIVATE_KEY=\"-----BEGIN PRIVATE KEY-----\n\
+             MIIBVgIBADAN+Bg==\n\
+             -----END PRIVATE KEY-----\"\n\
+             SINGLE='first\nsecond'\n\
+             PORT=3000 # dev only\n\
+             HASH=abc#def\n\
+             QUOTED_HASH=\"a # b\"\n\
+             AFTER=tail\n",
+        );
+
+        assert_eq!(
+            env.get("PRIVATE_KEY"),
+            Some(
+                &"-----BEGIN PRIVATE KEY-----\nMIIBVgIBADAN+Bg==\n-----END PRIVATE KEY-----"
+                    .to_string()
+            )
+        );
+        // The base64 body carries `=`, so a line-based parser assigned it.
+        assert!(!env.contains_key("MIIBVgIBADAN+Bg"));
+        assert_eq!(env.get("SINGLE"), Some(&"first\nsecond".to_string()));
+        // An unquoted trailing comment is not part of the value.
+        assert_eq!(env.get("PORT"), Some(&"3000".to_string()));
+        // A `#` with no whitespace before it is an ordinary character.
+        assert_eq!(env.get("HASH"), Some(&"abc#def".to_string()));
+        assert_eq!(env.get("QUOTED_HASH"), Some(&"a # b".to_string()));
+        // Parsing resumed at the line after the multi-line value ended.
+        assert_eq!(env.get("AFTER"), Some(&"tail".to_string()));
+    }
+
+    /// An unterminated quote takes one line, never the rest of the file.
+    ///
+    /// Consuming to end-of-file would turn one typo into "every variable below
+    /// it disappeared", which is worse than the truncation it replaces.
+    #[test]
+    fn an_unterminated_quote_does_not_swallow_the_rest_of_the_env_file() {
+        let env = parse_env_source("BROKEN=\"open\nNEXT=kept\n");
+
+        assert_eq!(env.get("BROKEN"), Some(&"\"open".to_string()));
+        assert_eq!(env.get("NEXT"), Some(&"kept".to_string()));
     }
 
     #[test]
@@ -3255,13 +4309,32 @@ Host: localhost
         assert!(limiter.allow("local:/other:createTodo"));
     }
 
+    /// Where `ruvyxa build` actually writes the client build report.
+    ///
+    /// Beside `client/`, not inside it: that directory is public by contract —
+    /// every file in it is served and copied to a CDN — while the report
+    /// carries the build machine's absolute source paths and the module graph
+    /// of every chunk. See `client_build_report_path` in `html_document.rs`.
+    ///
+    /// A helper rather than a literal per test because these fixtures kept
+    /// naming `client/manifest.json` for two moves after the report left it.
+    /// The suite stayed green the whole time while `ruvyxa start` served every
+    /// page with no client script at all, because a manifest that is not there
+    /// means "this project ships no client bundle".
+    fn client_report_path(client_dir: &Path) -> PathBuf {
+        client_dir
+            .parent()
+            .expect("a client directory sits inside a build directory")
+            .join("client-report.json")
+    }
+
     #[test]
     fn reads_prebuilt_client_assets_from_manifest() {
         let temp = tempfile::tempdir().unwrap();
         let client_dir = temp.path().join(".ruvyxa/client");
         std::fs::create_dir_all(&client_dir).unwrap();
         std::fs::write(
-            client_dir.join("manifest.json"),
+            client_report_path(&client_dir),
             r#"{"routes":[{"path":"/","src":"/__ruvyxa/client/home.js","sharedChunks":[{"src":"/__ruvyxa/client/shared.123.js"}]}]}"#,
         )
         .unwrap();
@@ -3273,7 +4346,7 @@ Host: localhost
         assert_eq!(assets.preloads, vec!["/__ruvyxa/client/shared.123.js"]);
 
         std::fs::write(
-            client_dir.join("manifest.json"),
+            client_report_path(&client_dir),
             r#"{"routes":[{"path":"/","src":"/__ruvyxa/client/incomplete.js"}]}"#,
         )
         .unwrap();
@@ -3286,7 +4359,7 @@ Host: localhost
         let client_dir = temp.path().join(".ruvyxa/client");
         std::fs::create_dir_all(&client_dir).unwrap();
         std::fs::write(
-            client_dir.join("manifest.json"),
+            client_report_path(&client_dir),
             r#"{"routes":[{"path":"/","src":"/__ruvyxa/client/home.js","sharedChunks":[{"src":"/__ruvyxa/client/shared.123.js"}]}]}"#,
         )
         .unwrap();
@@ -3315,7 +4388,7 @@ Host: localhost
                 let client_dir = temp.path().join(".ruvyxa/client");
                 std::fs::create_dir_all(&client_dir).unwrap();
                 std::fs::write(
-                    client_dir.join("manifest.json"),
+                    client_report_path(&client_dir),
                     format!(
                         r#"{{"routes":[{{"path":"/","src":"/__ruvyxa/client/home.{index}.js","sharedChunks":[]}}]}}"#
                     ),
@@ -3352,7 +4425,7 @@ Host: localhost
         let temp = tempfile::tempdir().unwrap();
         let client_dir = temp.path().join(".ruvyxa/client");
         std::fs::create_dir_all(&client_dir).unwrap();
-        let manifest = client_dir.join("manifest.json");
+        let manifest = client_report_path(&client_dir);
         std::fs::write(
             &manifest,
             r#"{"routes":[{"path":"/","src":"/__ruvyxa/client/old.js","sharedChunks":[]}]}"#,
@@ -3381,7 +4454,7 @@ Host: localhost
         let temp = tempfile::tempdir().unwrap();
         let client_dir = temp.path().join(".ruvyxa/client");
         std::fs::create_dir_all(&client_dir).unwrap();
-        let manifest = client_dir.join("manifest.json");
+        let manifest = client_report_path(&client_dir);
 
         // The realistic rebuild shape: only the content hash inside the bundle
         // URL changes, so the rewritten manifest has the exact same byte
@@ -3430,7 +4503,7 @@ Host: localhost
         let temp = tempfile::tempdir().unwrap();
         let client_dir = temp.path().join(".ruvyxa/client");
         std::fs::create_dir_all(&client_dir).unwrap();
-        let manifest = client_dir.join("manifest.json");
+        let manifest = client_report_path(&client_dir);
         let source =
             r#"{"routes":[{"path":"/","src":"/__ruvyxa/client/settled.js","sharedChunks":[]}]}"#;
         std::fs::write(&manifest, source).unwrap();
@@ -3482,7 +4555,7 @@ Host: localhost
         let client_dir = temp.path().join(".ruvyxa/client");
         std::fs::create_dir_all(&client_dir).unwrap();
         std::fs::write(
-            client_dir.join("manifest.json"),
+            client_report_path(&client_dir),
             r#"{"routes":[{"path":"/","src":"/__ruvyxa/client/home.js","sharedChunks":[{"src":"/__ruvyxa/client/shared.123.js"}]}]}"#,
         )
         .unwrap();
@@ -3565,7 +4638,7 @@ Host: localhost
         let client_dir = temp.path().join(".ruvyxa/client");
         std::fs::create_dir_all(&client_dir).unwrap();
         std::fs::write(
-            client_dir.join("manifest.json"),
+            client_report_path(&client_dir),
             r#"{"routes":[{"path":"/","src":"/__ruvyxa/client/home.js","sharedChunks":[{"src":"/__ruvyxa/client/shared.js"}],"hydration":"idle","hydrationLoader":"/__ruvyxa/client/hydration.js"}]}"#,
         )
         .unwrap();
@@ -3635,6 +4708,81 @@ Host: localhost
         assert!(slot.value.is_none());
         assert!(slot.insert_if_current(slot.generation, "fresh"));
         assert_eq!(slot.value, Some("fresh"));
+    }
+
+    /// The built stylesheet URL is a cache slot like the other four.
+    ///
+    /// It was the one slot `invalidate` skipped, so its generation never moved
+    /// off zero — and `built_style_asset` read the generation from inside the
+    /// write lock it was about to write through, which made
+    /// `insert_if_current` a tautology. The two halves hid each other: the
+    /// guard could not refuse anything, and nothing ever asked it to.
+    ///
+    /// This asserts both. The first half is behavioural — an invalidation has
+    /// to reach this slot, which is what makes the guard reachable at all. The
+    /// second drives the two halves of `built_style_asset` by hand, the way
+    /// `a_stylesheet_saved_during_a_collection_is_not_installed_stale` drives
+    /// `styles()`, because the window it describes is between a filesystem read
+    /// and a lock acquisition and cannot be scheduled deterministically from
+    /// outside.
+    #[tokio::test]
+    async fn a_stylesheet_url_read_before_an_invalidation_is_not_installed_stale() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = ServerConfig::production(temp.path(), "localhost", 3000);
+        config.client_dir = temp.path().join("client");
+        std::fs::create_dir_all(&config.client_dir).unwrap();
+        let manifest = config.client_dir.join("route-manifest.json");
+        std::fs::write(&manifest, r#"{"styles":["/assets/stale.css"]}"#).unwrap();
+
+        let cache = RuntimeCache::default();
+
+        assert_eq!(
+            cache.built_style_asset(&config).await.as_deref(),
+            Some("/assets/stale.css")
+        );
+
+        // Rewriting the manifest must not change the cached answer: reading it
+        // once per generation instead of once per render is the point of the
+        // slot.
+        std::fs::write(&manifest, r#"{"styles":["/assets/fresh.css"]}"#).unwrap();
+        assert_eq!(
+            cache.built_style_asset(&config).await.as_deref(),
+            Some("/assets/stale.css")
+        );
+
+        // An invalidation has to reach this slot, or every render after an
+        // in-place redeploy links a stylesheet the build no longer wrote.
+        cache.invalidate_async().await;
+        assert_eq!(
+            cache.built_style_asset(&config).await.as_deref(),
+            Some("/assets/fresh.css"),
+            "invalidate() must reach style_asset like every other cache slot"
+        );
+
+        // First half of `built_style_asset`: the slot is empty, so remember the
+        // generation the manifest read is being made against.
+        cache.invalidate_async().await;
+        let generation = {
+            let cached = cache.style_asset.read().await;
+            assert!(cached.value.is_none(), "the slot must start empty");
+            cached.generation
+        };
+
+        // A redeploy lands while that read is in flight.
+        cache.invalidate_async().await;
+
+        // Second half: the answer read against the old generation is refused,
+        // and the slot stays empty so the next render reads again.
+        let stale: Option<Arc<str>> = Some(Arc::from("/assets/stale.css"));
+        assert!(
+            !cache
+                .style_asset
+                .write()
+                .await
+                .insert_if_current(generation, stale),
+            "a manifest read that started before the invalidation must not install"
+        );
+        assert!(cache.style_asset.read().await.value.is_none());
     }
 
     #[tokio::test]
@@ -3992,6 +5140,53 @@ Host: localhost
             port,
             "the IPv4 loopback holder must push the server to another port"
         );
+    }
+
+    /// A production host takes the port it was told to take, or fails.
+    ///
+    /// `ruvyxa dev` scanning forward is a convenience for a developer reading
+    /// the terminal. `ruvyxa start` has no such reader: a container routes to
+    /// the configured port, so a process that quietly bound the next one is
+    /// healthy-looking and unreachable, and the orchestrator reports a restart
+    /// loop with the real cause — usually the previous instance still holding
+    /// the port — only as a line on stdout. The other self-hosted host, the
+    /// generated standalone server, has always let `EADDRINUSE` surface.
+    #[tokio::test]
+    async fn bind_listeners_refuse_a_busy_port_in_production_instead_of_moving() {
+        let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let occupied_address = occupied.local_addr().unwrap();
+
+        let config = ServerConfig::production(".", "127.0.0.1", occupied_address.port());
+        let error = bind_listeners(&config, occupied_address)
+            .await
+            .expect_err("a production server must not bind a port nothing routes to");
+
+        let RuvyxaError::Diagnostic(diagnostic) = error else {
+            panic!("a port conflict must be reported as a diagnostic, got {error:?}");
+        };
+        assert_eq!(diagnostic.code, "RUV1201");
+        assert!(
+            diagnostic
+                .explanation
+                .contains(&occupied_address.port().to_string()),
+            "the diagnostic must name the port that could not be taken: {}",
+            diagnostic.explanation
+        );
+        assert!(
+            !diagnostic
+                .explanation
+                .contains("could not find a free port"),
+            "production scans no range, so the message must not claim one: {}",
+            diagnostic.explanation
+        );
+
+        // The dev host keeps the fallback, and this is the same call: only
+        // `config.watch` separates them.
+        if occupied_address.port() < u16::MAX {
+            let dev = ServerConfig::dev(".", "127.0.0.1", occupied_address.port());
+            let (_listeners, bound) = bind_listeners(&dev, occupied_address).await.unwrap();
+            assert!(bound.port() > occupied_address.port());
+        }
     }
 
     #[test]

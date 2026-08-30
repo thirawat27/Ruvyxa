@@ -48,6 +48,29 @@ export interface WellKnownOptions {
 const CONTACT_SCHEMES = ['mailto:', 'https://', 'tel:']
 
 /**
+ * A media type the `Headers` this plugin builds at request time will accept.
+ *
+ * The probe is load-bearing despite discarding its result, the same way
+ * `cacheRules` validates a directive it does not keep: the only complete
+ * definition of a legal header value is the one the runtime enforces, and
+ * re-deriving it from a regular expression here would be a second rule that
+ * agrees until it does not. Reaching that constructor for the first time inside
+ * a request handler is what made a config typo a 500 on a `/.well-known/` path
+ * in production rather than a `TypeError` at startup.
+ */
+function validatedContentType(value: unknown, field: string): string {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new TypeError(`${field} must be a non-empty media type`)
+  }
+  try {
+    new Headers().set('content-type', value)
+  } catch {
+    throw new TypeError(`${field} must be a valid Content-Type header value`)
+  }
+  return value
+}
+
+/**
  * Publishes files under `/.well-known/`, served in development and written
  * into the production build.
  *
@@ -75,11 +98,15 @@ export function wellKnown(options: WellKnownOptions = {}): RuvyxaPlugin {
     if (!isText && (!entry.body || typeof entry.body !== 'object')) {
       throw new TypeError(`${at}.body must be a string or JSON-serializable object`)
     }
+    const inferredContentType = isText
+      ? 'text/plain; charset=utf-8'
+      : 'application/json; charset=utf-8'
     files.set(outputPath, {
       body: isText ? (entry.body as string) : `${JSON.stringify(entry.body, null, 2)}\n`,
       contentType:
-        entry.contentType ??
-        (isText ? 'text/plain; charset=utf-8' : 'application/json; charset=utf-8'),
+        entry.contentType === undefined
+          ? inferredContentType
+          : validatedContentType(entry.contentType, `${at}.contentType`),
     })
   }
   if (files.size === 0) {
@@ -123,7 +150,15 @@ function createSecurityTxt(options: SecurityTxtOptions): string {
   for (const [index, contact] of contacts.entries()) {
     if (
       typeof contact !== 'string' ||
-      !CONTACT_SCHEMES.some((scheme) => contact.startsWith(scheme))
+      !CONTACT_SCHEMES.some((scheme) => contact.startsWith(scheme)) ||
+      // `security.txt` is line-oriented and this value is interpolated into
+      // `Contact: ${contact}`, so a newline inside it does not corrupt the
+      // record — it *extends* it, with a `Policy:` or `Canonical:` of whoever
+      // wrote the string that was pasted in. Every other URL field in this
+      // function already rejects these through `validateAbsoluteHttpUrl`;
+      // `contact` accepts `mailto:` and `tel:` too, so it cannot go through
+      // that check and needs the control test of its own.
+      /[\r\n\0]/.test(contact)
     ) {
       throw new TypeError(
         `wellKnown: securityTxt.contact[${index}] must be a mailto:, https://, or tel: URI`,

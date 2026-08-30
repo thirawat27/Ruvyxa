@@ -68,3 +68,38 @@ export function methodNotAllowed(module, method) {
     body: `Method ${String(method ?? 'GET').toUpperCase()} is not allowed`,
   }
 }
+
+/**
+ * Turn whatever a route handler returned into a `Response`.
+ *
+ * One home, reached by all three hosts. This was written out three times — in
+ * `worker-pool.mjs`, `api-renderer.mjs` and `serverless-handler.mjs` — including
+ * the RUV1504 message text, so the rule a developer reads when their handler
+ * returns nothing was maintained in triplicate. It lives here because
+ * `api-methods.mjs` is already carried into every function bundle and already
+ * imported by all three.
+ */
+export function normalizeResponse(result, route = 'this route') {
+  if (result instanceof Response) return result
+  // Returning serialisable data instead of a Response is a supported
+  // convenience. Returning nothing is not: `Response.json(undefined)` throws
+  // "Value is not JSON serializable" from inside undici, and the message that
+  // reached the caller named neither the handler nor the fact that it returned
+  // nothing — the suggested fix was to check the module's imports.
+  if (result === undefined) {
+    throw new Error(
+      `RUV1504 the handler for ${route} returned nothing. A route handler must return a Response, ` +
+        'or data that can be serialised as JSON, which is sent as `Response.json(data)`.',
+    )
+  }
+  try {
+    return Response.json(result)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    throw new Error(
+      `RUV1504 the handler for ${route} returned a value that cannot be serialised as JSON ` +
+        `(${detail}). Return a Response, or data built from plain objects, arrays, strings, ` +
+        'numbers, booleans, and null.',
+    )
+  }
+}

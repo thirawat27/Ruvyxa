@@ -27,16 +27,25 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
-/// Permanent identity of the graph manifest. This string does not change.
+/// Identity of the resolver whose edges this manifest records.
 ///
 /// A version counter here would have to be bumped by hand every time an entry
 /// gains a field, and forgetting the bump is silent: the build reuses entries
-/// that cannot describe what the new field needs. Compatibility is a property
-/// of the entry format instead — every field added after the fact is an
-/// `Option`, so "absent" is distinguishable from "empty" and a reader can
-/// decline to reuse an entry that predates it. See [`CachedModuleEntry::aliases`]
-/// for the pattern to follow when adding the next one.
-const MANIFEST_VERSION: &str = "ruvyxa_graph_cache";
+/// that cannot describe what the new field needs. Compatibility across *format*
+/// changes is therefore a property of the entry format — every field added
+/// after the fact is an `Option`, so "absent" is distinguishable from "empty"
+/// and a reader can decline to reuse an entry that predates it. See
+/// [`CachedModuleEntry::aliases`] for the pattern to follow when adding the
+/// next one.
+///
+/// The crate version is a different thing from that counter: nothing maintains
+/// it, and it moves on the one boundary a released build can cross. It has to
+/// be here because what this manifest stores is the *resolver's answer*, not
+/// the module's content — [`IncrementalGraphCache::check_freshness`] compares
+/// content only, so a change to the resolution rules is invisible to it and
+/// stale edges would be reused indefinitely. `cache::COMPILER_VERSION` folds
+/// the same component in, for the same reason.
+const MANIFEST_VERSION: &str = concat!("ruvyxa_graph_cache:", env!("CARGO_PKG_VERSION"));
 
 /// A persisted module entry in the graph cache.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,7 +77,8 @@ pub struct CachedModuleEntry {
     /// distinguishable, or a stale entry would silently claim "no aliases" and
     /// reintroduce that divergence. A reader treats `None` as not reusable and
     /// resolves the module fresh, which rewrites the entry complete. This is
-    /// what lets [`MANIFEST_VERSION`] stay constant instead of being bumped.
+    /// what keeps a *format* change out of [`MANIFEST_VERSION`], which carries
+    /// only the derived compiler identity and no hand-maintained counter.
     #[serde(default)]
     pub aliases: Option<BTreeMap<String, PathBuf>>,
 }
@@ -76,8 +86,9 @@ pub struct CachedModuleEntry {
 /// The full persisted graph manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphManifest {
-    /// Manifest identity. Constant by design — see [`MANIFEST_VERSION`]. A
-    /// mismatch means the file belongs to a different cache, not an older one.
+    /// Manifest identity. Derived, never stamped — see [`MANIFEST_VERSION`]. A
+    /// mismatch means the file belongs to a different cache or to a different
+    /// build of this crate; either way it is a cold start, not a migration.
     pub version: String,
     /// Build/config namespace used while resolving these dependency edges.
     #[serde(default)]
@@ -447,21 +458,70 @@ mod tests {
         assert!(cache.cached_deps(&fake).is_none());
     }
 
-    /// The manifest identity is permanent. Adding a field must be absorbed by
-    /// the entry format, never by editing this string — a bump silently discards
-    /// every user's warm cache, and forgetting one silently reuses entries that
-    /// cannot answer what the new field needs.
+    /// The manifest identity carries no *hand-maintained* counter. Adding a
+    /// field must be absorbed by the entry format, never by editing a literal —
+    /// a bump somebody has to remember is silent when they forget, and the
+    /// build then reuses entries that cannot answer what the new field needs.
+    ///
+    /// The crate version is not such a counter: nothing here maintains it, and
+    /// it already changes on the one boundary a released build can cross. The
+    /// resolver's *rules* live in this binary and are invisible to a content
+    /// hash, so an identity scoped only to the project reuses edges a new
+    /// resolver would not produce. This assertion used to pin the literal
+    /// string, which is stricter than the rule its own doc comment states.
     #[test]
     fn the_manifest_identity_carries_no_version_counter() {
-        assert_eq!(MANIFEST_VERSION, "ruvyxa_graph_cache");
-        // No `:v2`-style suffix: a trailing counter is the thing that has to be
-        // maintained by hand, and the entry format carries compatibility instead.
-        let suffix = MANIFEST_VERSION.rsplit(':').next().unwrap_or_default();
         assert!(
-            !suffix
-                .strip_prefix('v')
-                .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())),
-            "compatibility belongs in the entry format, not in a version suffix"
+            MANIFEST_VERSION.contains(env!("CARGO_PKG_VERSION")),
+            "the identity must follow the compiler that produced the entries: {MANIFEST_VERSION}"
+        );
+        // No `vN` segment anywhere: a counter is the thing that has to be
+        // maintained by hand, and the entry format carries compatibility instead.
+        for segment in MANIFEST_VERSION.split(':') {
+            assert!(
+                !segment.strip_prefix('v').is_some_and(
+                    |rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
+                ),
+                "compatibility belongs in the entry format, not in a `{segment}` version counter"
+            );
+        }
+    }
+
+    /// A manifest written by a different compiler build must not be reused.
+    ///
+    /// `check_freshness` compares source content only, so a change to the
+    /// resolver's rules is invisible to it and stale dependency edges would be
+    /// reused forever. The identity is the only thing that can see that change.
+    #[test]
+    fn a_manifest_from_another_compiler_version_loads_as_zero_modules() {
+        let temp = tempfile::tempdir().unwrap();
+        let page = temp.path().join("page.tsx");
+        fs::write(&page, "export default function Page() {}").unwrap();
+
+        let cache = IncrementalGraphCache::at_dir(temp.path(), "ns", true);
+        cache.record_module(
+            page.clone(),
+            "export default function Page() {}",
+            vec![],
+            BTreeMap::new(),
+        );
+        cache.save().unwrap();
+        assert_eq!(
+            IncrementalGraphCache::at_dir(temp.path(), "ns", true).previous_module_count(),
+            1
+        );
+
+        // Rewrite the identity as an older compiler would have spelled it.
+        let manifest_path = temp.path().join("graph-manifest.json");
+        let json = fs::read_to_string(&manifest_path).unwrap();
+        let doctored = json.replace(MANIFEST_VERSION, "ruvyxa_graph_cache:0.0.0-other");
+        assert_ne!(doctored, json, "the identity must be part of the manifest");
+        fs::write(&manifest_path, doctored).unwrap();
+
+        assert_eq!(
+            IncrementalGraphCache::at_dir(temp.path(), "ns", true).previous_module_count(),
+            0,
+            "a manifest from another compiler must be a cold start, not a reuse"
         );
     }
 

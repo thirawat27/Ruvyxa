@@ -62,6 +62,14 @@ included memory implementations require `{ development: true }` and production b
 OAuth state is additionally bound to an HttpOnly browser cookie, protocol parameters cannot be
 overridden, and non-local provider endpoints must use HTTPS.
 
+Account identity is `session.user.id` — `google:${sub}`, `github:${id}` — and never
+`session.user.email`. An address is a claim the identity provider may or may not stand behind, so
+`session.user.emailVerified` records which it was: `true` from Google only when the profile carried
+`email_verified: true`, and `true` from GitHub because its `/user` email is selected from the
+addresses GitHub confirmed. Absent means the provider said nothing. Do not link an OAuth login to an
+existing account, grant a role from an address domain, or authorize anything on `user.email` unless
+`user.emailVerified` is `true` — an unverified address is an address the person signing in chose.
+
 Set `onError(error, request)` to send full server-side failures to application observability. Public
 500 responses remain generic even if that hook fails.
 

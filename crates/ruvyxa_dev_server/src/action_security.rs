@@ -532,6 +532,16 @@ pub(crate) fn action_client_ip(
 }
 
 /// The request scheme as reported by a trusted proxy, when one vouched for it.
+///
+/// The *last* field line, for the reason [`client_ip::forwarded_client_ip`]
+/// reads the last `X-Forwarded-For` line: `HeaderMap::get` returns only the
+/// first value stored under a name, and a proxy that appends its own line
+/// rather than extending the caller's — HAProxy's `option forwardfor` shape —
+/// leaves the caller's line first. Reading that one let a client behind a
+/// trusted proxy state `https` for a plaintext request and have the origin
+/// check believe it. Which entry *within* one line is the scheme stays
+/// [`parse_forwarded_scheme`]'s answer, because that half is replayed from
+/// `tests/fixtures/origin-policy-conformance.json` by both languages.
 fn forwarded_scheme(
     headers: &HeaderMap,
     config: &ServerConfig,
@@ -542,7 +552,9 @@ fn forwarded_scheme(
     }
     parse_forwarded_scheme(
         headers
-            .get("x-forwarded-proto")
+            .get_all("x-forwarded-proto")
+            .iter()
+            .next_back()
             .and_then(|value| value.to_str().ok()),
     )
 }
@@ -666,6 +678,41 @@ mod tests {
             action_origin_is_cross_site(&headers, &config, trusted),
             "a trusted proxy stating https must reject an http origin"
         );
+    }
+
+    /// A duplicate `X-Forwarded-Proto` field line is the caller's, and it is
+    /// first.
+    ///
+    /// `HeaderMap::get` returns only the first value stored under a name, so a
+    /// caller sending `X-Forwarded-Proto: https` to a proxy that appends its own
+    /// line had the origin check read the caller's forgery and reject every
+    /// plaintext same-origin action. `append` rather than `insert` is the whole
+    /// test; `insert` replaces.
+    #[test]
+    fn the_last_forwarded_proto_line_is_the_one_the_proxy_wrote() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("app.test"));
+        headers.insert(header::ORIGIN, HeaderValue::from_static("http://app.test"));
+        // The caller's line arrives first; the proxy appends what it actually
+        // terminated.
+        headers.append("x-forwarded-proto", HeaderValue::from_static("https"));
+        headers.append("x-forwarded-proto", HeaderValue::from_static("http"));
+
+        let config = ServerConfig::dev("D:/app", "127.0.0.1", 3000);
+        let trusted = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        assert!(
+            !action_origin_is_cross_site(&headers, &config, trusted),
+            "a client-written first field line must not outrank the proxy's own"
+        );
+
+        // And the proxy's `https` still rejects a plaintext origin, so the check
+        // was not simply disabled.
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("app.test"));
+        headers.insert(header::ORIGIN, HeaderValue::from_static("http://app.test"));
+        headers.append("x-forwarded-proto", HeaderValue::from_static("http"));
+        headers.append("x-forwarded-proto", HeaderValue::from_static("https"));
+        assert!(action_origin_is_cross_site(&headers, &config, trusted));
     }
 
     #[test]

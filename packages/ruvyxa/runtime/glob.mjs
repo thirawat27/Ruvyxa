@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import path from 'node:path'
-import { compareCodeUnits } from './order.mjs'
+import { compareCodePoints } from './order.mjs'
 import { resolveTsconfigGlobPattern } from './paths.mjs'
 import { directivePrologueEnd, findInCode } from './scanner.mjs'
 
@@ -77,11 +77,11 @@ function findCalls(source) {
  * before `B.ts` while the Rust expander's `String` ordering sorts `B.ts` first,
  * so the two graphs generated different glob key orders — and `localeCompare`
  * additionally varies with the host ICU locale, which made builds
- * irreproducible across machines. `compareCodeUnits` is that rule, shared with
+ * irreproducible across machines. `compareCodePoints` is that rule, shared with
  * every other site that sorts into a cache key or a build artifact.
  */
 function compareBySlashedPath(left, right) {
-  return compareCodeUnits(slash(left), slash(right))
+  return compareCodePoints(slash(left), slash(right))
 }
 
 function parseCall(source, start) {

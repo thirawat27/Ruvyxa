@@ -2,7 +2,7 @@
 //! (SSR/SSG/ISR/CSR/PPR), worker-pool render paths, ISR revalidation, and the
 //! Node/Bun render-process fallback used by `render_request`.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -20,6 +20,7 @@ use ruvyxa_graph::{
     discover_routes, document_cache_control, document_has_validator,
 };
 use serde::Deserialize;
+use tokio::sync::broadcast;
 
 use crate::document_stream::StreamedDocument;
 use crate::html_document::{
@@ -31,8 +32,7 @@ use crate::render_cache::{CachedDocument, ForcedRevalidationClaim, RenderCache};
 use crate::router::RadixRouter;
 use crate::static_assets::{
     contained_public_asset, is_safe_relative_path, is_static_asset_request, public_asset_links,
-    request_matches_etag, serve_client_file, serve_client_file_sync, serve_public_file,
-    serve_public_file_sync, weak_content_etag,
+    request_matches_etag, serve_client_file, serve_public_file, weak_content_etag,
 };
 use crate::worker_pool::{PostedForm, RenderActionRequest, RenderApiRequest, WorkerApiResponse};
 use crate::{
@@ -53,8 +53,33 @@ use futures_util::StreamExt;
 ///
 /// Not applied to a streamed document or to a response marked `uncacheable`:
 /// both already say `no-store`, which is stricter than anything the table names.
-fn insert_document_cache_control(response: &mut Response, route: &RouteEntry) {
-    let value = document_cache_control(route.render.strategy, route.render.revalidate);
+///
+/// `request_scoped` outranks the table. `document_cache_control` describes the
+/// *route*; the flag describes *this response*, and a render that read a cookie,
+/// a header, or draft mode produced one visitor's document. Offering that to a
+/// shared cache for the strategy's window is how one visitor's page reaches
+/// everybody else — the same reason the render cache refuses to hold it, applied
+/// to the other cache the response can reach.
+///
+/// The strategies that can be stored are the ones this matters for: `Ssr` and
+/// `Ppr` already say `no-store`. Today no request-scoped document reaches this
+/// function under any other strategy, because only `render_page_pooled` renders
+/// inside a request context and only `Ssr` routes it. The guard is written down
+/// anyway, so this host and `handlePage` in `serverless-handler.mjs` state the
+/// same rule rather than one of them relying on a dispatch table staying as it
+/// is.
+fn insert_document_cache_control(
+    response: &mut Response,
+    route: &RouteEntry,
+    request_scoped: bool,
+) {
+    let value = if request_scoped {
+        // The spelling `document_cache_control` itself uses for `no-store`, so
+        // the two hosts emit the same bytes for the same decision.
+        "no-store".to_string()
+    } else {
+        document_cache_control(route.render.strategy, route.render.revalidate)
+    };
     let header = HeaderValue::from_str(&value)
         .expect("document cache-control is built from ASCII literals and a number");
     response.headers_mut().insert(header::CACHE_CONTROL, header);
@@ -66,12 +91,15 @@ fn insert_document_cache_control(response: &mut Response, route: &RouteEntry) {
 /// needs to know when to ask again, and `Vary` for the same reason the `200`
 /// does: the document is served identity-encoded or compressed depending on that
 /// header. Nothing that describes a body, because it is not sending one.
-fn not_modified_document(etag: &str, route: &RouteEntry) -> Response {
+///
+/// `request_scoped` travels with it so the `304` and the `200` it answers for
+/// cannot disagree about who may reuse this document.
+fn not_modified_document(etag: &str, route: &RouteEntry, request_scoped: bool) -> Response {
     let mut response = StatusCode::NOT_MODIFIED.into_response();
     if let Ok(value) = HeaderValue::from_str(etag) {
         response.headers_mut().insert(header::ETAG, value);
     }
-    insert_document_cache_control(&mut response, route);
+    insert_document_cache_control(&mut response, route, request_scoped);
     response
         .headers_mut()
         .insert(header::VARY, HeaderValue::from_static("accept-encoding"));
@@ -224,17 +252,80 @@ fn is_missing_static_asset(request_path: &str, route_path: &str) -> bool {
     is_static_asset_request(request_path) && route_path.contains('[')
 }
 
+/// Drive one asynchronous serving call from a synchronous entry point.
+///
+/// `render_request_cached` is a synchronous function that now reaches the same
+/// asynchronous serving rules a live request does, so something has to bridge
+/// the two. Its callers are not all alike, and that is the whole difficulty:
+/// `ruvyxa build`'s prerenderer and `ruvyxa bench` call it from an ordinary
+/// thread, while `ruvyxa test:parity` calls it from inside a Tokio runtime.
+/// `Runtime::block_on` panics when a runtime is already active on the thread,
+/// so blocking in place is correct for the first group and fatal for the
+/// second.
+///
+/// A thread of our own is therefore used whenever a runtime is already running:
+/// the future moves to a thread that has no runtime context, blocks there, and
+/// the result comes back. `std::thread::scope` is what makes that safe to do
+/// with a future borrowing the caller's paths. Outside a runtime the extra
+/// thread buys nothing, so the common path -- one call per route through the
+/// whole prerender -- still blocks in place.
+fn block_on_serving<F>(future: F) -> Result<Option<Response>>
+where
+    F: Future<Output = Result<Option<Response>>> + Send,
+{
+    fn block_here<F>(future: F) -> Result<Option<Response>>
+    where
+        F: Future<Output = Result<Option<Response>>>,
+    {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|source| RuvyxaError::Io {
+                message: "Failed to start a runtime to serve a static file".to_string(),
+                source,
+            })?
+            .block_on(future)
+    }
+
+    if tokio::runtime::Handle::try_current().is_err() {
+        return block_here(future);
+    }
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| block_here(future))
+            .join()
+            .unwrap_or_else(|_| {
+                Err(RuvyxaError::Io {
+                    message: "The thread serving a static file panicked".to_string(),
+                    source: std::io::Error::other("static file worker panicked"),
+                })
+            })
+    })
+}
+
 pub(crate) fn render_request_cached(
     config: &ServerConfig,
     context: &RenderContext,
     request_path: &str,
     method: &str,
 ) -> Result<Response> {
-    if let Some(client_response) = serve_client_file_sync(&config.client_dir, request_path)? {
+    // The same functions a live request reaches, not a second copy of them.
+    // There used to be a `serve_client_file_sync` and a `serve_public_file_sync`
+    // that set no ETag, no `Cache-Control` and no `Accept-Ranges`, answered no
+    // conditional or range request, never streamed, and returned `Err` for a
+    // missing file. Their only callers were `ruvyxa bench` and the parity
+    // command -- so `test:parity`, whose whole job is to prove a route answers
+    // the same under both hosts, was driving the copy that answered none of the
+    // questions the host answers.
+    if let Some(client_response) =
+        block_on_serving(serve_client_file(&config.client_dir, request_path, None))?
+    {
         return Ok(client_response);
     }
 
-    if let Some(public_response) = serve_public_file_sync(&config.public_dir, request_path)? {
+    if let Some(public_response) =
+        block_on_serving(serve_public_file(&config.public_dir, request_path, None))?
+    {
         return Ok(public_response);
     }
 
@@ -247,6 +338,10 @@ pub(crate) fn render_request_cached(
                 &context.manifest,
                 &context.router,
                 request_path,
+                // This path renders from a route table alone — the build's
+                // prerenderer and `ruvyxa bench` are its only callers — so
+                // there is no request URI here and no query to carry.
+                None,
                 method,
                 &headers,
             ) {
@@ -260,14 +355,22 @@ pub(crate) fn render_request_cached(
             }
             return Ok(html_response(
                 StatusCode::NOT_FOUND,
-                error_page("Route not found", config.watch && config.error_overlay),
+                error_page(
+                    StatusCode::NOT_FOUND,
+                    "Route not found",
+                    config.watch && config.error_overlay,
+                ),
             ));
         }
     };
     if is_missing_static_asset(request_path, &route_match.route.path) {
         return Ok(html_response(
             StatusCode::NOT_FOUND,
-            error_page("Asset not found", config.watch && config.error_overlay),
+            error_page(
+                StatusCode::NOT_FOUND,
+                "Asset not found",
+                config.watch && config.error_overlay,
+            ),
         ));
     }
 
@@ -341,6 +444,11 @@ pub(crate) async fn render_request_pooled(
                 &manifest,
                 &router,
                 request_path,
+                // `request_path` is the canonical path and carries no query by
+                // construction; `request_target` is the value that does. A 307
+                // preserves the method and the body and says nothing about the
+                // query, so the redirect has to reproduce it explicitly.
+                request_target.split_once('?').map(|(_, query)| query),
                 method,
                 request_headers,
             ) {
@@ -365,6 +473,7 @@ pub(crate) async fn render_request_pooled(
             return Ok(html_response(
                 StatusCode::NOT_FOUND,
                 error_page(
+                    StatusCode::NOT_FOUND,
                     "Route not found",
                     state.config.watch && state.config.error_overlay,
                 ),
@@ -375,6 +484,7 @@ pub(crate) async fn render_request_pooled(
         return Ok(html_response(
             StatusCode::NOT_FOUND,
             error_page(
+                StatusCode::NOT_FOUND,
                 "Asset not found",
                 state.config.watch && state.config.error_overlay,
             ),
@@ -417,7 +527,7 @@ pub(crate) async fn render_request_pooled(
                 )
                 .await;
             }
-            let html = render_page_by_strategy(
+            let page = render_page_by_strategy(
                 state,
                 route_match.route,
                 &page_request,
@@ -425,6 +535,7 @@ pub(crate) async fn render_request_pooled(
                 &styles,
             )
             .await?;
+            let html = page.document;
             // A stored document — ssg, csr, isr — is the same bytes for every
             // reader, so a reader who already holds it can be told so instead of
             // being sent it again. `document_cache_control` asks the browser to
@@ -435,10 +546,14 @@ pub(crate) async fn render_request_pooled(
             if let Some(etag) = &validator
                 && request_matches_etag(Some(request_headers), etag)
             {
-                return Ok(not_modified_document(etag, route_match.route));
+                return Ok(not_modified_document(
+                    etag,
+                    route_match.route,
+                    page.request_scoped,
+                ));
             }
             let mut response = cached_html_response(StatusCode::OK, &html, Some(request_headers));
-            insert_document_cache_control(&mut response, route_match.route);
+            insert_document_cache_control(&mut response, route_match.route, page.request_scoped);
             if let Some(etag) = &validator
                 && let Ok(value) = HeaderValue::from_str(etag)
             {
@@ -496,10 +611,13 @@ async fn render_page_form_action(
     if streams_document(route) {
         return render_page_streamed(state, route, request, params, styles).await;
     }
-    let document = render_page_pooled(state, route, request, params, styles).await?;
+    // `uncacheable` regardless of what the render read: a submission's answer
+    // belongs to the visitor who sent it, which is why `render_page_pooled`
+    // reports every form render as request-scoped in the first place.
+    let page = render_page_pooled(state, route, request, params, styles).await?;
     Ok(uncacheable(cached_html_response(
         StatusCode::OK,
-        &document,
+        &page.document,
         None,
     )))
 }
@@ -696,32 +814,67 @@ fn posted_form<'a>(
     Some(PostedForm { content_type, body })
 }
 
+/// A rendered page document, and whether producing it read request state.
+///
+/// The two travel together because the second decides what may be said about
+/// the first. A render that called `cookies()`, `headers()`, or `draftMode()`
+/// produced one visitor's document, and both caches it can reach — the render
+/// cache inside this process and whatever shared cache the `cache-control`
+/// speaks to — have to be told so. Keeping the flag beside the bytes is what
+/// stops a later caller from having only half the answer.
+///
+/// Only [`render_page_pooled`] can report `true`: every other strategy renders
+/// through `handleSsg` in `worker-pool.mjs`, which installs no request context,
+/// so those accessors throw there instead of answering.
+struct RenderedPage {
+    document: CachedDocument,
+    request_scoped: bool,
+}
+
+impl RenderedPage {
+    /// A document produced without reading request state.
+    fn shared(document: CachedDocument) -> Self {
+        Self {
+            document,
+            request_scoped: false,
+        }
+    }
+}
+
 async fn render_page_by_strategy(
     state: &AppState,
     route: &RouteEntry,
     request: &PageRequestContext<'_>,
     params: &RouteParams,
     styles: &str,
-) -> Result<CachedDocument> {
+) -> Result<RenderedPage> {
     match route.render.strategy {
         RenderStrategy::Ssr => {
             let forced = state.render_cache.forced_claim(request.path).await;
-            let document = render_page_pooled(state, route, request, params, styles).await?;
+            let page = render_page_pooled(state, route, request, params, styles).await?;
             if let Some(claim) = forced {
                 state
                     .render_cache
                     .acknowledge_forced(request.path, claim)
                     .await;
             }
-            Ok(document)
+            Ok(page)
         }
         RenderStrategy::Ssg => {
             // In dev mode, SSG pages are rendered on-demand like SSR but cached indefinitely.
-            render_page_ssg(state, route, request.path, params, styles).await
+            render_page_ssg(state, route, request.path, params, styles)
+                .await
+                .map(RenderedPage::shared)
         }
-        RenderStrategy::Isr => render_page_isr(state, route, request.path, params, styles).await,
-        RenderStrategy::Csr => render_page_csr(state, route, request.path, params, styles).await,
-        RenderStrategy::Ppr => render_page_ppr(state, route, request.path, params, styles).await,
+        RenderStrategy::Isr => render_page_isr(state, route, request.path, params, styles)
+            .await
+            .map(RenderedPage::shared),
+        RenderStrategy::Csr => render_page_csr(state, route, request.path, params, styles)
+            .await
+            .map(RenderedPage::shared),
+        RenderStrategy::Ppr => render_page_ppr(state, route, request.path, params, styles)
+            .await
+            .map(RenderedPage::shared),
     }
 }
 
@@ -741,8 +894,45 @@ async fn render_page_ssg(
 
     // `revalidatePath()` named this URL. The build's HTML on disk is exactly
     // what it asked to replace, so this one request skips it and renders fresh.
+    //
+    // Claimed before the single flight and never inside it: a forced request is
+    // replacing content the application declared out of date, and answering it
+    // with a render that began before that declaration would serve exactly what
+    // it invalidated. Only one request holds the claim, so the rest of a burst
+    // still coalesces.
     let forced = state.render_cache.forced_claim(request_path).await;
+    if forced.is_some() {
+        return render_page_ssg_fresh(
+            state,
+            route,
+            request_path,
+            params,
+            styles,
+            &cache_key,
+            forced,
+        )
+        .await;
+    }
 
+    single_flight_document(
+        &state.single_flight,
+        &state.render_cache,
+        &cache_key,
+        || render_page_ssg_fresh(state, route, request_path, params, styles, &cache_key, None),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn render_page_ssg_fresh(
+    state: &AppState,
+    route: &RouteEntry,
+    request_path: &str,
+    params: &RouteParams,
+    styles: &str,
+    cache_key: &str,
+    forced: Option<ForcedRevalidationClaim>,
+) -> Result<CachedDocument> {
     // In production, serve the pre-rendered HTML file. Read it from disk once
     // and serve subsequent requests from the in-memory render cache — a
     // synchronous file open per request otherwise dominates the hot path.
@@ -752,7 +942,7 @@ async fn render_page_ssg(
             &state.render_cache,
             &state.config.prerender_dir,
             request_path,
-            &cache_key,
+            cache_key,
         )
         .await
     {
@@ -819,7 +1009,7 @@ async fn render_page_ssg(
         params,
     );
 
-    let document = state.render_cache.put(cache_key, html).await;
+    let document = state.render_cache.put(cache_key.to_string(), html).await;
     settle_forced_revalidation(state, request_path, forced, &document.html).await;
     Ok(document)
 }
@@ -847,18 +1037,52 @@ async fn render_page_isr(
         return Ok(cached);
     }
 
+    // A path `revalidatePath()` named renders on its own, for the reason given
+    // in `render_page_ssg`.
+    let forced = state.render_cache.forced_claim(request_path).await;
+    if forced.is_some() {
+        return render_page_isr_fresh(
+            state,
+            route,
+            request_path,
+            params,
+            styles,
+            &cache_key,
+            forced,
+        )
+        .await;
+    }
+
+    single_flight_document(
+        &state.single_flight,
+        &state.render_cache,
+        &cache_key,
+        || render_page_isr_fresh(state, route, request_path, params, styles, &cache_key, None),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn render_page_isr_fresh(
+    state: &AppState,
+    route: &RouteEntry,
+    request_path: &str,
+    params: &RouteParams,
+    styles: &str,
+    cache_key: &str,
+    forced: Option<ForcedRevalidationClaim>,
+) -> Result<CachedDocument> {
     // In production, try the pre-rendered HTML file. Storing it means the first
     // background revalidation waits until the route's declared interval instead
     // of firing once per request. A path `revalidatePath()` named skips it: the
     // build's document is the stale one the caller is replacing.
-    let forced = state.render_cache.forced_claim(request_path).await;
     if forced.is_none()
         && !state.config.watch
         && let Some(html) = store_prerendered_html(
             &state.render_cache,
             &state.config.prerender_dir,
             request_path,
-            &cache_key,
+            cache_key,
         )
         .await
     {
@@ -867,7 +1091,7 @@ async fn render_page_isr(
 
     // No cached version — render synchronously (blocking fallback)
     let html = render_isr_background(state, route, request_path, params, styles).await?;
-    let document = state.render_cache.put(cache_key, html).await;
+    let document = state.render_cache.put(cache_key.to_string(), html).await;
     settle_forced_revalidation(state, request_path, forced, &document.html).await;
     Ok(document)
 }
@@ -984,6 +1208,182 @@ impl Drop for IsrRevalidationSlot {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&self.key);
+    }
+}
+
+/// The renders currently in flight, keyed by the cache key each will fill.
+///
+/// A cacheable render is a check, a render, and a store, with nothing claiming
+/// the key in between — so N requests that arrive for one cold URL each found a
+/// miss and each rendered it. The worker process does coalesce identical renders
+/// it sees together, but `select_worker` hands each racing request to a
+/// different idle worker precisely so they do not queue behind one another, so
+/// no worker ever saw more than one of them. Single-flight has to live here,
+/// above the pool: the Rust host is the only side that knows the cache key.
+///
+/// Waiters receive the winner's `CachedDocument` — the same `Arc<str>` and the
+/// same lazily-compressed copy the cache stores, not a second encoding of equal
+/// bytes.
+#[derive(Default)]
+pub(crate) struct RenderSingleFlight {
+    /// Sender per in-flight key. Dropped when the render ends, which is what
+    /// tells waiters to answer for themselves.
+    in_flight: Mutex<HashMap<String, broadcast::Sender<CachedDocument>>>,
+    /// Route patterns whose renders have been observed to read request state.
+    ///
+    /// Whether a document is one visitor's is only knowable after the render:
+    /// the worker reports it, having watched for a `cookies()`, `headers()`, or
+    /// `draftMode()` call. Such a document may never be published to waiters, so
+    /// coalescing those routes would make every burst wait out one render and
+    /// then still render for itself — slower than not coalescing at all. Keyed
+    /// by route pattern rather than URL because it is a property of the route's
+    /// code: the set is bounded by the manifest, and a route that stops reading
+    /// request state is coalesced again after the next restart.
+    request_scoped_routes: Mutex<HashSet<String>>,
+}
+
+/// Whether this caller renders the key or waits for the caller that is.
+pub(crate) enum RenderClaim {
+    Leader(RenderLeader),
+    Follower(broadcast::Receiver<CachedDocument>),
+}
+
+/// The claim on one cache key, released on drop.
+///
+/// Release is tied to `Drop` for the same reason [`IsrRevalidationSlot`]'s is: a
+/// render that panics, or a request whose future is dropped when the client goes
+/// away, must not leave the key claimed. Dropping the sender closes the channel,
+/// so waiters are woken with an error rather than left waiting for a render that
+/// is no longer running — a single-flight that turns one failure into a stall
+/// for every concurrent request is worse than the duplicate renders it replaced.
+pub(crate) struct RenderLeader {
+    flight: Arc<RenderSingleFlight>,
+    key: String,
+    updates: broadcast::Sender<CachedDocument>,
+}
+
+impl RenderSingleFlight {
+    /// Claim `key`, or subscribe to the claim someone else holds.
+    pub(crate) fn claim(self: &Arc<Self>, key: &str) -> RenderClaim {
+        let mut in_flight = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(updates) = in_flight.get(key) {
+            return RenderClaim::Follower(updates.subscribe());
+        }
+        // One value is ever sent on this channel, so one slot is enough however
+        // many waiters there are.
+        let (updates, _) = broadcast::channel(1);
+        in_flight.insert(key.to_string(), updates.clone());
+        RenderClaim::Leader(RenderLeader {
+            flight: Arc::clone(self),
+            key: key.to_string(),
+            updates,
+        })
+    }
+
+    /// Whether this route's documents have been seen to depend on the request.
+    pub(crate) fn renders_request_scoped(&self, route_path: &str) -> bool {
+        self.request_scoped_routes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(route_path)
+    }
+
+    pub(crate) fn mark_request_scoped(&self, route_path: &str) {
+        self.request_scoped_routes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(route_path.to_string());
+    }
+
+    /// How many callers are waiting on `key`.
+    #[cfg(test)]
+    fn waiting(&self, key: &str) -> usize {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(key)
+            .map_or(0, broadcast::Sender::receiver_count)
+    }
+}
+
+impl RenderLeader {
+    /// Hand the finished document to everyone waiting on this key.
+    ///
+    /// Only ever called with a document that was also allowed into the render
+    /// cache. That is the same question — is this document shareable — and
+    /// answering it twice is how one visitor's page would reach another's.
+    fn publish(&self, document: &CachedDocument) {
+        let _ = self.updates.send(document.clone());
+    }
+}
+
+impl Drop for RenderLeader {
+    fn drop(&mut self) {
+        let mut in_flight = self
+            .flight
+            .in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // Only this leader's own channel: a later render of the same key has
+        // its own claim, and removing that would let a third caller start a
+        // duplicate render of what is still in flight.
+        if in_flight
+            .get(&self.key)
+            .is_some_and(|updates| updates.same_channel(&self.updates))
+        {
+            in_flight.remove(&self.key);
+        }
+    }
+}
+
+/// Render `cache_key` once for however many callers are asking for it at once.
+///
+/// The losers wait for the winner's document. A winner that fails, is cancelled,
+/// or produces something unshareable publishes nothing, and each waiter then
+/// answers for itself — which is exactly what all of them did before this
+/// existed, so the worst case is the old behaviour rather than a stall.
+async fn single_flight_document<F, Fut>(
+    flight: &Arc<RenderSingleFlight>,
+    cache: &RenderCache,
+    cache_key: &str,
+    render: F,
+) -> Result<CachedDocument>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<CachedDocument>>,
+{
+    match flight.claim(cache_key) {
+        RenderClaim::Follower(updates) => {
+            if let Some(document) = await_shared_document(updates, cache, cache_key).await {
+                return Ok(document);
+            }
+            render().await
+        }
+        RenderClaim::Leader(leader) => {
+            let rendered = render().await;
+            if let Ok(document) = &rendered {
+                leader.publish(document);
+            }
+            rendered
+        }
+    }
+}
+
+/// Wait for the render that claimed this key, or `None` if it produced nothing
+/// this caller may use.
+async fn await_shared_document(
+    mut updates: broadcast::Receiver<CachedDocument>,
+    cache: &RenderCache,
+    cache_key: &str,
+) -> Option<CachedDocument> {
+    match updates.recv().await {
+        Ok(document) => Some(document),
+        // The leader published and then released its claim before this caller
+        // subscribed, so the document it stored is already in the cache.
+        Err(_) => cache.get_document(cache_key).await,
     }
 }
 
@@ -1275,8 +1675,41 @@ async fn render_page_ppr(
         return Ok(cached);
     }
 
+    // A path `revalidatePath()` named renders on its own, for the reason given
+    // in `render_page_ssg`.
     let forced = state.render_cache.forced_claim(request_path).await;
+    if forced.is_some() {
+        return render_page_ppr_fresh(
+            state,
+            route,
+            request_path,
+            params,
+            styles,
+            &cache_key,
+            forced,
+        )
+        .await;
+    }
 
+    single_flight_document(
+        &state.single_flight,
+        &state.render_cache,
+        &cache_key,
+        || render_page_ppr_fresh(state, route, request_path, params, styles, &cache_key, None),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn render_page_ppr_fresh(
+    state: &AppState,
+    route: &RouteEntry,
+    request_path: &str,
+    params: &RouteParams,
+    styles: &str,
+    cache_key: &str,
+    forced: Option<ForcedRevalidationClaim>,
+) -> Result<CachedDocument> {
     // In production, serve the pre-rendered PPR shell. The cache lookup above
     // must come first: reading the shell from disk before consulting the cache
     // made the cache unreachable and re-read the same file on every request.
@@ -1286,7 +1719,7 @@ async fn render_page_ppr(
             &state.render_cache,
             &state.config.prerender_dir,
             request_path,
-            &cache_key,
+            cache_key,
         )
         .await
     {
@@ -1306,7 +1739,7 @@ async fn render_page_ppr(
             mode: "ppr",
             // Partial pre-rendering streams a shell through a different entry
             // than the server-components pipeline builds, so the two are
-            // refused together at discovery (RUV1011) rather than combined here.
+            // refused together at discovery (RUV1019) rather than combined here.
             server_components: false,
         })
         .await?;
@@ -1355,7 +1788,7 @@ async fn render_page_ppr(
         params,
     );
 
-    let document = state.render_cache.put(cache_key, html).await;
+    let document = state.render_cache.put(cache_key.to_string(), html).await;
     settle_forced_revalidation(state, request_path, forced, &document.html).await;
     Ok(document)
 }
@@ -1432,7 +1865,7 @@ async fn render_root_not_found(
     render_page_pooled(state, &route, &request, &RouteParams::new(), &styles)
         .await
         .ok()
-        .map(|document| document.html.to_string())
+        .map(|page| page.document.html.to_string())
 }
 async fn render_page_pooled(
     state: &AppState,
@@ -1440,7 +1873,7 @@ async fn render_page_pooled(
     request: &PageRequestContext<'_>,
     params: &RouteParams,
     styles: &str,
-) -> Result<CachedDocument> {
+) -> Result<RenderedPage> {
     // Check render cache first. Three things skip it. A submitted form skips it
     // in both directions: a stored document was rendered before this action ran,
     // and the one this produces answers a submission nobody else made. A route
@@ -1451,9 +1884,50 @@ async fn render_page_pooled(
     let cache_key = render_cache::ssr_cache_key(request.path, params);
     let cacheable = request.form_action.is_none() && !route.render.force_dynamic;
     if cacheable && let Some(cached) = state.render_cache.get_document(&cache_key).await {
-        return Ok(cached);
+        // A document the render cache holds was allowed in, which is the same
+        // question this flag answers: nothing request-scoped is ever stored.
+        return Ok(RenderedPage::shared(cached));
     }
 
+    // A render nobody else can use is not worth coalescing, and a route already
+    // seen to read request state would only make a burst wait out one render
+    // before every caller rendered anyway.
+    if !cacheable || state.single_flight.renders_request_scoped(&route.path) {
+        return render_page_pooled_fresh(state, route, request, params, styles, &cache_key).await;
+    }
+
+    match state.single_flight.claim(&cache_key) {
+        RenderClaim::Follower(updates) => {
+            if let Some(document) =
+                await_shared_document(updates, &state.render_cache, &cache_key).await
+            {
+                return Ok(RenderedPage::shared(document));
+            }
+            render_page_pooled_fresh(state, route, request, params, styles, &cache_key).await
+        }
+        RenderClaim::Leader(leader) => {
+            let page =
+                render_page_pooled_fresh(state, route, request, params, styles, &cache_key).await;
+            match &page {
+                // Published under exactly the condition the document was stored
+                // under. A request-scoped render is one visitor's page.
+                Ok(rendered) if !rendered.request_scoped => leader.publish(&rendered.document),
+                Ok(_) => state.single_flight.mark_request_scoped(&route.path),
+                Err(_) => {}
+            }
+            page
+        }
+    }
+}
+
+async fn render_page_pooled_fresh(
+    state: &AppState,
+    route: &RouteEntry,
+    request: &PageRequestContext<'_>,
+    params: &RouteParams,
+    styles: &str,
+    cache_key: &str,
+) -> Result<RenderedPage> {
     // The page source is deliberately not read here. Confirming the default
     // export is route validation's job (`ruvyxa check`, and `validate_app` on
     // every build), and doing it again per request meant a full
@@ -1552,12 +2026,19 @@ async fn render_page_pooled(
     );
 
     if request_scoped {
-        return Ok(CachedDocument::uncached(Arc::from(html)));
+        // Not stored, and the flag travels with it so the caller can keep it out
+        // of the shared caches downstream too.
+        return Ok(RenderedPage {
+            document: CachedDocument::uncached(Arc::from(html)),
+            request_scoped: true,
+        });
     }
 
     // Cache the fully rendered page for subsequent requests, and serve the very
     // allocation that was stored.
-    Ok(state.render_cache.put(cache_key, html).await)
+    Ok(RenderedPage::shared(
+        state.render_cache.put(cache_key.to_string(), html).await,
+    ))
 }
 
 /// Act on the `revalidatePath()` calls an API route or server action made.
@@ -2414,11 +2895,75 @@ mod tests {
             route.render.strategy = strategy;
             route.render.revalidate = revalidate;
             let mut response = html_response(StatusCode::OK, "<html></html>".to_string());
-            insert_document_cache_control(&mut response, &route);
+            insert_document_cache_control(&mut response, &route, false);
             assert_eq!(
                 response.headers()[header::CACHE_CONTROL],
                 expected,
                 "{strategy:?}"
+            );
+        }
+    }
+
+    /// A render that read request state is never offered to a shared cache.
+    ///
+    /// `request_scoped` was computed by `render_page_pooled` and read only by
+    /// the *store* decision — whether the render cache may hold the document.
+    /// Nothing consulted it when the `cache-control` went on, so the answer to
+    /// "may another process reuse this?" and the answer to "may a CDN?" came
+    /// from different places. For `Isr` the header a personalised document left
+    /// with was `public, max-age=0, s-maxage=…, stale-while-revalidate=…`, which
+    /// is one visitor's page offered to every later reader of that URL.
+    ///
+    /// Held here for every strategy, not only the ones a request-scoped document
+    /// can reach today, because what is being pinned is that the response's own
+    /// answer outranks the route's table. `handlePage` in
+    /// `serverless-handler.mjs` is the other half of the same rule.
+    #[test]
+    fn a_request_scoped_document_is_never_shared_cacheable() {
+        let mut route = ruvyxa_graph::RouteEntry {
+            id: "page:/x".to_string(),
+            path: "/x".to_string(),
+            kind: RouteKind::Page,
+            file: std::path::PathBuf::from("app/x/page.tsx"),
+            layout_chain: Vec::new(),
+            template_chain: Vec::new(),
+            slots: Vec::new(),
+            intercepts: Vec::new(),
+            server_modules: Vec::new(),
+            client_modules: Vec::new(),
+            runtime: ruvyxa_graph::RuntimeTarget::Node,
+            render: Default::default(),
+        };
+
+        for strategy in [
+            RenderStrategy::Ssg,
+            RenderStrategy::Csr,
+            RenderStrategy::Ssr,
+            RenderStrategy::Isr,
+            RenderStrategy::Ppr,
+        ] {
+            route.render.strategy = strategy;
+            route.render.revalidate = Some(30);
+
+            let mut response = html_response(StatusCode::OK, "<html></html>".to_string());
+            insert_document_cache_control(&mut response, &route, true);
+            let value = response.headers()[header::CACHE_CONTROL]
+                .to_str()
+                .expect("cache-control is ASCII");
+            assert_eq!(value, "no-store", "{strategy:?}");
+            assert!(
+                !value.contains("s-maxage"),
+                "{strategy:?} must name no shared-cache lifetime"
+            );
+
+            // The 304 answering a conditional request for that document says the
+            // same thing; a 200 and its 304 disagreeing about who may reuse a
+            // document is the same disclosure in two steps.
+            let not_modified = not_modified_document("W/\"abc\"", &route, true);
+            assert_eq!(
+                not_modified.headers()[header::CACHE_CONTROL],
+                "no-store",
+                "{strategy:?} 304"
             );
         }
     }
@@ -2452,7 +2997,7 @@ mod tests {
             etag.starts_with("W/"),
             "documents are served in more than one              encoding, so the validator is weak"
         );
-        let response = not_modified_document(&etag, &route);
+        let response = not_modified_document(&etag, &route, false);
 
         assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
         assert_eq!(response.headers()[header::ETAG], etag);
@@ -2736,6 +3281,181 @@ mod tests {
         assert_eq!(
             matched.params.get("slug").and_then(|value| value.as_str()),
             Some("hello")
+        );
+    }
+
+    /// A burst of concurrent requests for one cold URL.
+    const BURST: usize = 8;
+    const BURST_KEY: &str = "ssg:/pricing";
+
+    /// Block until every caller in the burst has claimed or subscribed.
+    ///
+    /// Without it the leader could finish before the others arrive, and they
+    /// would each start a render of their own — which is what the count is
+    /// supposed to be measuring the absence of.
+    async fn wait_for_waiters(flight: &Arc<RenderSingleFlight>, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while flight.waiting(BURST_KEY) < expected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the burst never reached the in-flight render");
+    }
+
+    /// N concurrent requests for one cold page cost one render, not N.
+    ///
+    /// Every cacheable strategy was a check, a render, and a store with nothing
+    /// claiming the key in between. The worker process coalesces identical
+    /// renders it sees together, but `select_worker` deliberately routes racing
+    /// requests to different idle workers, so no worker ever saw two of them.
+    /// The first half of this test is that shape, and it is what the second half
+    /// is measured against.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn one_cold_key_is_rendered_once_for_the_whole_burst() {
+        let html = "<!doctype html><html><body>pricing</body></html>";
+
+        // Check, render, store — with no claim between the miss and the store.
+        let cache = Arc::new(RenderCache::new(16, 60));
+        let uncoalesced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let together = Arc::new(tokio::sync::Barrier::new(BURST));
+        let mut burst = tokio::task::JoinSet::new();
+        for _ in 0..BURST {
+            let cache = Arc::clone(&cache);
+            let renders = Arc::clone(&uncoalesced);
+            let together = Arc::clone(&together);
+            burst.spawn(async move {
+                if cache.get_document(BURST_KEY).await.is_some() {
+                    return;
+                }
+                renders.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                together.wait().await;
+                cache.put(BURST_KEY.to_string(), html.to_string()).await;
+            });
+        }
+        while burst.join_next().await.is_some() {}
+        assert_eq!(
+            uncoalesced.load(std::sync::atomic::Ordering::SeqCst),
+            BURST,
+            "without a claim every request in the burst renders the page itself"
+        );
+
+        // The same burst, coalesced. The leader cannot finish until the whole
+        // burst is waiting on it, so the count is not a scheduling accident.
+        let cache = Arc::new(RenderCache::new(16, 60));
+        let flight = Arc::new(RenderSingleFlight::default());
+        let renders = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut burst = tokio::task::JoinSet::new();
+        for _ in 0..BURST {
+            let cache = Arc::clone(&cache);
+            let flight = Arc::clone(&flight);
+            let renders = Arc::clone(&renders);
+            let release = Arc::clone(&release);
+            burst.spawn(async move {
+                single_flight_document(&flight, &cache, BURST_KEY, || async {
+                    renders.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let _permit = release.acquire().await.unwrap();
+                    Ok(cache.put(BURST_KEY.to_string(), html.to_string()).await)
+                })
+                .await
+            });
+        }
+
+        wait_for_waiters(&flight, BURST - 1).await;
+        release.add_permits(BURST);
+
+        let mut documents = Vec::new();
+        while let Some(joined) = burst.join_next().await {
+            documents.push(joined.unwrap().expect("every caller must be answered"));
+        }
+        assert_eq!(
+            renders.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the burst must cost one render"
+        );
+        assert_eq!(documents.len(), BURST);
+        for document in &documents {
+            assert!(
+                Arc::ptr_eq(&document.html, &documents[0].html),
+                "every caller must receive the winner's document, not a copy"
+            );
+        }
+    }
+
+    /// A render that fails must release its claim, not strand the burst.
+    ///
+    /// This is the failure mode a single-flight introduces if the claim is only
+    /// released on success: one broken render would hold every concurrent
+    /// request for that URL until they timed out. Each waiter answers for
+    /// itself instead, which is exactly what all of them did before.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_failing_shared_render_releases_its_claim() {
+        let cache = Arc::new(RenderCache::new(16, 60));
+        let flight = Arc::new(RenderSingleFlight::default());
+        let renders = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+
+        let mut burst = tokio::task::JoinSet::new();
+        for _ in 0..BURST {
+            let cache = Arc::clone(&cache);
+            let flight = Arc::clone(&flight);
+            let renders = Arc::clone(&renders);
+            let release = Arc::clone(&release);
+            burst.spawn(async move {
+                single_flight_document(&flight, &cache, BURST_KEY, || async {
+                    renders.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let _permit = release.acquire().await.unwrap();
+                    Err(RuvyxaError::Message("render failed".to_string()))
+                })
+                .await
+            });
+        }
+
+        wait_for_waiters(&flight, BURST - 1).await;
+        release.add_permits(BURST);
+
+        let answered = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut answers = Vec::new();
+            while let Some(joined) = burst.join_next().await {
+                answers.push(joined.unwrap());
+            }
+            answers
+        })
+        .await
+        .expect("a failed render must not leave the burst waiting");
+
+        assert_eq!(answered.len(), BURST);
+        assert!(answered.iter().all(std::result::Result::is_err));
+        assert_eq!(
+            renders.load(std::sync::atomic::Ordering::SeqCst),
+            BURST,
+            "each waiter falls back to rendering for itself"
+        );
+        assert_eq!(
+            flight.waiting(BURST_KEY),
+            0,
+            "no claim may outlive the render that took it"
+        );
+    }
+
+    /// A route whose renders read cookies, headers, or draft mode is never
+    /// coalesced again.
+    ///
+    /// Its document is one visitor's, so it may not be published — and waiting
+    /// out a render nobody can use, only to render anyway, is slower than never
+    /// having claimed. The mark is per route pattern because request-scoping is
+    /// a property of the route's code, not of the URL.
+    #[test]
+    fn a_route_seen_rendering_request_state_is_not_coalesced_again() {
+        let flight = RenderSingleFlight::default();
+
+        assert!(!flight.renders_request_scoped("/account"));
+        flight.mark_request_scoped("/account");
+        assert!(flight.renders_request_scoped("/account"));
+        assert!(
+            !flight.renders_request_scoped("/pricing"),
+            "one route's request-scoping says nothing about another's"
         );
     }
 

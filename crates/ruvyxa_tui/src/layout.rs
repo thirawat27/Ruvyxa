@@ -23,6 +23,7 @@ use chrono::Local;
 
 use crate::gradient::{HEAT, RULE};
 use crate::mascot::{Frame, glyphs};
+use crate::stream::{print_blank_line, print_fragment, print_line};
 use crate::theme::{capabilities, color_depth, dim, label, ok_text, paint, warn_text};
 
 /// Width of the label column in a `key: value` field line.
@@ -36,7 +37,7 @@ pub const PHASE_LABEL_WIDTH: usize = 20;
 pub const RULE_END_COLUMN: usize = FIELD_LABEL_WIDTH + 8;
 
 pub fn print_field(name: &str, value: String) {
-    println!("{}", field_line(name, value));
+    print_line(&field_line(name, value));
 }
 
 pub fn field_line(name: &str, value: String) -> String {
@@ -128,7 +129,7 @@ pub enum TableRule {
 }
 
 pub fn print_table_rule(widths: &[usize], rule: TableRule) {
-    println!("{}", table_rule_line(widths, rule));
+    print_line(&table_rule_line(widths, rule));
 }
 
 pub fn table_rule_line(widths: &[usize], rule: TableRule) -> String {
@@ -161,25 +162,19 @@ pub fn print_box_row<const N: usize>(
     right_aligned: [bool; N],
 ) {
     let edge = dim(glyphs(capabilities()).frame.vertical);
-    print!("  {edge}");
+    print_fragment(&format!("  {edge}"));
     for index in 0..N {
-        if !right_aligned[index] {
-            print!(
-                " {}{} {}",
-                styled[index],
-                spaces(widths[index], display_width(raw[index])),
-                edge
-            );
+        let padding = spaces(widths[index], display_width(raw[index]));
+        // A cell arrives already styled, and a caller composing its own row may
+        // pass one that never went through a role — the route table's `path`
+        // column does. `print_fragment` is what filters those.
+        if right_aligned[index] {
+            print_fragment(&format!(" {padding}{} {edge}", styled[index]));
         } else {
-            print!(
-                " {}{} {}",
-                spaces(widths[index], display_width(raw[index])),
-                styled[index],
-                edge
-            );
+            print_fragment(&format!(" {}{padding} {edge}", styled[index]));
         }
     }
-    println!();
+    print_blank_line();
 }
 
 pub fn path_text(path: &Path) -> String {
@@ -213,8 +208,8 @@ pub fn enabled_text(enabled: bool) -> &'static str {
 /// fades rather than ending square so it reads as an underline rather than as
 /// the top of a box.
 pub fn print_section(title: &str) {
-    println!();
-    println!("{}", section_line(title));
+    print_blank_line();
+    print_line(&section_line(title));
 }
 
 pub fn section_line(title: &str) -> String {

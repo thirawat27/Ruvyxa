@@ -303,6 +303,13 @@ fn state_payload(state: &HashMap<String, StateEntry>) -> Value {
 
 /// Decode one inbound frame, rejecting anything a client should not be able to
 /// make the server hold onto.
+///
+/// The size check is no longer the first bound a WebSocket peer meets:
+/// `bounded_upgrade` in `realtime_endpoints.rs` configures the transport from
+/// [`MAX_FRAME_BYTES`] as well, so an oversize frame fails during header
+/// parsing and this function never sees the payload. It stays because it is
+/// the bound for every *other* caller — the size check is what makes this
+/// function safe to hand an arbitrary string.
 pub fn parse_client_frame(payload: &str) -> Result<ParsedFrame, &'static str> {
     if payload.len() > MAX_FRAME_BYTES {
         return Err("Collaboration frames are limited to 32 KiB");

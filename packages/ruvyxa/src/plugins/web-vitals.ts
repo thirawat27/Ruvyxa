@@ -1,7 +1,14 @@
 import { definePlugin } from '@ruvyxa/core/plugin'
 import type { RuvyxaPlugin } from '@ruvyxa/core/plugin'
 
-import { normalizePublicFilePath, normalizePublicPath, writePublicAsset } from './shared.js'
+import {
+  boundedRateLimitKey,
+  consumeFixedWindow,
+  normalizePublicFilePath,
+  normalizePublicPath,
+  writePublicAsset,
+} from './shared.js'
+import type { FixedWindowBucket } from './shared.js'
 
 // ─── webVitals ───────────────────────────────────────────────────────────────
 
@@ -27,9 +34,63 @@ export interface WebVitalsOptions {
   sampleRate?: number
   /** Receives each reported metric. Defaults to a single-line JSON log. */
   logger?: (entry: WebVitalsEntry) => void
+  /**
+   * The ceiling on accepted records, or `false` to accept every beacon.
+   *
+   * `max` records per `windowSeconds` from one client, and — always, because a
+   * client cannot be identified without `clientIp` — fifty times that from
+   * every client combined. The wider ceiling is derived rather than separately
+   * configurable, the same way `@ruvyxa/auth` derives its account-wide ones
+   * from `rateLimit.max`.
+   *
+   * The default is deliberately loose. This endpoint exists to measure what
+   * real visitors experienced, and a limit tight enough to catch a flood is
+   * also tight enough to drop the beacons of a large shared egress — an office,
+   * a mobile carrier — which does not merely lose data, it biases the metric
+   * towards whoever was not behind a NAT. Raise it before narrowing it.
+   *
+   * Set `false` only where something else already bounds the endpoint, which on
+   * a platform with a WAF in front of the origin is the better place for it.
+   *
+   * @default { max: 120, windowSeconds: 60 }
+   */
+  rateLimit?: { max?: number; windowSeconds?: number } | false
+  /**
+   * Resolve the client the per-client budget is counted against.
+   *
+   * Off by default and shaped exactly like `@ruvyxa/auth`'s, because forwarded
+   * headers are written by whoever spoke last: only the deployment knows
+   * whether a trusted proxy or platform edge overwrites them. Read the header
+   * the platform guarantees — `(request) => request.headers.get('cf-connecting-ip')`
+   * — or the rightmost `x-forwarded-for` hop behind a proxy you control.
+   *
+   * Without it there is no per-client bucket at all, and the endpoint ceiling
+   * is the only thing left. A user-agent fallback is deliberately not offered:
+   * for a login endpoint it separates a few callers, and for a metrics endpoint
+   * it puts every visitor on one browser into one bucket, which is the outage
+   * a limiter exists to prevent.
+   */
+  clientIp?(request: Request): string | null | undefined
 }
 
 const METRIC_NAMES = new Set(['LCP', 'CLS', 'INP', 'FCP', 'TTFB'])
+
+/**
+ * How much wider the endpoint's own ceiling is than one client's.
+ *
+ * Derived, not configurable: `@ruvyxa/auth` settled the same question the same
+ * way, and a second number to tune is a second number to get wrong in the
+ * direction that silently discards real measurements.
+ */
+const ENDPOINT_BUDGET_MULTIPLE = 50
+
+/**
+ * The endpoint-wide ceiling is counted in a map of its own rather than under
+ * a reserved key beside the clients: a resolver may return any string, and a
+ * shared namespace is a collision waiting for the one caller that guesses the
+ * reserved name and drains everybody else's allowance.
+ */
+const ENDPOINT_BUCKET = 'endpoint'
 
 /**
  * Collects Core Web Vitals from the browser and reports them server-side.
@@ -62,7 +123,18 @@ export function webVitals(options: WebVitalsOptions = {}): RuvyxaPlugin {
   if (options.logger !== undefined && typeof options.logger !== 'function') {
     throw new TypeError('webVitals: logger must be a function')
   }
+  if (options.clientIp !== undefined && typeof options.clientIp !== 'function') {
+    throw new TypeError('webVitals: clientIp must be a function')
+  }
+  const budget = normalizeWebVitalsRateLimit(options.rateLimit)
   const script = createWebVitalsScript(endpoint, sampleRate)
+  // One map per ceiling. Both are per process: a deployed build runs as many
+  // instances as the platform started, so the effective ceiling scales with
+  // them, which is the honest trade for a limiter that needs no shared store.
+  // `@ruvyxa/auth` takes a store instead, because a login attempt has to be
+  // counted across every process and a dropped beacon does not.
+  const clientBuckets = new Map<string, FixedWindowBucket>()
+  const endpointBuckets = new Map<string, FixedWindowBucket>()
 
   return definePlugin({
     name: 'ruvyxa:web-vitals',
@@ -81,6 +153,21 @@ export function webVitals(options: WebVitalsOptions = {}): RuvyxaPlugin {
         path: endpoint,
         method: 'POST',
         async handler({ request }) {
+          // Refuse before the body is read: a beacon past the budget must cost
+          // the parse it was going to cost, not more.
+          const retryAfter = budget
+            ? refusedBeacon(request, budget, options.clientIp, clientBuckets, endpointBuckets)
+            : null
+          if (retryAfter !== null) {
+            // 429 rather than a silent 204. `sendBeacon` reads nothing back
+            // either way, so the only reader is the operator — and a collector
+            // that quietly discards measurements biases the numbers it exists
+            // to report, which is worse than reporting fewer of them.
+            return new Response(null, {
+              status: 429,
+              headers: { 'retry-after': String(retryAfter) },
+            })
+          }
           await collectWebVitals(request, options.logger)
           // The browser sends this with `sendBeacon` during page teardown and
           // reads nothing back; a body here would only be discarded.
@@ -90,6 +177,86 @@ export function webVitals(options: WebVitalsOptions = {}): RuvyxaPlugin {
       build.onComplete((context) => writePublicAsset(context, scriptPath, script))
     },
   })
+}
+
+interface WebVitalsBudget {
+  max: number
+  windowSeconds: number
+}
+
+/**
+ * The ceilings this collector enforces, or `null` when it enforces none.
+ *
+ * A zero is refused rather than read as "off": `rateLimit: { max: 0 }` reads
+ * like a very strict limit and would be an endpoint that accepts nothing, and
+ * a plugin whose configuration can switch it off by looking strict is a
+ * configuration nobody can review. `false` is the way to turn it off, and it
+ * says so.
+ */
+function normalizeWebVitalsRateLimit(value: WebVitalsOptions['rateLimit']): WebVitalsBudget | null {
+  if (value === false) return null
+  if (value === undefined) return { max: 120, windowSeconds: 60 }
+  if (typeof value !== 'object' || value === null) {
+    throw new TypeError('webVitals: rateLimit must be an object or false')
+  }
+  const max = value.max ?? 120
+  const windowSeconds = value.windowSeconds ?? 60
+  if (!Number.isInteger(max) || max < 1) {
+    throw new TypeError('webVitals: rateLimit.max must be a positive integer')
+  }
+  if (!Number.isInteger(windowSeconds) || windowSeconds < 1) {
+    throw new TypeError('webVitals: rateLimit.windowSeconds must be a positive integer')
+  }
+  return { max, windowSeconds }
+}
+
+/**
+ * The seconds to wait, or `null` when this beacon may be accepted.
+ *
+ * The endpoint ceiling is spent first and unconditionally, because it is the
+ * one that bounds what the log sink is billed for; the per-client ceiling
+ * exists only where the deployment told us how to recognise a client.
+ */
+function refusedBeacon(
+  request: Request,
+  budget: WebVitalsBudget,
+  clientIp: WebVitalsOptions['clientIp'],
+  clientBuckets: Map<string, FixedWindowBucket>,
+  endpointBuckets: Map<string, FixedWindowBucket>,
+): number | null {
+  const endpoint = consumeFixedWindow(
+    endpointBuckets,
+    ENDPOINT_BUCKET,
+    budget.max * ENDPOINT_BUDGET_MULTIPLE,
+    budget.windowSeconds,
+  )
+  if (endpoint !== null) return endpoint
+  const identity = resolveWebVitalsClient(request, clientIp)
+  if (identity === null) return null
+  return consumeFixedWindow(clientBuckets, identity, budget.max, budget.windowSeconds)
+}
+
+/**
+ * Who this beacon is counted against, or `null` when nothing identified it.
+ *
+ * A resolver that throws is not allowed to take the endpoint down with it, the
+ * same call `@ruvyxa/auth` makes: an unattributed beacon still meets the
+ * endpoint ceiling, so the failure costs precision rather than protection.
+ */
+function resolveWebVitalsClient(
+  request: Request,
+  clientIp: WebVitalsOptions['clientIp'],
+): string | null {
+  if (!clientIp) return null
+  let resolved: unknown
+  try {
+    resolved = clientIp(request)
+  } catch {
+    return null
+  }
+  if (typeof resolved !== 'string') return null
+  const trimmed = resolved.trim()
+  return trimmed === '' ? null : boundedRateLimitKey(trimmed)
 }
 
 async function collectWebVitals(

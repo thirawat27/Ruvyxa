@@ -136,6 +136,46 @@ pub fn has_named_runtime_export(source: &str, ast: &ModuleAst, name: &str) -> bo
                 return true;
             }
         }
+        // `export function* gen` and `export function * gen`: the star belongs to
+        // neither the keyword nor the name, so no fixed prefix above can reach
+        // past it and a generator export went unseen.
+        if let Some(rest) = declaration.strip_prefix("function")
+            && let Some(rest) = rest.trim_start().strip_prefix('*')
+            && is_export_name(rest.trim_start(), name)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether a module publishes `name` through an `export { … }` clause.
+///
+/// [`has_named_runtime_export`] answers a narrower question on purpose: a
+/// re-export is a graph edge it cannot prove, so it will not advertise one as a
+/// local runtime capability. A generator that *appends* its own
+/// `export const NAME` needs the wider answer instead — `export { x as NAME }`
+/// and `export { x as NAME } from './y'` both already occupy the name, and a
+/// second declaration beside them is a module that cannot be parsed at all.
+///
+/// `export type { x as NAME }` is erased at compile time and deliberately does
+/// not count; the `{` check below simply never reaches it.
+pub fn has_named_clause_export(source: &str, ast: &ModuleAst, name: &str) -> bool {
+    let mut offset = 0;
+    while let Some(found) = source[offset..].find("export") {
+        let index = offset + found;
+        offset = index + "export".len();
+        if !ast.is_code_offset(index) || !is_identifier_boundary(source, index, "export".len()) {
+            continue;
+        }
+        // `trim_start` leaves a suffix of `source`, so its length recovers the
+        // absolute offset of the brace without a second scan.
+        let clause = source[offset..].trim_start();
+        if clause.starts_with('{')
+            && named_clause_exports(source, source.len() - clause.len(), source.len(), name)
+        {
+            return true;
+        }
     }
     false
 }
@@ -171,8 +211,17 @@ fn is_export_name(rest: &str, name: &str) -> bool {
     })
 }
 
+/// Whether a byte can continue a JavaScript identifier.
+///
+/// Every non-ASCII byte counts. JavaScript identifiers are not ASCII, and a
+/// check written in ASCII bytes ends `frontmatterค่า` after `frontmatter` — the
+/// combining marks Thai, Devanagari, Arabic, Hebrew and Vietnamese are written
+/// with are not ASCII, and neither is any other letter outside it. Reading that
+/// as the name being asked about made a content page's generated `frontmatter`
+/// and `headings` exports disappear, because a different binding looked like
+/// the author had already written them.
 fn is_identifier_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$'
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$' || !byte.is_ascii()
 }
 
 /// Parse source into the facts the bundler needs.
@@ -253,6 +302,29 @@ fn scan_code(source: &str, start: usize, end: usize, ast: &mut ModuleAst) {
         }
         if bytes[index] == b'<' && looks_like_jsx_at(bytes, index) {
             ast.has_jsx = true;
+            // JSX children are text. Until this walk existed they were scanned
+            // as code, and `<p>write to @support</p>` reported `has_decorators`
+            // — the `@` sits where a decorator may, with an alphanumeric before
+            // it — so `strip_decorators_with_plan` deleted `@support` from the
+            // page. Silently, on the plan path, which is the one every build
+            // takes.
+            if jsx_can_start(bytes, previous_significant)
+                && let Some(element) = jsx_element(bytes, index)
+            {
+                for region in &element.regions {
+                    match *region {
+                        JsxRegion::Text(text_start, text_end) => {
+                            ast.text_spans.push((text_start, text_end));
+                        }
+                        JsxRegion::Code(code_start, code_end) => {
+                            scan_code(source, code_start, code_end, ast);
+                        }
+                    }
+                }
+                previous_significant = Some(element.end - 1);
+                index = element.end;
+                continue;
+            }
         }
 
         if !is_ident_start_byte(bytes[index]) {
@@ -471,6 +543,31 @@ fn mask_range(source: &str, start: usize, end: usize, out: &mut [u8]) {
             previous_significant = Some(slash);
             continue;
         }
+        // The same JSX walk `scan_code` runs, so the mask and
+        // [`ModuleAst::is_code_offset`] cannot disagree about a page's text.
+        // Element structure — `<`, `/`, `>`, tag and attribute names — stays
+        // code, so a reader searching the mask still finds an element.
+        if bytes[index] == b'<'
+            && looks_like_jsx_at(bytes, index)
+            && jsx_can_start(bytes, previous_significant)
+            && let Some(element) = jsx_element(bytes, index)
+        {
+            let mut cursor = index;
+            for region in &element.regions {
+                let (region_start, region_end) = match *region {
+                    JsxRegion::Text(start, end) | JsxRegion::Code(start, end) => (start, end),
+                };
+                out[cursor..region_start].copy_from_slice(&bytes[cursor..region_start]);
+                if let JsxRegion::Code(code_start, code_end) = *region {
+                    mask_range(source, code_start, code_end, out);
+                }
+                cursor = region_end;
+            }
+            out[cursor..element.end].copy_from_slice(&bytes[cursor..element.end]);
+            previous_significant = Some(element.end - 1);
+            index = element.end;
+            continue;
+        }
 
         out[index] = bytes[index];
         if !bytes[index].is_ascii_whitespace() {
@@ -523,19 +620,19 @@ fn export_declares_default(source: &str, after_keyword: usize, end: usize) -> bo
                 word_at(source, index, end) == Some("default")
             }
             // `export { Page as default }`, `export { default } from "./page"`
-            Some(b'{') => named_clause_exports_default(source, index, end),
+            Some(b'{') => named_clause_exports(source, index, end, "default"),
             _ => false,
         },
     }
 }
 
-/// Whether a `{ … }` export clause binds something to the name `default`.
+/// Whether a `{ … }` export clause binds something to `name`.
 ///
 /// The exported name is the last identifier of each comma-separated specifier,
-/// so `{ Page as default }` and `{ default }` both qualify while
-/// `{ default as Page }` re-exports another module's default under a new name
-/// and deliberately does not.
-fn named_clause_exports_default(source: &str, brace: usize, end: usize) -> bool {
+/// so for `name` = `default` both `{ Page as default }` and `{ default }`
+/// qualify while `{ default as Page }` re-exports another module's default under
+/// a new name and deliberately does not.
+fn named_clause_exports(source: &str, brace: usize, end: usize, name: &str) -> bool {
     let bytes = &source.as_bytes()[..end];
     let mut index = brace + 1;
     let mut last_word: Option<&str> = None;
@@ -551,9 +648,9 @@ fn named_clause_exports_default(source: &str, brace: usize, end: usize) -> bool 
             continue;
         }
         match bytes[index] {
-            b'}' => return last_word == Some("default"),
+            b'}' => return last_word == Some(name),
             b',' => {
-                if last_word == Some("default") {
+                if last_word == Some(name) {
                     return true;
                 }
                 last_word = None;
@@ -562,6 +659,17 @@ fn named_clause_exports_default(source: &str, brace: usize, end: usize) -> bool 
             byte if is_ident_start_byte(byte) => {
                 let start = index;
                 index = skip_identifier(bytes, index);
+                // `skip_identifier` reads ASCII identifier bytes only, so it
+                // stops at the first non-ASCII character and `{ frontmatterค่า }`
+                // read as if it published `frontmatter`. The run below can only
+                // end on an ASCII byte or the end of input, so the slice stays on
+                // a character boundary.
+                while bytes
+                    .get(index)
+                    .is_some_and(|byte| !byte.is_ascii() || is_ident_continue_byte(*byte))
+                {
+                    index += 1;
+                }
                 let word = &source[start..index];
                 // `as` is the separator, never the exported name.
                 if word != "as" {
@@ -758,13 +866,18 @@ fn char_start(bytes: &[u8], mut index: usize) -> usize {
     index
 }
 
-fn previous_token_is_keyword(bytes: &[u8], end: usize) -> bool {
+/// The identifier bytes ending at `end`, inclusive.
+fn previous_word(bytes: &[u8], end: usize) -> &[u8] {
     let mut start = end + 1;
     while start > 0 && is_ident_continue_byte(bytes[start - 1]) {
         start -= 1;
     }
+    &bytes[start..=end]
+}
+
+fn previous_token_is_keyword(bytes: &[u8], end: usize) -> bool {
     matches!(
-        std::str::from_utf8(&bytes[start..=end]).unwrap_or_default(),
+        std::str::from_utf8(previous_word(bytes, end)).unwrap_or_default(),
         "await"
             | "case"
             | "delete"
@@ -871,6 +984,20 @@ fn interpolation_end(bytes: &[u8], start: usize) -> usize {
             index = skip_regex_literal(bytes, index);
             continue;
         }
+        // A container holds JSX far more often than it holds anything else —
+        // `{items.map((i) => <li>{i}</li>)}` is the shape of every list in the
+        // framework. Without this the `/` of `</li>` reads as a regular
+        // expression opener, because the token before it is `<`, and the
+        // literal then runs past the `}` that closes this interpolation.
+        if bytes[index] == b'<'
+            && looks_like_jsx_at(bytes, index)
+            && jsx_can_start(bytes, previous_significant)
+            && let Some(element) = jsx_element(bytes, index)
+        {
+            previous_significant = Some(element.end - 1);
+            index = element.end;
+            continue;
+        }
         match bytes[index] {
             b'`' => {
                 previous_significant = Some(index);
@@ -952,9 +1079,22 @@ fn skip_string(bytes: &[u8], start: usize) -> usize {
 /// Whether an `@` at this position begins a decorator rather than sitting
 /// inside a larger token.
 ///
-/// Kept level with `begins_decorator` in `crate::compiler`, which strips what
-/// this reports.
-fn decorator_can_start(bytes: &[u8], at: usize) -> bool {
+/// `@` is not an operator in JavaScript, so a code-position one is a decorator
+/// either way — what matters is only that it is not part of a larger token. A
+/// decorator follows the start of a class body, the end of a previous member,
+/// another decorator, or the keyword before an exported class. Requiring it to
+/// start its own line was the earlier rule, and it left
+/// `class Svc { @log run() {} }` untouched: the shape a formatter picks for a
+/// short member, and the shape every minified dependency has.
+///
+/// `crate::compiler` strips what this reports, and used to answer the same
+/// question with a byte-identical copy of this body joined only by a comment.
+/// Widening one half alone was silent either way: widening this one made
+/// `has_decorators` true while the stripper matched no site, and widening the
+/// stripper made `has_decorators` false so it short-circuited before looking —
+/// the decorator survived into Oxc both times, and Oxc blamed a character. One
+/// rule, one place, so there is no half to widen.
+pub(crate) fn decorator_can_start(bytes: &[u8], at: usize) -> bool {
     let Some(previous) = bytes[..at]
         .iter()
         .rev()
@@ -972,6 +1112,245 @@ fn looks_like_jsx_at(bytes: &[u8], index: usize) -> bool {
         bytes.get(index + 1),
         Some(b'>') | Some(b'/') | Some(b'A'..=b'Z') | Some(b'a'..=b'z')
     )
+}
+
+/// A region inside a JSX element that is not element structure.
+///
+/// Everything else a JSX element is made of — `<`, `/`, `>`, tag names,
+/// attribute names — stays code, so [`masked_code`] still shows an element to
+/// the readers that search for one and `has_jsx` keeps its meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JsxRegion {
+    /// Children text, or an attribute's quoted value. Data, never code.
+    Text(usize, usize),
+    /// The inside of a `{ … }` expression container. Code again, and the walk
+    /// that owns it recurses rather than skipping: a container holds
+    /// `import('./x')`, `process.env.NAME`, and `{/* a comment */}`.
+    Code(usize, usize),
+}
+
+/// A JSX element the walk read from `<` to its matching close.
+struct JsxElement {
+    end: usize,
+    /// Ascending and non-overlapping, in the order the walk met them.
+    regions: Vec<JsxRegion>,
+}
+
+/// Whether a `<` at this position opens a JSX element rather than a comparison
+/// or a TypeScript type-argument list.
+///
+/// JSX, like a regular expression, *is* a value, so it can only appear where
+/// one is expected — which is the question [`regex_can_start`] already answers,
+/// and asking it here is what keeps `foo<Bar>(x)` and
+/// `new Map<string, number>()` out of text mode. Both look exactly like an
+/// opening tag and neither is one.
+///
+/// `export default <p>hi</p>` is the one shape that rule turns down and JSX
+/// allows: no regular expression may follow `default`, so it is not in
+/// [`previous_token_is_keyword`]'s list, and a page whose default export is an
+/// element would have kept the defect this whole walk exists to remove.
+fn jsx_can_start(bytes: &[u8], previous_significant: Option<usize>) -> bool {
+    if regex_can_start(bytes, previous_significant) {
+        return true;
+    }
+    previous_significant
+        .and_then(|at| last_token_byte(bytes, at))
+        .is_some_and(|index| previous_word(bytes, index) == b"default")
+}
+
+/// Read a JSX element whole, or decline.
+///
+/// Declining is the safe answer and the walk takes it for anything it does not
+/// recognize, because the two directions of a mistake are not symmetric.
+/// Reading text as code deletes an `@` from a rendered page — the defect this
+/// exists to fix, and a visible one. Reading *code* as text is silent and
+/// worse: an import inside it stops being a graph edge, a `process.env` read
+/// stops being reported to the boundary check, and the linker stops rewriting
+/// an `export` it has already bundled. So the element must close. A generic
+/// arrow function written `<T extends object>(x: T) => x` opens what looks like
+/// a tag, and nothing ever closes it — the walk reaches the end of the file,
+/// returns `None`, and the caller scans those bytes exactly as it does today.
+///
+/// What it handles: element and fragment children, arbitrarily nested;
+/// self-closing tags; `{ … }` expression containers in children and in
+/// attribute position, including spreads and `{/* … */}` comments; quoted
+/// attribute values, which JSX reads literally and so may hold an apostrophe or
+/// span lines.
+///
+/// What it deliberately declines, falling back to today's behaviour: a raw `<`
+/// in children (JSX rejects it too — it must be written `{'<'}`), type
+/// arguments on a tag name (`<Foo<Bar> />`), and any tag whose punctuation does
+/// not parse.
+fn jsx_element(bytes: &[u8], start: usize) -> Option<JsxElement> {
+    let mut regions = Vec::new();
+    let mut index = start;
+    let mut depth = 0usize;
+
+    loop {
+        if bytes.get(index) != Some(&b'<') {
+            return None;
+        }
+        match bytes.get(index + 1)? {
+            // `</name>` or `</>` closes the innermost element still open.
+            b'/' => {
+                let mut cursor = skip_jsx_name(bytes, index + 2);
+                cursor = skip_jsx_whitespace(bytes, cursor);
+                if bytes.get(cursor) != Some(&b'>') {
+                    return None;
+                }
+                index = cursor + 1;
+                depth = depth.checked_sub(1)?;
+            }
+            // `<>` opens a fragment.
+            b'>' => {
+                index += 2;
+                depth += 1;
+            }
+            byte if is_jsx_name_start(*byte) => {
+                let after_name = skip_jsx_name(bytes, index + 1);
+                let (after_tag, self_closing) = jsx_attributes(bytes, after_name, &mut regions)?;
+                index = after_tag;
+                if !self_closing {
+                    depth += 1;
+                }
+            }
+            _ => return None,
+        }
+
+        if depth == 0 {
+            return Some(JsxElement {
+                end: index,
+                regions,
+            });
+        }
+        index = jsx_children(bytes, index, &mut regions)?;
+    }
+}
+
+/// Walk an opening tag's attributes, returning the index past `>` or `/>` and
+/// whether the tag closed itself.
+fn jsx_attributes(
+    bytes: &[u8],
+    mut index: usize,
+    regions: &mut Vec<JsxRegion>,
+) -> Option<(usize, bool)> {
+    loop {
+        index = skip_jsx_whitespace(bytes, index);
+        match bytes.get(index)? {
+            b'>' => return Some((index + 1, false)),
+            b'/' if bytes.get(index + 1) == Some(&b'>') => return Some((index + 2, true)),
+            // `{...props}`.
+            b'{' => index = jsx_container(bytes, index, regions)?,
+            byte if is_jsx_name_start(*byte) => {
+                let after_name = skip_jsx_name(bytes, index);
+                let after_gap = skip_jsx_whitespace(bytes, after_name);
+                if bytes.get(after_gap) != Some(&b'=') {
+                    // A valueless attribute (`<input disabled>`). Resume at the
+                    // name's end; the next turn re-skips the gap.
+                    index = after_name;
+                    continue;
+                }
+                index = skip_jsx_whitespace(bytes, after_gap + 1);
+                match bytes.get(index)? {
+                    // JSX reads a quoted attribute value literally: no escape
+                    // sequences, and a newline inside it is ordinary text. That
+                    // is why `skip_string` — which stops at a newline, because a
+                    // JavaScript string may not span one — is not used here.
+                    quote @ (b'"' | b'\'') => {
+                        let close = jsx_attribute_value_end(bytes, index, *quote)?;
+                        push_region(regions, JsxRegion::Text(index + 1, close));
+                        index = close + 1;
+                    }
+                    b'{' => index = jsx_container(bytes, index, regions)?,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Walk children until the next `<`, recording their text and containers.
+///
+/// Returns `None` at end of input: an element that never closes was not an
+/// element, and the caller must scan those bytes as code.
+fn jsx_children(bytes: &[u8], mut index: usize, regions: &mut Vec<JsxRegion>) -> Option<usize> {
+    let mut text_start = index;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'<' => {
+                push_region(regions, JsxRegion::Text(text_start, index));
+                return Some(index);
+            }
+            b'{' => {
+                push_region(regions, JsxRegion::Text(text_start, index));
+                index = jsx_container(bytes, index, regions)?;
+                text_start = index;
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+/// Record the `{ … }` container opening at `index` and return the index past
+/// its `}`.
+///
+/// The brace is matched by [`interpolation_end`], the one place that already
+/// knows a `}` inside a string, a comment, a regular expression, or a nested
+/// JSX element closes nothing.
+fn jsx_container(bytes: &[u8], index: usize, regions: &mut Vec<JsxRegion>) -> Option<usize> {
+    let close = interpolation_end(bytes, index + 1);
+    if close >= bytes.len() {
+        return None;
+    }
+    push_region(regions, JsxRegion::Code(index + 1, close));
+    Some(close + 1)
+}
+
+/// Index of the quote closing an attribute value that opens at `start`.
+fn jsx_attribute_value_end(bytes: &[u8], start: usize, quote: u8) -> Option<usize> {
+    bytes[start + 1..]
+        .iter()
+        .position(|byte| *byte == quote)
+        .map(|offset| start + 1 + offset)
+}
+
+/// Append a region, dropping the empty ones a walk naturally produces.
+fn push_region(regions: &mut Vec<JsxRegion>, region: JsxRegion) {
+    let (start, end) = match region {
+        JsxRegion::Text(start, end) | JsxRegion::Code(start, end) => (start, end),
+    };
+    if start < end {
+        regions.push(region);
+    }
+}
+
+fn is_jsx_name_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$')
+}
+
+/// Skip a tag name, which may be namespaced (`svg:path`), a member expression
+/// (`Foo.Bar`), or a custom element (`my-widget`).
+fn skip_jsx_name(bytes: &[u8], mut index: usize) -> usize {
+    while bytes.get(index).is_some_and(|byte| {
+        byte.is_ascii_alphanumeric()
+            || matches!(byte, b'_' | b'$' | b'-' | b'.' | b':')
+            || *byte >= 0x80
+    }) {
+        index += 1;
+    }
+    index
+}
+
+fn skip_jsx_whitespace(bytes: &[u8], mut index: usize) -> usize {
+    while bytes
+        .get(index)
+        .is_some_and(|byte| byte.is_ascii_whitespace())
+    {
+        index += 1;
+    }
+    index
 }
 
 fn previous_non_whitespace(bytes: &[u8], index: usize) -> Option<u8> {
@@ -1164,6 +1543,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The expensive direction of the JSX walk, asserted on the facts rather
+    /// than on the mask.
+    ///
+    /// Calling children text is only safe while `{ … }` is still code. A
+    /// container read as text takes its `import()` out of the module graph and
+    /// its `process.env` read away from the boundary check, and nothing
+    /// downstream can notice either — which is why the walk declines an element
+    /// it cannot read end to end instead of guessing.
+    #[test]
+    fn jsx_containers_stay_code() {
+        let ast = parse_module(concat!(
+            "import { Panel } from './panel';\n",
+            "export const el = (\n",
+            "  <Panel title=\"@ops\" onOpen={() => import('./lazy')}>\n",
+            "    write to @support\n",
+            "    <em>{process.env.PUBLIC_FLAG}</em>\n",
+            "    {require('./legacy')}\n",
+            "  </Panel>\n",
+            ");\n",
+        ));
+
+        assert!(ast.has_jsx, "the element must still be seen");
+        assert!(
+            !ast.has_decorators,
+            "the `@` in children and in an attribute value is prose"
+        );
+        assert_eq!(
+            ast.import_specifiers(),
+            vec![
+                "./panel".to_string(),
+                "./lazy".to_string(),
+                "./legacy".to_string()
+            ],
+            "every container is code, and its edges are in source order"
+        );
+        assert_eq!(ast.env_reads, vec!["PUBLIC_FLAG".to_string()]);
     }
 
     /// The keyword's own position must not be treated as the byte before it.

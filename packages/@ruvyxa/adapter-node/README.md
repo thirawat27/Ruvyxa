@@ -52,3 +52,21 @@ export default config({
 `ruvyxa build` creates `.ruvyxa/deploy/node/start.mjs`. Start it from the project root with
 `node .ruvyxa/deploy/node/start.mjs`; it launches `ruvyxa start` using the installed project CLI.
 Use this adapter for self-hosted Node, Docker, PM2, and other Node-compatible runtimes.
+
+## Client identity behind a proxy
+
+The generated server believes `X-Forwarded-For` and `X-Real-IP` only from a connection whose peer is
+loopback or listed in `security.trustedProxyIps`. From any other peer both headers are dropped
+before the request is routed, because nothing in front of the server overwrote them and one caller
+rotating a value would otherwise collect a fresh bucket per request from the built-in `rate`
+middleware, the server-action rate limiter, and the action replay quota.
+
+Behind a reverse proxy that is not on the same host — nginx or Traefik in another container, an
+ingress controller, a service mesh — list its address or range, or every visitor is counted as one
+client:
+
+```ts
+export default config({
+  security: { trustedProxyIps: ['10.0.0.0/8'] },
+})
+```

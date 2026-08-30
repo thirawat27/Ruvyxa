@@ -1,0 +1,190 @@
+{
+  "$comment": [
+    "Shared plugin path-scope conformance table.",
+    "",
+    "A plugin HTTP hook is scoped by path: `http.onRequest({ match })`,",
+    "`http.onResponse({ match })`, and `http.route({ path })` all decide whether",
+    "they run by comparing a pattern against 'the path of this request'. The",
+    "router answers that question with the canonical segment form. Until this",
+    "table existed the plugin stage answered it with the raw request target, so",
+    "`//api/users` routed to `/api/users` and read as out of scope for",
+    "`['/api/*']` — and `originGuard()`, whose default scope is exactly that",
+    "pattern, did not run for a plain cross-site form POST that reached the",
+    "same route handler with the session cookie attached.",
+    "",
+    "Every host replays this file:",
+    "  - tests/packages/ruvyxa/plugins.test.mjs   (deployed host: plugin-http.mjs)",
+    "  - crates/ruvyxa_dev_server/src/plugin_bridge.rs   (native host: dev/start)",
+    "",
+    "The two halves assert different things because the seam is in a different",
+    "place in each. The deployed host owns the whole decision: it drives",
+    "`matchesPatterns(decodedRequestPathname(request), patterns)` and the",
+    "`entry.path` comparison, so it asserts `canonical`, `inScope`, and",
+    "`matchesRoute`. The native host runs the same JavaScript registry in a",
+    "child process, so all it owns is *which path string it hands over*: it",
+    "asserts that the plugin request target carries `canonical`, and that a",
+    "`canonical: null` target is refused before the plugin stage is reached.",
+    "",
+    "Add a case here first when changing path scoping; a host that drifts then",
+    "fails in the host that drifted, not in review."
+  ],
+
+  "$patternsComment": [
+    "The two shapes `normalizePatterns` accepts: a trailing-`*` prefix and an",
+    "exact path. `originGuard()` defaults to the first."
+  ],
+  "patterns": {
+    "apiPrefix": ["/api/*"],
+    "adminExact": ["/admin"]
+  },
+
+  "$routePathComment": [
+    "A `http.route({ path })` registration is compared by exact equality against",
+    "the same path string, not by pattern. It is in this table so the equality",
+    "and the pattern match cannot be canonicalised apart."
+  ],
+  "routePath": "/webhook",
+
+  "$casesComment": [
+    "`target` is the raw request target a client can send. `canonical` is the",
+    "path the router resolves it to — `null` means the path is refused outright",
+    "(400), never matched. `inScope` is per key of `patterns`; `matchesRoute` is",
+    "the `routePath` equality.",
+    "",
+    "When `canonical` is null the deployed host falls back to `fallbackPathname`",
+    "— the raw, undecoded pathname — because a hook that cannot be told the",
+    "canonical path must still run rather than be silently skipped. The native",
+    "host never reaches the plugin stage for those targets at all."
+  ],
+  "cases": [
+    {
+      "target": "/api/users",
+      "canonical": "/api/users",
+      "inScope": { "apiPrefix": true, "adminExact": false },
+      "matchesRoute": false
+    },
+    {
+      "target": "//api/users",
+      "canonical": "/api/users",
+      "inScope": { "apiPrefix": true, "adminExact": false },
+      "matchesRoute": false,
+      "$comment": "The attack in RUV-C2: a cross-site form POST to //api/users."
+    },
+    {
+      "target": "/api//users",
+      "canonical": "/api/users",
+      "inScope": { "apiPrefix": true, "adminExact": false },
+      "matchesRoute": false
+    },
+    {
+      "target": "/api/users/",
+      "canonical": "/api/users",
+      "inScope": { "apiPrefix": true, "adminExact": false },
+      "matchesRoute": false
+    },
+    {
+      "target": "/api",
+      "canonical": "/api",
+      "inScope": { "apiPrefix": false, "adminExact": false },
+      "matchesRoute": false,
+      "$comment": [
+        "A trailing-`*` pattern keeps the separator, so `/api/*` has never",
+        "covered the bare `/api` route handler. Pinned here because the",
+        "canonicalisation makes `/api/` answer the same way, which is a",
+        "narrowing against the raw comparison and the point of the table."
+      ]
+    },
+    {
+      "target": "/api/",
+      "canonical": "/api",
+      "inScope": { "apiPrefix": false, "adminExact": false },
+      "matchesRoute": false,
+      "$comment": [
+        "The narrowing named above. `/api/` routes to `/api`, so a hook scoped",
+        "to `/api/*` no longer runs for it — matching `/api` exactly, which the",
+        "same hook has always answered. A guard meant to cover the collection",
+        "endpoint itself lists `/api` alongside `/api/*`."
+      ]
+    },
+    {
+      "target": "/admin",
+      "canonical": "/admin",
+      "inScope": { "apiPrefix": false, "adminExact": true },
+      "matchesRoute": false
+    },
+    {
+      "target": "/admin/",
+      "canonical": "/admin",
+      "inScope": { "apiPrefix": false, "adminExact": true },
+      "matchesRoute": false,
+      "$comment": "Exact patterns widen: the trailing slash now reaches the guard."
+    },
+    {
+      "target": "//admin",
+      "canonical": "/admin",
+      "inScope": { "apiPrefix": false, "adminExact": true },
+      "matchesRoute": false
+    },
+    {
+      "target": "/admin/settings",
+      "canonical": "/admin/settings",
+      "inScope": { "apiPrefix": false, "adminExact": false },
+      "matchesRoute": false,
+      "$comment": "An exact pattern still does not cover children."
+    },
+    {
+      "target": "/files/my%20doc",
+      "canonical": "/files/my doc",
+      "inScope": { "apiPrefix": false, "adminExact": false },
+      "matchesRoute": false,
+      "$comment": "Percent-decoding is per segment and unchanged by this table."
+    },
+    {
+      "target": "/webhook",
+      "canonical": "/webhook",
+      "inScope": { "apiPrefix": false, "adminExact": false },
+      "matchesRoute": true
+    },
+    {
+      "target": "/webhook/",
+      "canonical": "/webhook",
+      "inScope": { "apiPrefix": false, "adminExact": false },
+      "matchesRoute": true,
+      "$comment": "A plugin route answers the address the router sends to it."
+    },
+    {
+      "target": "//webhook",
+      "canonical": "/webhook",
+      "inScope": { "apiPrefix": false, "adminExact": false },
+      "matchesRoute": true
+    },
+    {
+      "target": "/api/%2Fusers",
+      "canonical": null,
+      "fallbackPathname": "/api/%2Fusers",
+      "inScope": { "apiPrefix": true, "adminExact": false },
+      "matchesRoute": false,
+      "$comment": [
+        "An encoded separator would let one URL address a route it does not",
+        "name, so the router refuses it. The deployed host still runs the",
+        "guard against the raw pathname — failing open here would hand back",
+        "the bypass this table exists to close."
+      ]
+    },
+    {
+      "target": "/admin/%00",
+      "canonical": null,
+      "fallbackPathname": "/admin/%00",
+      "inScope": { "apiPrefix": false, "adminExact": false },
+      "matchesRoute": false,
+      "$comment": [
+        "A control character in a decoded segment is refused for the same",
+        "reason. Traversal spellings such as `/admin/%2E%2E` are deliberately",
+        "absent: WHATWG `URL` resolves `%2E` as a dot segment, so the deployed",
+        "host reads that target as `/` before this seam is reached while the",
+        "native host still sees the encoded form — a URL-parsing difference",
+        "outside this table's subject, and one both hosts refuse either way."
+      ]
+    }
+  ]
+}

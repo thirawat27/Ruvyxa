@@ -231,6 +231,62 @@ describe('client router prefetch hints', () => {
 })
 
 describe('client router navigation state', () => {
+  /**
+   * `retry()` is the button a user presses after a failed load, and a failed
+   * retry left the pending flag cleared without telling anybody.
+   * `useSyncExternalStore` only re-reads a snapshot when it is notified, so the
+   * `true` React last rendered stood: a spinner that never stopped and a submit
+   * button that never re-enabled, at the exact moment the user was most likely
+   * to press it again. Every other failure path in the router pairs the clear
+   * with an emit; this asserts the pair rather than the flag, because reading
+   * `getPending()` alone passes on the broken version.
+   */
+  it('notifies subscribers when a retry fails, not only when it succeeds', async () => {
+    const previousFetch = Object.getOwnPropertyDescriptor(globalThis, 'fetch')
+    globalThis.fetch = () => Promise.reject(new Error('flight fetch failed'))
+    try {
+      await withGlobals(
+        {
+          window: browserWindow('/blog/hello'),
+          __RUVYXA_REQUEST_PATH__: '/blog/hello',
+          __RUVYXA_ROUTE_PATTERN__: '/blog/[slug]',
+          __RUVYXA_ROUTE_PARAMS__: { slug: 'hello' },
+          __RUVYXA_ROUTES__: { '/blog/[slug]': (context) => ({ tree: context.route }) },
+          __RUVYXA_ROOT__: { render() {} },
+          __RUVYXA_ROUTE_MANIFEST__: {
+            routes: [
+              {
+                path: '/blog/[slug]',
+                src: '/chunks/blog.js',
+                flight: true,
+                artifactVersion: 'v1',
+              },
+            ],
+          },
+        },
+        async () => {
+          const router = getRouterInstance()
+          // What a subscriber would have read at each notification, which is
+          // the only thing `useSyncExternalStore` ever sees.
+          const seen = []
+          router.subscribe(() => seen.push(router.getPending()))
+
+          await assert.rejects(router.retry(), /flight fetch failed/)
+
+          assert.equal(router.getPending(), false)
+          assert.deepEqual(
+            seen,
+            [true, false],
+            'a retry must announce both that it started and that it stopped',
+          )
+        },
+      )
+    } finally {
+      if (previousFetch) Object.defineProperty(globalThis, 'fetch', previousFetch)
+      else delete globalThis.fetch
+    }
+  })
+
   it('falls back to a document navigation when a cached route artifact is stale', async () => {
     const assigned = []
     await withGlobals(
@@ -340,6 +396,119 @@ describe('client router navigation state', () => {
         else delete globalThis[key]
       }
     }
+  })
+})
+
+describe('client router navigation safety', () => {
+  /** Globals for a router whose only observable act is `location.assign`. */
+  function assigningGlobals(assigned) {
+    const base = browserWindow('/')
+    return {
+      window: {
+        ...base,
+        location: { ...base.location, assign: (href) => assigned.push(href) },
+      },
+      __RUVYXA_ROUTES__: {},
+      __RUVYXA_ROOT__: { render() {} },
+      __RUVYXA_ROUTE_MANIFEST__: { routes: [] },
+    }
+  }
+
+  /** Run `body` with `console.error` captured, restoring it afterwards. */
+  async function withCapturedErrors(body) {
+    const errors = []
+    const previous = console.error
+    console.error = (...args) => errors.push(args.join(' '))
+    try {
+      await body(errors)
+    } finally {
+      console.error = previous
+    }
+    return errors
+  }
+
+  it('refuses a javascript: navigation instead of handing it to the document', async () => {
+    // `resolveNavigationTarget` has already parsed the URL and already decided
+    // it is not ours; replaying the caller's raw string threw that away, and
+    // `location.assign` on a `javascript:` URL executes it in this document.
+    const assigned = []
+    const errors = await withCapturedErrors(async () => {
+      await withGlobals(assigningGlobals(assigned), async () => {
+        const router = getRouterInstance()
+        await router.navigate('javascript:globalThis.__ruvyxaPwned = 1')
+      })
+    })
+
+    assert.deepEqual(assigned, [])
+    assert.equal(globalThis.__ruvyxaPwned, undefined)
+    assert.ok(
+      errors.some((line) => line.includes('javascript:')),
+      'the refusal is reported rather than silent',
+    )
+  })
+
+  it('still hands mailto: to the browser', async () => {
+    // The companion to the refusal: the fall-through exists for links the
+    // browser owns, and over-refusing would break every one of them.
+    const assigned = []
+    await withGlobals(assigningGlobals(assigned), async () => {
+      const router = getRouterInstance()
+      await router.navigate('mailto:a@b.c')
+    })
+
+    assert.deepEqual(assigned, ['mailto:a@b.c'])
+  })
+
+  it('refuses every other scheme that executes or reads bytes in this origin', async () => {
+    for (const href of [
+      'data:text/html,<script>globalThis.__ruvyxaPwned = 1</script>',
+      'blob:https://example.test/00000000-0000-0000-0000-000000000000',
+      'vbscript:MsgBox(1)',
+    ]) {
+      const assigned = []
+      await withCapturedErrors(async () => {
+        await withGlobals(assigningGlobals(assigned), async () => {
+          await getRouterInstance().navigate(href)
+        })
+      })
+      assert.deepEqual(assigned, [], `${href} must not reach a navigation sink`)
+    }
+  })
+
+  it('keeps the rest of the allow-list working, and passes the parsed value', async () => {
+    for (const [href, expected] of [
+      ['tel:+15550100', 'tel:+15550100'],
+      ['sms:+15550100', 'sms:+15550100'],
+      ['https://other.test/docs', 'https://other.test/docs'],
+      // The parsed href, not the raw string: the scheme is case-insensitive
+      // and the URL parser is the one component that already knows that.
+      ['HTTPS://other.test/docs', 'https://other.test/docs'],
+    ]) {
+      const assigned = []
+      await withGlobals(assigningGlobals(assigned), async () => {
+        await getRouterInstance().navigate(href)
+      })
+      assert.deepEqual(assigned, [expected])
+    }
+  })
+
+  it('refuses to prefetch a href it would refuse to navigate to', async () => {
+    // The rule is written down once. `prefetch` already discarded anything
+    // non-internal, but it must not be the only place that knows why.
+    const preload = stubPreloadDocument()
+    const assigned = []
+    await withCapturedErrors(async () => {
+      await withGlobals(
+        { ...assigningGlobals(assigned), document: preload.document, CSS: { escape: (v) => v } },
+        async () => {
+          getRouterInstance().prefetch('javascript:globalThis.__ruvyxaPwned = 1')
+          await Promise.resolve()
+        },
+      )
+    })
+
+    assert.deepEqual(preload.links, [])
+    assert.deepEqual(assigned, [])
   })
 })
 

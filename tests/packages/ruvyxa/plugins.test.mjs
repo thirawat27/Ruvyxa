@@ -12,6 +12,7 @@ import {
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { after, describe, it } from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import {
   alias,
@@ -38,6 +39,20 @@ import {
   webVitals,
   wellKnown,
 } from '../../../packages/ruvyxa/dist/plugins.js'
+import {
+  MAX_TRACKED_PLUGIN_RATE_LIMIT_KEYS,
+  boundedRateLimitKey,
+  consumeFixedWindow,
+} from '../../../packages/ruvyxa/dist/plugins/shared.js'
+import {
+  RESERVED_FRAMEWORK_PATHS,
+  createPluginRegistry,
+  decodedRequestPathname,
+  dispatchPluginRequest,
+  dispatchPluginResponse,
+  matchesPatterns,
+} from '../../../packages/ruvyxa/runtime/plugin-http.mjs'
+import { canonicalRoutePath } from '../../../packages/ruvyxa/runtime/route-match.mjs'
 import { definePlugin } from '../../../packages/@ruvyxa/core/dist/plugin.js'
 
 /**
@@ -157,6 +172,13 @@ function tempBuildContext(manifest) {
   const outDir = mkdtempSync(path.join(tmpdir(), 'ruvyxa-plugins-'))
   tempDirs.push(outDir)
   return { root: 'D:/app', outDir, manifest }
+}
+
+/** The cache a generated service worker claims, read out of its own source. */
+function cacheNameOf(serviceWorkerSource) {
+  const matched = serviceWorkerSource.match(/const CACHE = "([^"]+)"/)
+  assert.ok(matched, `no CACHE constant in:\n${serviceWorkerSource}`)
+  return matched[1]
 }
 
 after(() => {
@@ -728,7 +750,7 @@ describe('pwa()', () => {
     )
     assert.match(
       readFileSync(path.join(context.outDir, 'assets', 'sw.js'), 'utf8'),
-      /ruvyxa-pwa-[0-9a-f]{12}-v1/,
+      /const CACHE = "ruvyxa-pwa-[0-9a-f]{12}-[0-9a-f]{12}"/,
     )
     assert.match(
       readFileSync(path.join(context.outDir, 'prerender', 'docs', 'index.html'), 'utf8'),
@@ -758,6 +780,38 @@ describe('pwa()', () => {
     assert.throws(() => pwa({ name: 'Bad', registerPath: '/' }), /must identify a file/)
   })
 
+  it('rejects a scope the worker cannot claim without Service-Worker-Allowed', () => {
+    // The header that widens a worker's scope is emitted from this plugin's own
+    // request handler and from nowhere else — no adapter, no platform config,
+    // and no static handler reproduces it. A build writes `sw.js` as a plain
+    // public asset, so a CDN-served deployment serves it bare and the browser
+    // refuses the registration with `SecurityError`. Rejecting the combination
+    // here moves that from a production-only failure to a config-time one.
+    assert.throws(() => pwa({ name: 'X', serviceWorkerPath: '/assets/sw.js', scope: '/' }), /scope/)
+    assert.throws(
+      () => pwa({ name: 'X', serviceWorkerPath: '/assets/sw.js', scope: '/other/' }),
+      /scope/,
+    )
+    // `scope` defaults to `/`, so moving the worker without narrowing the scope
+    // is the same rejection rather than a quiet one.
+    assert.throws(() => pwa({ name: 'X', serviceWorkerPath: '/assets/sw.js' }), /scope/)
+    // A worker at the root claims every scope by default, which is why the
+    // default configuration has never hit this.
+    assert.doesNotThrow(() => pwa({ name: 'X' }))
+    assert.doesNotThrow(() =>
+      pwa({ name: 'X', serviceWorkerPath: '/assets/sw.js', scope: '/assets/' }),
+    )
+    assert.doesNotThrow(() =>
+      pwa({ name: 'X', serviceWorkerPath: '/assets/sw.js', scope: '/assets/app/' }),
+    )
+    // A sibling directory that shares a name prefix is not inside the worker's
+    // own directory; a plain `startsWith` would accept it.
+    assert.throws(
+      () => pwa({ name: 'X', serviceWorkerPath: '/assets/sw.js', scope: '/assets-2/' }),
+      /scope/,
+    )
+  })
+
   it('isolates caches by scope and waits for runtime cache writes', async () => {
     const app = register(pwa({ name: 'App', scope: '/app/' })).middleware[0]
     const admin = register(pwa({ name: 'Admin', scope: '/admin/' })).middleware[0]
@@ -771,6 +825,49 @@ describe('pwa()', () => {
     assert.doesNotMatch(appSource, /name\.startsWith\('ruvyxa-pwa-'\)/)
     assert.match(appSource, /event\.waitUntil\(cacheWrite\)/)
     assert.match(appSource, /\.catch\(\(\) => undefined\)/)
+  })
+
+  it('derives the cache name from the build instead of a stamp', async () => {
+    // Trap #4: cache identity is derived, never stamped. The worker is
+    // cache-first with no revalidation, and `activate` drops only caches whose
+    // name *differs*, so a fixed `-v1` suffix meant the install-time copy of an
+    // unfingerprinted `/logo.png` or `/vendor.js` was served forever.
+    const registered = register(pwa({ name: 'Example' }))
+    const first = tempBuildContext({ routes: 2, createdAtUnix: 1 })
+    const second = tempBuildContext({ routes: 2, createdAtUnix: 2 })
+
+    await registered.buildComplete[0](first)
+    const firstCache = cacheNameOf(readFileSync(path.join(first.outDir, 'assets', 'sw.js'), 'utf8'))
+    await registered.buildComplete[0](second)
+    const secondSource = readFileSync(path.join(second.outDir, 'assets', 'sw.js'), 'utf8')
+    const secondCache = cacheNameOf(secondSource)
+
+    assert.notEqual(firstCache, secondCache)
+    // Both must keep the scope-derived prefix, or `activate` cannot recognise
+    // the previous build's cache as one of ours and never deletes it.
+    const prefix = secondSource.match(/const CACHE_PREFIX = "([^"]+)"/)[1]
+    assert.ok(firstCache.startsWith(prefix), `${firstCache} does not start with ${prefix}`)
+    assert.ok(secondCache.startsWith(prefix), `${secondCache} does not start with ${prefix}`)
+
+    // The dev handler serves `/sw.js` from the same value the build wrote, or
+    // the served worker and the deployed worker claim different caches.
+    const served = await registered.middleware[0].onRequest(request('/sw.js'))
+    assert.equal(cacheNameOf(await served.text()), secondCache)
+  })
+
+  it('keeps version as an override of the derived cache name', async () => {
+    const registered = register(pwa({ name: 'Example', version: 'pinned' }))
+    const first = tempBuildContext({ routes: 2, createdAtUnix: 1 })
+    const second = tempBuildContext({ routes: 2, createdAtUnix: 2 })
+    await registered.buildComplete[0](first)
+    await registered.buildComplete[0](second)
+
+    const firstCache = cacheNameOf(readFileSync(path.join(first.outDir, 'assets', 'sw.js'), 'utf8'))
+    const secondCache = cacheNameOf(
+      readFileSync(path.join(second.outDir, 'assets', 'sw.js'), 'utf8'),
+    )
+    assert.equal(firstCache, secondCache)
+    assert.match(secondCache, /^ruvyxa-pwa-[0-9a-f]{12}-pinned$/)
   })
 })
 
@@ -971,7 +1068,7 @@ Ruvyxa ships **fast content** for everyone.
 
   it('derives live content, search, RSS, and sitemap artifacts from one source', async () => {
     const root = contentProject()
-    const registered = register(contentEngine(options))
+    const registered = register(contentEngine(options), 'development')
     assert.deepEqual(registered.middleware[0].routes, [
       '/content.json',
       '/search-index.json',
@@ -1062,7 +1159,7 @@ Ruvyxa ships **fast content** for everyone.
 
   it('handles HEAD safely and lets unsupported methods or missing source trees continue', async () => {
     const root = contentProject()
-    const { middleware } = register(contentEngine(options))
+    const { middleware } = register(contentEngine(options), 'development')
     const context = { plugin: 'ruvyxa:content-engine', root }
     const head = await middleware[0].onRequest(
       request('/content.json', { method: 'HEAD' }),
@@ -1084,7 +1181,7 @@ Ruvyxa ships **fast content** for everyone.
 
   it('invalidates live artifacts when a content page changes', async () => {
     const root = contentProject()
-    const { middleware } = register(contentEngine(options))
+    const { middleware } = register(contentEngine(options), 'development')
     const context = { plugin: 'ruvyxa:content-engine', root }
     const before = await middleware[0].onRequest(request('/content.json'), context)
     assert.match(await before.text(), /A framework built for clear delivery/)
@@ -1140,7 +1237,7 @@ Ruvyxa ships **fast content** for everyone.
       file,
       "---\ntitle: 'Notes [draft]'\ndescription: 'See [the guide](/docs) for C:\\paths.'\n---\n# Notes\n",
     )
-    const registered = register(contentEngine(options))
+    const registered = register(contentEngine(options), 'development')
     const context = { plugin: 'ruvyxa:content-engine', root }
     const response = await registered.middleware[0].onRequest(request('/llms.txt'), context)
     const body = await response.text()
@@ -1154,12 +1251,24 @@ Ruvyxa ships **fast content** for everyone.
 
   it('can disable the llms.txt artifact', async () => {
     const root = contentProject()
-    const registered = register(contentEngine({ ...options, llmsPath: false }))
+    const registered = register(contentEngine({ ...options, llmsPath: false }), 'development')
     assert.doesNotMatch(registered.middleware[0].routes.join(','), /llms\.txt/)
     const context = tempBuildContext({ routes: [] })
     context.root = root
     await registered.buildComplete[0](context)
     assert.equal(existsSync(path.join(context.outDir, 'assets', 'llms.txt')), false)
+  })
+
+  it('leaves the live artifacts to the build in production', () => {
+    // Mirror of the `feed()` and `searchIndex()` environment cases. The live
+    // handler recursively walks the content tree and stats every page *to
+    // compute the key its own cache is checked against*, so the syscalls are
+    // per request whether or not the cache hits — on exactly the paths crawlers
+    // poll, behind `cache-control: no-cache`.
+    assert.deepEqual(register(contentEngine(options), 'production').middleware, [])
+    assert.equal(register(contentEngine(options), 'development').middleware.length, 1)
+    // The build half is unconditional: `assets/` is written either way.
+    assert.equal(register(contentEngine(options), 'production').buildComplete.length, 1)
   })
 })
 
@@ -1411,10 +1520,138 @@ describe('fonts()', () => {
     assert.doesNotMatch(readFileSync(stylesheet, 'utf8'), /@font-face/)
   })
 
+  /** Swap in an arbitrary fetch implementation for the duration of one call. */
+  async function withFetchImpl(impl, run) {
+    const original = globalThis.fetch
+    globalThis.fetch = impl
+    try {
+      return await run()
+    } finally {
+      globalThis.fetch = original
+    }
+  }
+
+  it('degrades to the fallback stylesheet when a fetch never settles', async () => {
+    // A fetch that fails is already covered; one that neither succeeds nor
+    // fails used to hang `ruvyxa build` with no diagnostic until CI's own
+    // timeout killed it, which is the outcome the fail-soft design exists to
+    // avoid. The abort has to land in the same catch as any other failure.
+    const { buildComplete, diagnostics } = register(fonts({ google: [sheetUrl], timeoutMs: 25 }))
+    const context = tempBuildContext({ routes: [] })
+
+    const seenSignals = []
+    await withFetchImpl(
+      (url, init) =>
+        new Promise((_resolve, reject) => {
+          seenSignals.push(init?.signal)
+          init?.signal?.addEventListener('abort', () => {
+            reject(init.signal.reason ?? new Error('aborted'))
+          })
+        }),
+      async () => {
+        await buildComplete[0](context)
+      },
+    )
+
+    assert.equal(seenSignals.length, 1)
+    assert.ok(seenSignals[0] instanceof AbortSignal, 'the fetch is given an abort signal')
+
+    assert.equal(diagnostics.length, 1)
+    assert.equal(diagnostics[0].level, 'warning')
+    assert.equal(diagnostics[0].code, 'RUV2103')
+    // The timeout is named so a slow-but-working connection is diagnosable
+    // rather than a silent degrade to fallback fonts.
+    assert.match(diagnostics[0].message, /did not respond within 25 ?ms/)
+
+    const stylesheet = path.join(context.outDir, 'assets/fonts/fonts.css')
+    assert.equal(existsSync(stylesheet), true)
+    assert.match(readFileSync(stylesheet, 'utf8'), /ruvyxa:fonts/)
+  })
+
+  it('refuses a response that declares more bytes than the ceiling', async () => {
+    const { buildComplete, diagnostics } = register(fonts({ google: [sheetUrl] }))
+    const context = tempBuildContext({ routes: [] })
+
+    await withFetchImpl(
+      async () =>
+        new Response('body', {
+          status: 200,
+          headers: { 'content-length': String(512 * 1024 * 1024) },
+        }),
+      async () => {
+        await buildComplete[0](context)
+      },
+    )
+
+    assert.equal(diagnostics.length, 1)
+    assert.equal(diagnostics[0].code, 'RUV2103')
+    assert.match(diagnostics[0].message, /bytes/)
+    assert.match(
+      readFileSync(path.join(context.outDir, 'assets/fonts/fonts.css'), 'utf8'),
+      /ruvyxa:fonts/,
+    )
+  })
+
+  it('stops reading a body that runs past the ceiling without a content-length', async () => {
+    const { buildComplete, diagnostics } = register(fonts({ google: [sheetUrl], maxBytes: 4096 }))
+    const context = tempBuildContext({ routes: [] })
+
+    let chunksRead = 0
+    await withFetchImpl(
+      async () =>
+        new Response(
+          new ReadableStream({
+            pull(controller) {
+              chunksRead += 1
+              controller.enqueue(new Uint8Array(1024))
+            },
+          }),
+          { status: 200 },
+        ),
+      async () => {
+        await buildComplete[0](context)
+      },
+    )
+
+    assert.equal(diagnostics.length, 1)
+    assert.equal(diagnostics[0].code, 'RUV2103')
+    // The read stops at the ceiling instead of buffering a hostile body whole.
+    assert.ok(chunksRead < 64, `read stopped early (${chunksRead} chunks)`)
+    assert.match(
+      readFileSync(path.join(context.outDir, 'assets/fonts/fonts.css'), 'utf8'),
+      /ruvyxa:fonts/,
+    )
+  })
+
+  it('bounds the font-file download as well as the stylesheet', async () => {
+    const { buildComplete, diagnostics } = register(fonts({ google: [sheetUrl], timeoutMs: 25 }))
+    const context = tempBuildContext({ routes: [] })
+
+    await withFetchImpl(
+      (url, init) =>
+        String(url) === sheetUrl
+          ? Promise.resolve(new Response(css, { status: 200 }))
+          : new Promise((_resolve, reject) => {
+              init?.signal?.addEventListener('abort', () => {
+                reject(init.signal.reason ?? new Error('aborted'))
+              })
+            }),
+      async () => {
+        await buildComplete[0](context)
+      },
+    )
+
+    assert.equal(diagnostics.length, 1)
+    assert.ok(diagnostics[0].message.includes(fontUrl), 'names the font file that stalled')
+    assert.match(diagnostics[0].message, /did not respond within 25 ?ms/)
+  })
+
   it('rejects URLs that are not Google Fonts stylesheets', () => {
     assert.throws(() => fonts({ google: [] }), TypeError)
     assert.throws(() => fonts({ google: ['https://cdn.example/font.css'] }), TypeError)
     assert.throws(() => fonts({ google: [sheetUrl], publicPath: '/' }), TypeError)
+    assert.throws(() => fonts({ google: [sheetUrl], timeoutMs: 0 }), /timeoutMs/)
+    assert.throws(() => fonts({ google: [sheetUrl], maxBytes: -1 }), /maxBytes/)
   })
 })
 
@@ -1504,20 +1741,93 @@ describe('healthCheck()', () => {
     assert.deepEqual(await response.json(), { status: 'up', queue: 3 })
   })
 
-  it('reports a thrown check as the configured failure status', async () => {
+  it('reports a thrown check as the configured failure status without echoing it', async () => {
+    // `/health` is reachable without credentials by definition — a platform
+    // probe calls it — so whatever it says is public. A driver's message names
+    // internal hosts, private IPs, ports, and database names; an anonymous
+    // caller polling a degraded dependency must not be handed that map.
+    const logged = []
     const { routes } = register(
       healthCheck({
         path: '/readyz',
         failureStatus: 500,
+        logger: (entry) => logged.push(entry),
         check() {
-          throw new Error('database unreachable')
+          throw new Error('connect ECONNREFUSED 10.0.0.5:5432')
         },
       }),
     )
     assert.equal(routes[0].path, '/readyz')
     const response = await routes[0].handler({ request: request('/readyz') })
     assert.equal(response.status, 500)
-    assert.deepEqual(await response.json(), { status: 'error', error: 'database unreachable' })
+    assert.deepEqual(await response.json(), { status: 'error' })
+
+    // The operator still has to be able to debug this, so the message goes to
+    // the log sink rather than being dropped.
+    assert.equal(logged.length, 1)
+    assert.equal(logged[0].path, '/readyz')
+    assert.equal(logged[0].message, 'connect ECONNREFUSED 10.0.0.5:5432')
+    assert.ok(logged[0].error instanceof Error)
+  })
+
+  it('echoes the message only under the explicit exposeErrors opt-in', async () => {
+    const { routes } = register(
+      healthCheck({
+        exposeErrors: true,
+        logger() {},
+        check() {
+          throw new Error('connect ECONNREFUSED 10.0.0.5:5432')
+        },
+      }),
+    )
+    const response = await routes[0].handler({ request: request('/health') })
+    assert.equal(response.status, 503)
+    assert.deepEqual(await response.json(), {
+      status: 'error',
+      error: 'connect ECONNREFUSED 10.0.0.5:5432',
+    })
+  })
+
+  it('writes the failure to console.error when no logger is supplied', async () => {
+    const { routes } = register(healthCheck({ check: () => Promise.reject(new Error('down')) }))
+    const original = console.error
+    const written = []
+    console.error = (...args) => written.push(args.join(' '))
+    try {
+      const response = await routes[0].handler({ request: request('/health') })
+      assert.equal(response.status, 503)
+      assert.deepEqual(await response.json(), { status: 'error' })
+    } finally {
+      console.error = original
+    }
+    assert.equal(written.length, 1)
+    assert.match(written[0], /\[ruvyxa:health-check\] \/health check failed: down/)
+  })
+
+  it('never lets a throwing log sink turn the probe into an unhandled error', async () => {
+    const { routes } = register(
+      healthCheck({
+        logger() {
+          throw new Error('sink exploded')
+        },
+        check() {
+          throw new Error('down')
+        },
+      }),
+    )
+    const original = console.error
+    console.error = () => {}
+    try {
+      const response = await routes[0].handler({ request: request('/health') })
+      assert.equal(response.status, 503)
+      assert.deepEqual(await response.json(), { status: 'error' })
+    } finally {
+      console.error = original
+    }
+  })
+
+  it('rejects a non-function logger', () => {
+    assert.throws(() => healthCheck({ logger: 'stderr' }), /logger must be a function/)
   })
 })
 
@@ -1588,6 +1898,70 @@ describe('webVitals()', () => {
     )
     assert.throws(() => webVitals({ sampleRate: 2 }), /sampleRate must be a number from 0 to 1/)
   })
+
+  /** Post one well-formed beacon from `ip`, and answer with its status. */
+  async function beacon(collector, ip) {
+    const response = await collector.handler({
+      request: request('/__metrics/web-vitals', {
+        method: 'POST',
+        headers: ip ? { 'x-real-ip': ip } : {},
+        body: JSON.stringify({ name: 'LCP', value: 1, pathname: '/' }),
+      }),
+    })
+    return response.status
+  }
+
+  it('refuses beacons past the per-client budget', async () => {
+    const seen = []
+    const { routes: collector } = register(
+      webVitals({
+        logger: (entry) => seen.push(entry),
+        clientIp: (value) => value.headers.get('x-real-ip'),
+        rateLimit: { max: 2, windowSeconds: 60 },
+      }),
+    )
+    const statuses = []
+    for (let index = 0; index < 4; index += 1) {
+      statuses.push(await beacon(collector[0], '203.0.113.9'))
+    }
+    assert.deepEqual(statuses, [204, 204, 429, 429])
+    assert.equal(seen.length, 2)
+    // A different client keeps its own allowance: the limiter must not be one
+    // shared counter that the loudest caller drains for everybody.
+    assert.equal(await beacon(collector[0], '198.51.100.4'), 204)
+    assert.equal(seen.length, 3)
+  })
+
+  it('bounds the endpoint as a whole when no client resolver is configured', async () => {
+    const seen = []
+    const { routes: collector } = register(
+      webVitals({ logger: (entry) => seen.push(entry), rateLimit: { max: 1, windowSeconds: 60 } }),
+    )
+    const statuses = []
+    for (let index = 0; index < 60; index += 1) statuses.push(await beacon(collector[0], undefined))
+    // Fifty times the per-client ceiling, derived rather than separately
+    // configurable, exactly as `@ruvyxa/auth` derives its wider ceilings.
+    assert.equal(statuses.filter((status) => status === 204).length, 50)
+    assert.equal(statuses.filter((status) => status === 429).length, 10)
+    assert.equal(seen.length, 50)
+  })
+
+  it('accepts every beacon when the limiter is turned off', async () => {
+    const seen = []
+    const { routes: collector } = register(
+      webVitals({ logger: (entry) => seen.push(entry), rateLimit: false }),
+    )
+    for (let index = 0; index < 200; index += 1) {
+      assert.equal(await beacon(collector[0], undefined), 204)
+    }
+    assert.equal(seen.length, 200)
+  })
+
+  it('rejects a rate limit that would switch the endpoint off', () => {
+    assert.throws(() => webVitals({ rateLimit: { max: 0 } }), /rateLimit\.max/)
+    assert.throws(() => webVitals({ rateLimit: { windowSeconds: 0 } }), /rateLimit\.windowSeconds/)
+    assert.throws(() => webVitals({ clientIp: 'x-real-ip' }), /clientIp must be a function/)
+  })
 })
 
 describe('wellKnown()', () => {
@@ -1643,6 +2017,53 @@ describe('wellKnown()', () => {
       /expires must be a valid date/,
     )
     assert.throws(() => wellKnown(), /pass securityTxt and\/or at least one entry/)
+  })
+
+  it('rejects a contact carrying its own newline', () => {
+    // `Contact: ${contact}` is interpolated into a line-oriented record, so a
+    // newline inside the value writes a directive of the attacker's choosing.
+    // Every other URL field in the same function already rejects `[\r\n\0]`
+    // through `validateAbsoluteHttpUrl`; `contact` was checked for a scheme
+    // prefix only.
+    assert.throws(
+      () =>
+        wellKnown({
+          securityTxt: {
+            contact: 'mailto:a@b.co\nPolicy: https://evil.example',
+            expires: '2027-01-01T00:00:00.000Z',
+          },
+        }),
+      /contact/,
+    )
+    assert.throws(
+      () =>
+        wellKnown({
+          securityTxt: {
+            contact: [
+              'mailto:a@b.co',
+              'https://example.com/report\r\nCanonical: https://evil.test',
+            ],
+            expires: '2027-01-01T00:00:00.000Z',
+          },
+        }),
+      /contact/,
+    )
+  })
+
+  it('rejects a content type a Headers constructor would refuse, at construction', () => {
+    // Stored unvalidated, `contentType` first reached a `Headers` constructor at
+    // request time, so a config typo was a 500 on a `/.well-known/` path in
+    // production instead of a build-time failure.
+    assert.throws(
+      () =>
+        wellKnown({
+          entries: [{ name: 'note.txt', body: 'x', contentType: 'text/plain\r\nX-Evil: 1' }],
+        }),
+      /contentType/,
+    )
+    assert.doesNotThrow(() =>
+      wellKnown({ entries: [{ name: 'note.txt', body: 'x', contentType: 'text/plain' }] }),
+    )
   })
 })
 
@@ -1970,4 +2391,299 @@ describe('securityHeaders({ inlineScriptHashes })', () => {
     )
     assert.equal(response.headers.get('content-security-policy'), "default-src 'self'")
   })
+})
+
+describe('plugin path scope', () => {
+  // Replays `tests/fixtures/plugin-path-scope-conformance.json`. The native
+  // host replays the same file from `plugin_bridge.rs`, where the seam is which
+  // path string it hands the plugin runtime rather than the match itself.
+  const fixture = JSON.parse(
+    readFileSync(
+      path.join(import.meta.dirname, '..', '..', 'fixtures', 'plugin-path-scope-conformance.json'),
+      'utf8',
+    ),
+  )
+
+  /** The request a client can send for one fixture target. */
+  function requestFor(target, method = 'POST') {
+    return new Request(`http://ruvyxa.test${target}`, { method })
+  }
+
+  /**
+   * One registry holding all three scoping shapes the table covers. The three
+   * scopes are mutually exclusive across the table, so the body of whichever
+   * short-circuit fires names the hook that matched.
+   */
+  function scopedRegistry() {
+    return createPluginRegistry({
+      root: '/project',
+      plugins: [
+        {
+          name: 'fixture:route',
+          register({ http }) {
+            http.route({
+              path: fixture.routePath,
+              handler: () => new Response('route'),
+            })
+          },
+        },
+        {
+          name: 'fixture:api-prefix',
+          register({ http }) {
+            http.onRequest({
+              match: fixture.patterns.apiPrefix,
+              handler: () => new Response('apiPrefix'),
+            })
+          },
+        },
+        {
+          name: 'fixture:admin-exact',
+          register({ http }) {
+            http.onRequest({
+              match: fixture.patterns.adminExact,
+              handler: () => new Response('adminExact'),
+            })
+          },
+        },
+      ],
+    })
+  }
+
+  /** The hook the table says must run for this target, or null for none. */
+  function expectedHook(testCase) {
+    if (testCase.matchesRoute) return 'route'
+    for (const key of Object.keys(fixture.patterns)) {
+      if (testCase.inScope[key]) return key
+    }
+    return null
+  }
+
+  it('agrees with the router on what a request path is', () => {
+    for (const testCase of fixture.cases) {
+      assert.equal(
+        canonicalRoutePath(testCase.target),
+        testCase.canonical,
+        `canonical form of ${testCase.target}`,
+      )
+      const expected = testCase.canonical ?? testCase.fallbackPathname
+      assert.equal(
+        decodedRequestPathname(requestFor(testCase.target)),
+        expected,
+        `plugin path for ${testCase.target}`,
+      )
+    }
+  })
+
+  it('scopes every hook shape by the canonical path', () => {
+    for (const testCase of fixture.cases) {
+      const pathname = decodedRequestPathname(requestFor(testCase.target))
+      for (const [key, patterns] of Object.entries(fixture.patterns)) {
+        assert.equal(
+          matchesPatterns(patterns, pathname),
+          testCase.inScope[key],
+          `${key} scope for ${testCase.target}`,
+        )
+      }
+      assert.equal(
+        fixture.routePath === pathname,
+        testCase.matchesRoute,
+        `route match for ${testCase.target}`,
+      )
+    }
+  })
+
+  it('dispatches request hooks and plugin routes on the canonical path', async () => {
+    const registry = await scopedRegistry()
+    for (const testCase of fixture.cases) {
+      const outcome = await dispatchPluginRequest(registry, requestFor(testCase.target))
+      const actual = outcome.kind === 'response' ? await outcome.response.text() : null
+      assert.equal(actual, expectedHook(testCase), `dispatch for ${testCase.target}`)
+    }
+  })
+
+  it('scopes response hooks on the canonical path', async () => {
+    const registry = await createPluginRegistry({
+      root: '/project',
+      plugins: [
+        {
+          name: 'fixture:api-response',
+          register({ http }) {
+            http.onResponse({
+              match: fixture.patterns.apiPrefix,
+              handler: ({ response }) => {
+                const marked = new Response(response.body, response)
+                marked.headers.set('x-fixture-scope', 'apiPrefix')
+                return marked
+              },
+            })
+          },
+        },
+      ],
+    })
+    for (const testCase of fixture.cases) {
+      const response = await dispatchPluginResponse(
+        registry,
+        requestFor(testCase.target),
+        new Response('ok'),
+      )
+      assert.equal(
+        response.headers.get('x-fixture-scope'),
+        testCase.inScope.apiPrefix ? 'apiPrefix' : null,
+        `response scope for ${testCase.target}`,
+      )
+    }
+  })
+
+  it('refuses a plugin route that claims a reserved framework path', async () => {
+    // RTMS-05. `RESERVED_FRAMEWORK_PATHS` was read only by the two socket
+    // normalisers, so despite its docstring a plugin *route* at
+    // `/__ruvyxa/action` registered cleanly -- and then answered every server
+    // action in a deployed build while being dead under `dev`/`start`, where
+    // the framework endpoint is an axum route ahead of the plugin-bearing
+    // fallback. Refusing at registration is the only place both hosts can agree.
+    for (const reserved of RESERVED_FRAMEWORK_PATHS) {
+      await assert.rejects(
+        () =>
+          createPluginRegistry({
+            root: '/project',
+            plugins: [
+              {
+                name: 'fixture:reserved-route',
+                register({ http }) {
+                  http.route({
+                    path: reserved,
+                    method: 'POST',
+                    handler: () => new Response('shadowed'),
+                  })
+                },
+              },
+            ],
+          }),
+        (error) =>
+          error instanceof TypeError &&
+          error.message ===
+            `plugin "fixture:reserved-route" http.route() path "${reserved}" collides with a reserved framework route`,
+        `http.route({ path: '${reserved}' }) must be refused`,
+      )
+    }
+  })
+
+  it('guards the RUV-C2 request against originGuard defaults', async () => {
+    const registry = await createPluginRegistry({
+      root: '/project',
+      plugins: [originGuard()],
+    })
+    // The demonstrated attack: a plain cross-site form POST whose action
+    // carries a leading double slash. It routes to `/api/users` either way, so
+    // the guard has to see it.
+    const outcome = await dispatchPluginRequest(
+      registry,
+      new Request('http://victim.test//api/users', {
+        method: 'POST',
+        headers: { host: 'victim.test', origin: 'https://evil.test' },
+      }),
+    )
+    assert.equal(outcome.kind, 'response')
+    assert.equal(outcome.response.status, 403)
+  })
+})
+
+describe('the plugin rate limiter answers the shared admission table', () => {
+  // The third replay of `tests/fixtures/rate-limit-conformance.json`. The other
+  // two are `the_shared_rate_limit_conformance_table_is_answered_the_same_way`
+  // in `crates/ruvyxa_middleware/src/builtin.rs` and
+  // `rate limiter conformance with the native middleware` in
+  // `tests/packages/ruvyxa/serverless-handler.test.mjs`.
+  //
+  // `webVitals` needed a limiter and the workspace already had four, none of
+  // which it could reach: the native ones are Rust, and the deployed one lives
+  // in the module every adapter copies verbatim into a function bundle. So this
+  // is a fifth copy of the algorithm, and a fifth copy that agrees with the
+  // others only by inspection is a copy that will stop agreeing. The map policy
+  // is the shared part and this table is what holds it.
+  //
+  // How a key is *bounded* is deliberately host-local, so only the bound itself
+  // is asserted here rather than the spelling.
+  const workspaceRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta.url)))
+  const contract = JSON.parse(
+    readFileSync(path.join(workspaceRoot, 'tests/fixtures/rate-limit-conformance.json'), 'utf8'),
+  )
+
+  /** Expand a fixture value, which is a string or a { repeat, times, suffix }. */
+  function valueOf(spec) {
+    if (spec === null || spec === undefined) return spec
+    if (typeof spec === 'string') return spec
+    return spec.repeat.repeat(spec.times) + (spec.suffix ?? '')
+  }
+
+  function countOf(spec) {
+    return spec === 'capacity' ? MAX_TRACKED_PLUGIN_RATE_LIMIT_KEYS : spec
+  }
+
+  function floodKey(index) {
+    return `flood-${String(index).padStart(5, '0')}`
+  }
+
+  for (const testCase of contract.keyCases) {
+    it(`bounds: ${testCase.name}`, () => {
+      const key = boundedRateLimitKey(valueOf(testCase.identity))
+      assert.ok(
+        key.length <= contract.maxKeyLength,
+        `a tracked key of ${key.length} exceeds the ${contract.maxKeyLength} bound`,
+      )
+      assert.equal(key, boundedRateLimitKey(valueOf(testCase.identity)))
+      if (testCase.distinctFrom !== undefined) {
+        // Two clients that share a bucket can each limit the other.
+        assert.notEqual(key, boundedRateLimitKey(valueOf(testCase.distinctFrom)))
+      }
+    })
+  }
+
+  for (const testCase of contract.admissionCases) {
+    it(`admits: ${testCase.name}`, () => {
+      const now = Date.now()
+      const buckets = new Map()
+      if (testCase.prefill) {
+        const count = countOf(testCase.prefill.count)
+        for (let index = 0; index < count; index += 1) {
+          buckets.set(floodKey(index), {
+            remaining: 0,
+            startedAt:
+              testCase.prefill.state === 'expired'
+                ? now - testCase.windowSeconds * 1000 - 1000
+                : now - (count - index),
+          })
+        }
+      }
+
+      for (const [index, entry] of testCase.requests.entries()) {
+        const retryAfter = consumeFixedWindow(
+          buckets,
+          entry.identity,
+          testCase.max,
+          testCase.windowSeconds,
+        )
+        assert.equal(
+          retryAfter === null,
+          entry.allowed,
+          `request ${index} for ${entry.identity} was ${retryAfter === null ? 'admitted' : 'refused'}`,
+        )
+        if (retryAfter !== null) assert.ok(retryAfter >= 1, 'a refusal must name a wait')
+      }
+
+      assert.equal(buckets.size, countOf(testCase.expectTracked))
+      for (const entry of testCase.requests) {
+        assert.ok(buckets.has(entry.identity), `${entry.identity} was not tracked`)
+      }
+      if (testCase.expectEvicted === 'oldest') {
+        assert.ok(!buckets.has(floodKey(0)), 'the evicted bucket must be the oldest one')
+      }
+      if (testCase.expectRetained === 'newest') {
+        assert.ok(
+          buckets.has(floodKey(countOf(testCase.prefill.count) - 1)),
+          'the most recently active client must not be the one evicted',
+        )
+      }
+    })
+  }
 })

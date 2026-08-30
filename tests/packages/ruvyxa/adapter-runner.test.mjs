@@ -27,12 +27,20 @@ describe('adapter runner', () => {
       // optimizer` and by the `adapter on-demand revalidation` suite, both in
       // serverless-shared-tables.test.mjs. Everything else stays an exact
       // comparison, so a field inspection gains or loses still fails here.
-      const { onDemandImages, onDemandRevalidation, ...expected } = entry
+      const { onDemandImages, onDemandRevalidation, clientIpHeaders, ...expected } = entry
       assert.equal(typeof onDemandImages, 'boolean', `${entry.name} declares onDemandImages`)
       assert.equal(
         typeof onDemandRevalidation,
         'boolean',
         `${entry.name} declares onDemandRevalidation`,
+      )
+      // `clientIpHeaders` is likewise a property of the generated handler
+      // source rather than of the adapter object, so inspection cannot see it.
+      // It is held to the adapter sources by `declares the ingress headers the
+      // shared contract names, and no others` in serverless-shared-tables.test.mjs.
+      assert.ok(
+        Array.isArray(clientIpHeaders),
+        `${entry.name} declares clientIpHeaders, even as an empty list`,
       )
       const root = await mkdtemp(path.join(os.tmpdir(), `ruvyxa-${expected.name}-inspect-`))
       const outputDir = path.join(root, '.ruvyxa-staging')
@@ -354,6 +362,78 @@ export default createHandler({ routes, importPage: loadRouteModule, importApi: l
       assert.equal(
         await renderThroughFunction(functionDir, '/mode'),
         '<!doctype html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body><main>production</main></body>',
+      )
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  // The same rule the CLI pre-renderer holds, in the host that composes a
+  // deployed build's documents. `loadClientAssets` answered a damaged
+  // `client-report.json` with an empty Map, and an empty Map makes the emitted
+  // registry write markup and nothing else — no bootstrap block, no module
+  // preloads, no `<script type="module">`. Every page in the deployment then
+  // renders correctly and never hydrates, on a build that reported success.
+  //
+  // A *missing* report stays legal, because a server-only artifact and a project
+  // whose routes ship no browser bundle both leave none — which is the state the
+  // test above runs in, and it still succeeds.
+  it('refuses to emit a registry from a client report it cannot read', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
+    const outputDir = path.join(root, '.ruvyxa-staging')
+    try {
+      await installFakeReact(root)
+      await mkdir(path.join(root, 'app', 'mode'), { recursive: true })
+      await mkdir(path.join(outputDir, 'prerender'), { recursive: true })
+      await writeFile(
+        path.join(root, 'app', 'layout.tsx'),
+        `export default function Layout({ children }) { return <body>{children}</body> }`,
+      )
+      await writeFile(
+        path.join(root, 'app', 'mode', 'page.tsx'),
+        `export default function Page() { return <main>mode</main> }`,
+      )
+
+      const manifest = {
+        routes: [
+          {
+            id: 'app/mode/page',
+            kind: 'page',
+            path: '/mode',
+            file: 'app/mode/page.tsx',
+            layoutChain: ['app/layout'],
+            render: { strategy: 'ssr' },
+          },
+        ],
+      }
+      await writeFile(path.join(outputDir, 'manifest.json'), JSON.stringify(manifest))
+      // What a build interrupted mid-write leaves, and what two builds sharing
+      // an output directory leave.
+      await writeFile(
+        path.join(outputDir, 'client-report.json'),
+        '{"routes":[{"path":"/mode","src":"/__ruvyxa/client/mo',
+      )
+
+      const handlerSource = `import { createHandler } from './serverless-handler.mjs'
+import { loadRouteModule } from './route-modules.mjs'
+const routes = ${JSON.stringify(manifest.routes)}
+export default createHandler({ routes, importPage: loadRouteModule, importApi: loadRouteModule })
+`
+      await writeFile(
+        path.join(root, 'ruvyxa.config.mjs'),
+        `export default { adapter: { build() { return {
+          artifacts: [{ kind: 'function', path: 'deploy/function', handlerSource: ${JSON.stringify(handlerSource)} }]
+        } } } }`,
+      )
+
+      const result = await runRunnerResult(root, outputDir)
+
+      assert.equal(result.exitCode, 1)
+      assert.match(result.parsed.message, /client-report\.json/)
+      assert.equal(
+        existsSync(path.join(outputDir, 'deploy', 'function', 'route-modules.mjs')),
+        false,
+        'a registry composed without the client assets must not be emitted at all',
       )
     } finally {
       await rm(root, { recursive: true, force: true })

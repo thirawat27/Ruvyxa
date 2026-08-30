@@ -168,6 +168,15 @@ const handler = createHandler({
   // application actually wrote, on every host.
   notFoundDocument: manifest.notFoundDocument,
   supportedStrategies: ['ssr', 'ssg', 'csr', 'isr', 'ppr', 'api'],
+  // Netlify's own edge writes \`X-Nf-Client-Connection-IP\` and overwrites any
+  // inbound copy of it, so on this platform the header *is* the client.
+  // Declared here rather than assumed by the handler: the same handler runs on
+  // a self-hosted server where nothing writes it. Without a declaration
+  // identity fell through to a right-to-left scan of \`X-Forwarded-For\`, whose
+  // rightmost entry here is a fixed platform address — so the built-in \`rate\`
+  // middleware, the server-action rate limiter, and the replay quota all
+  // counted every visitor into one bucket.
+  clientIpHeaders: ['x-nf-client-connection-ip'],
 });
 
 // Netlify Functions v2 — Web-standard Request/Response

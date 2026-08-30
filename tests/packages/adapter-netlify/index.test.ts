@@ -2,7 +2,15 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { execFileSync } from 'node:child_process'
-import { globSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import {
+  globSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -12,6 +20,7 @@ import type { AdapterArtifact } from '../../../packages/@ruvyxa/core/dist/types.
 import { DEFAULT_SECURITY_HEADERS } from '../../../packages/@ruvyxa/core/dist/utils.js'
 import { nonPublishableStrategies } from '../../../packages/@ruvyxa/core/dist/deploy-manifest.js'
 import { netlify } from '../../../packages/@ruvyxa/adapter-netlify/dist/index.js'
+import { repoPath } from '../../repo-root.ts'
 import {
   deployFunction,
   echoManifest,
@@ -268,6 +277,44 @@ describe('netlify', () => {
   it('declares supported strategies', () => {
     const adapter = netlify()
     assert.deepEqual(adapter.supports, ['ssr', 'ssg', 'csr', 'isr', 'ppr', 'api'])
+  })
+
+  /**
+   * The header Netlify's own ingress writes, so a per-client control is per
+   * client.
+   *
+   * With no declaration `parseIngressHeaders(undefined)` returns `[]` and
+   * identity falls through to a right-to-left scan of `X-Forwarded-For` — on a
+   * platform whose real client is not where that scan looks. Both directions
+   * hurt: one abusive caller drains the shared 600/60s action bucket and every
+   * other visitor gets a 429, while no individual caller is ever counted.
+   *
+   * The value is read from `tests/fixtures/adapter-contract.json` rather than
+   * written twice, because that fixture is where every adapter has to answer
+   * the question — declaring a header the platform does *not* overwrite
+   * reintroduces exactly the rotation this mechanism exists to prevent.
+   */
+  it('declares the ingress header its own platform writes', async () => {
+    const contract = JSON.parse(
+      readFileSync(repoPath('tests/fixtures/adapter-contract.json'), 'utf8'),
+    ) as { adapters: { name: string; clientIpHeaders: string[] }[] }
+    const expected = contract.adapters.find((adapter) => adapter.name === 'netlify')
+    assert.ok(expected, 'the shared adapter contract no longer describes netlify')
+    assert.deepEqual(expected.clientIpHeaders, ['x-nf-client-connection-ip'])
+
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-netlify-ingress-'))
+    try {
+      const output = await netlify({ frameworksApi: false }).build({ root, outDir: '.ruvyxa' })
+      const artifact = output.artifacts?.find((item) => item.kind === 'function')
+      assert.ok(artifact && 'handlerSource' in artifact && artifact.handlerSource)
+      assert.match(
+        String(artifact.handlerSource),
+        /clientIpHeaders: \['x-nf-client-connection-ip'\],/,
+        'the emitted handler does not declare the ingress header the contract names',
+      )
+    } finally {
+      await rm(root, { force: true, recursive: true })
+    }
   })
 
   // Everything above reads the artifact list and the generated source text.

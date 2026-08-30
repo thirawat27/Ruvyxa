@@ -18,6 +18,8 @@
  * bundle alongside the plugins themselves.
  */
 
+import { canonicalRoutePath } from './route-match.mjs'
+
 /**
  * Whether the fetch specification says this status carries no body.
  *
@@ -353,16 +355,34 @@ export function matchesPatterns(patterns, value) {
   })
 }
 
-/** Match paths using the decoded representation the Rust router exposes to plugins. */
+/**
+ * The path a hook is scoped against — the same one the router resolves.
+ *
+ * There must be exactly one answer to "what is this request's path". This used
+ * to decode the whole pathname in one call, while `canonicalRoutePath` decodes
+ * per segment and collapses the segment structure, so the two disagreed about
+ * every request whose raw path was not already canonical. `//api/users` routed
+ * to `/api/users` and read as *out of scope* for `['/api/*']` — the default
+ * scope of `originGuard()` — so a plain cross-site
+ * `<form method="POST" action="https://victim.example//api/users">` reached the
+ * route handler with the session cookie attached and no guard ran. Every
+ * path-scoped `http.onRequest`, `http.onResponse`, and `http.route` had the
+ * same hole, and a scoped `securityHeaders` silently stopped applying.
+ *
+ * `route-match.mjs` is already carried in `HANDLER_RUNTIME_FILES` and already
+ * copied beside this module in every function bundle, so sharing the router's
+ * answer costs no new file anywhere.
+ *
+ * `canonicalRoutePath` returns `null` for a path the router refuses outright —
+ * an encoded separator or a traversal component. Those never reach a plugin on
+ * the native host, which answers 400 first, and the deployed host answers 400
+ * in `dispatch`. Falling back to the raw pathname keeps the guard running for
+ * the window in between: failing open there would hand back the bypass this
+ * function exists to close.
+ */
 export function decodedRequestPathname(request) {
   const pathname = new URL(request.url).pathname
-  try {
-    return decodeURIComponent(pathname)
-  } catch {
-    // A production host rejects malformed path encodings before this runtime
-    // receives them. Preserve the encoded value defensively for direct calls.
-    return pathname
-  }
+  return canonicalRoutePath(pathname) ?? pathname
 }
 
 function patternUnion(entries) {
@@ -505,6 +525,18 @@ function normalizeHttpRoute(plugin, value) {
   if (typeof value.path !== 'string' || !isExactApplicationPath(value.path)) {
     throw new TypeError(`plugin "${plugin}" http.route().path must be an exact absolute path`)
   }
+  // The rule `RESERVED_FRAMEWORK_PATHS` exists to state, applied where it was
+  // not: the constant was read only by the two socket normalisers, so a plugin
+  // *route* at `/__ruvyxa/action` registered cleanly. Under `dev`/`start` the
+  // framework answered and the route was dead; in a deployed build the route
+  // answered and every server action 404'd at the plugin's discretion. Refusing
+  // at registration is the one place both hosts can agree, and it is the same
+  // refusal `normalizeRealtime` and `normalizePresence` already make.
+  if (RESERVED_FRAMEWORK_PATHS.includes(value.path)) {
+    throw new TypeError(
+      `plugin "${plugin}" http.route() path "${value.path}" collides with a reserved framework route`,
+    )
+  }
   if (typeof value.handler !== 'function') {
     throw new TypeError(`plugin "${plugin}" http.route() requires handler`)
   }
@@ -569,6 +601,34 @@ function isExactApplicationPath(value) {
   )
 }
 
+/**
+ * Whether a `realtime@1` / `presence@1` transport path is a literal route.
+ *
+ * A socket transport is not an `http.route` above: the Axum host registers this
+ * string on its router, so any character that router assigns a meaning to is a
+ * wildcard rather than a path. That check was a denylist of `?`, `#`, and `*`
+ * -- the axum 0.7 wildcard set -- in both hosts, long after the workspace moved
+ * to axum 0.8, where a capture is `{name}` and a catch-all `{*rest}`. `/{room}`
+ * passed both guards and registered a single-segment wildcard that shadowed
+ * every one-segment project page; `/{` passed both and panicked `matchit`
+ * inside `Router::route`, which is the outcome the guards exist to prevent. A
+ * denylist is only correct while it tracks the router's syntax and nothing
+ * makes it, so the rule is an allowlist: one or more `/`-prefixed segments of
+ * RFC 3986 unreserved characters, which is a literal path in every router
+ * version and can never acquire a meaning.
+ *
+ * The twin of `is_literal_transport_path` in
+ * `crates/ruvyxa_dev_server/src/lib.rs`, held level by `transportPaths` in
+ * `tests/fixtures/framework-endpoint-conformance.json`.
+ */
+function isLiteralTransportPath(value) {
+  return typeof value === 'string' && /^(\/[A-Za-z0-9._~-]+)+$/.test(value)
+}
+
+/** What a refused transport path is told it may contain. */
+const TRANSPORT_PATH_RULE =
+  'must be an exact absolute path of `/`-prefixed segments containing only letters, digits, `-`, `.`, `_`, or `~`'
+
 function normalizeDiagnostic(plugin, value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new TypeError(`plugin "${plugin}" diagnostics.report() expects an object`)
@@ -597,8 +657,8 @@ function normalizeRealtime(plugin, value) {
   const pathValue = value.path ?? '/__ruvyxa/realtime'
   const heartbeatMs = value.heartbeatMs ?? 25_000
   const capacity = value.capacity ?? 256
-  if (!isExactApplicationPath(pathValue)) {
-    throw new TypeError(`plugin "${plugin}" realtime path must be an exact absolute path`)
+  if (!isLiteralTransportPath(pathValue)) {
+    throw new TypeError(`plugin "${plugin}" realtime path ${TRANSPORT_PATH_RULE}`)
   }
   if (!Number.isInteger(heartbeatMs) || heartbeatMs < 5_000 || heartbeatMs > 120_000) {
     throw new TypeError(`plugin "${plugin}" realtime heartbeatMs must be between 5000 and 120000`)
@@ -620,8 +680,8 @@ function normalizePresence(plugin, value) {
   }
   const pathValue = value.path ?? '/__ruvyxa/collab'
   const heartbeatMs = value.heartbeatMs ?? 25_000
-  if (!isExactApplicationPath(pathValue)) {
-    throw new TypeError(`plugin "${plugin}" presence path must be an exact absolute path`)
+  if (!isLiteralTransportPath(pathValue)) {
+    throw new TypeError(`plugin "${plugin}" presence path ${TRANSPORT_PATH_RULE}`)
   }
   if (!Number.isInteger(heartbeatMs) || heartbeatMs < 5_000 || heartbeatMs > 120_000) {
     throw new TypeError(`plugin "${plugin}" presence heartbeatMs must be between 5000 and 120000`)

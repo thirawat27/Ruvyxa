@@ -1,0 +1,169 @@
+{
+  "contract": "ruvyxa.rate-limit",
+  "schemaVersion": 1,
+  "why": [
+    "Two implementations enforce `middleware.builtin.rate`, and until this table",
+    "existed nothing held them to one answer. The native host is",
+    "`RateLimitLayer` in crates/ruvyxa_middleware/src/builtin.rs, serving `ruvyxa",
+    "dev` and `ruvyxa start`. The deployed host is `rateLimitKey` and",
+    "`consumeFixedWindow` in packages/ruvyxa/runtime/serverless-handler.mjs,",
+    "serving every build any adapter emits.",
+    "",
+    "They carried the same defect, and it was fixed in one of them first. At map",
+    "capacity both swept only buckets whose *whole* window had elapsed -- so",
+    "inside one window the map could not shrink at all -- and then refused every",
+    "key the map had not already seen. One client sending a distinct",
+    "`X-Api-Key` per request reaches that state on purpose, and from then until",
+    "the window rolls every new visitor gets a 429. The key was also taken",
+    "verbatim from a caller-written header with no length bound, so ten thousand",
+    "tracked keys retained tens of megabytes: the crate's `bounded memory`",
+    "promise was true of the count and not of the size.",
+    "",
+    "The shared decision this table pins is two rules. Bound the key before it",
+    "is tracked, so a tracked bucket costs a fixed amount whatever the caller",
+    "wrote. And at capacity evict the least recently started bucket rather than",
+    "refusing: `fail closed` is the right answer when a limiter cannot answer,",
+    "and this one can -- it is not out of answers, it is out of slots, and a",
+    "slot can be taken back. The evicted client is re-admitted with a full",
+    "allowance the moment it returns, so a flood costs the strictness of the",
+    "limit rather than the availability of the service.",
+    "",
+    "How the key is bounded is host-local and deliberately not pinned here. The",
+    "native host hashes with blake3, a workspace dependency it already links.",
+    "The deployed host cannot: serverless-handler.mjs is copied verbatim into",
+    "edge bundles, `node:crypto` is unavailable there, and `crypto.subtle` is",
+    "async while this limiter is not. It keeps an identity that is already",
+    "within the bound and truncates a longer one onto a hash of the whole. What",
+    "both must agree on is the observable contract, which is what `keyCases`",
+    "asserts: the tracked key is at most `maxKeyLength`, one identity always",
+    "produces one key, and two identities that must stay apart never collapse",
+    "into one -- because two clients sharing a bucket means either can limit the",
+    "other.",
+    "",
+    "`keyCases` covers which identity the key is derived from, not how it is",
+    "spelled. `client` is the address the host attributes to the request when",
+    "the configured header cannot identify it; each replay supplies that in its",
+    "own way, because the native host reads a transport peer and a deployed",
+    "function has none. `client: null` means nothing identified the caller,",
+    "which both hosts spell `unknown`.",
+    "",
+    "A value written as { repeat, times, suffix } is that string repeated that",
+    "many times with the suffix appended, so a 16 KB header value does not have",
+    "to be spelled out in this file.",
+    "",
+    "`admissionCases` drives the limiter directly with keys that are already",
+    "bounded, so the map policy is tested apart from the key policy. `capacity`",
+    "means MAX_TRACKED_RATE_LIMIT_KEYS, which neither replay may hardcode. A",
+    "`staggered` prefill gives every seeded bucket a distinct start time so that",
+    "`the least recently started bucket` names exactly one of them: the two",
+    "hosts break a tie differently -- a BTreeMap answers in key order and a Map",
+    "in insertion order -- and a tie is not part of this contract.",
+    "",
+    "A third replay was added with the fifth limiter in the workspace: the",
+    "`webVitals` beacon collector, whose copy of this algorithm is",
+    "`consumeFixedWindow` in packages/ruvyxa/src/plugins/shared.ts. It does not",
+    "enforce `middleware.builtin.rate` and takes its identity from a resolver",
+    "the project supplies rather than from a forwarded chain, so it replays",
+    "`admissionCases` -- the map policy, which is the shared part -- and only",
+    "the *bound* from `keyCases`, not which header an identity is derived from.",
+    "",
+    "Retry-After is deliberately absent. The native host truncates the",
+    "remaining window to whole seconds and the deployed host rounds it up, so",
+    "they differ by one second on the same bucket. That divergence is real but",
+    "it is not this contract, and encoding it here would freeze it."
+  ],
+  "maxKeyLength": 64,
+  "keyCases": [
+    {
+      "name": "a configured header is the identity",
+      "keyBy": "header:x-api-key",
+      "keyHeader": "tenant-7",
+      "client": "198.51.100.7",
+      "identity": "tenant-7",
+      "distinctFrom": "tenant-8"
+    },
+    {
+      "name": "an absent key header falls back to the client, not one shared bucket",
+      "keyBy": "header:x-api-key",
+      "keyHeader": null,
+      "client": "198.51.100.7",
+      "identity": "198.51.100.7",
+      "distinctFrom": "203.0.113.8"
+    },
+    {
+      "name": "an empty key header is as absent as a missing one",
+      "keyBy": "header:x-api-key",
+      "keyHeader": "",
+      "client": "198.51.100.7",
+      "identity": "198.51.100.7"
+    },
+    {
+      "name": "no header and no attributable client is unattributable",
+      "keyBy": "header:x-api-key",
+      "keyHeader": null,
+      "client": null,
+      "identity": "unknown"
+    },
+    {
+      "name": "ip keying tracks the attributed client",
+      "keyBy": "ip",
+      "keyHeader": null,
+      "client": "203.0.113.8",
+      "identity": "203.0.113.8"
+    },
+    {
+      "name": "a 16 KB header value is bounded before it is tracked",
+      "keyBy": "header:x-api-key",
+      "keyHeader": { "repeat": "k", "times": 16384 },
+      "client": "198.51.100.7",
+      "identity": { "repeat": "k", "times": 16384 },
+      "distinctFrom": { "repeat": "k", "times": 16384, "suffix": "x" }
+    }
+  ],
+  "admissionCases": [
+    {
+      "name": "an ordinary client spends its allowance and is then refused",
+      "max": 2,
+      "windowSeconds": 60,
+      "prefill": null,
+      "requests": [
+        { "identity": "steady-client", "allowed": true },
+        { "identity": "steady-client", "allowed": true },
+        { "identity": "steady-client", "allowed": false },
+        { "identity": "another-client", "allowed": true }
+      ],
+      "expectTracked": 2
+    },
+    {
+      "name": "a full map of expired buckets is swept rather than evicted",
+      "max": 1,
+      "windowSeconds": 1,
+      "prefill": { "count": "capacity", "state": "expired" },
+      "requests": [{ "identity": "new-client", "allowed": true }],
+      "expectTracked": 1
+    },
+    {
+      "name": "a full map of unexpired buckets still admits a brand new client",
+      "max": 1,
+      "windowSeconds": 60,
+      "prefill": { "count": "capacity", "state": "staggered" },
+      "requests": [{ "identity": "a-visitor-the-map-has-never-seen", "allowed": true }],
+      "expectTracked": "capacity",
+      "expectEvicted": "oldest",
+      "expectRetained": "newest"
+    },
+    {
+      "name": "admitting a new client costs one bucket, not the whole allowance",
+      "max": 3,
+      "windowSeconds": 60,
+      "prefill": { "count": "capacity", "state": "staggered" },
+      "requests": [
+        { "identity": "a-visitor-the-map-has-never-seen", "allowed": true },
+        { "identity": "a-visitor-the-map-has-never-seen", "allowed": true },
+        { "identity": "a-visitor-the-map-has-never-seen", "allowed": true },
+        { "identity": "a-visitor-the-map-has-never-seen", "allowed": false }
+      ],
+      "expectTracked": "capacity"
+    }
+  ]
+}

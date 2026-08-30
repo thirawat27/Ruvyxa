@@ -404,6 +404,7 @@ impl ProjectConfig {
                 "RUV1602 config field `image.onDemand.maxWidth` must be between 16 and 8192"
             );
         }
+        validate_image_settings(&self.images)?;
         parse_jsx_runtime(self.build.jsx_runtime.as_deref())?;
         Ok(())
     }
@@ -425,6 +426,39 @@ impl ProjectConfig {
             )
             .with_i18n(self.i18n.as_ref().map(I18nConfigOptions::routing))
     }
+}
+
+/// Reject image settings the optimizer would otherwise quietly reinterpret.
+///
+/// `quality` and `effort` are clamped at each of the three places they are
+/// read, which is right as defence in depth and wrong as validation: a project
+/// writing `quality: 150` got a quality-100 build and no diagnostic, while
+/// every other out-of-range number in the file fails the build by name.
+/// `workers` had neither — it reached `rayon::ThreadPoolBuilder` as written.
+///
+/// The clamps stay. This is the layer that gives the user the field name.
+pub(crate) fn validate_image_settings(config: &ImageOptimizationOptions) -> anyhow::Result<()> {
+    validate_bounded_limit(
+        "image.quality",
+        Some(config.quality),
+        crate::image_optimizer::MAX_IMAGE_QUALITY,
+    )?;
+    // `effort: 0` is libwebp's fastest encode, and `workers: 0` documents "let
+    // Rayon decide", so neither can go through `validate_bounded_limit` — it
+    // rejects zero.
+    if config.effort > crate::image_optimizer::MAX_IMAGE_EFFORT {
+        anyhow::bail!(
+            "RUV1602 config field `image.effort` must be between 0 and {}",
+            crate::image_optimizer::MAX_IMAGE_EFFORT
+        );
+    }
+    if config.parallelism > crate::image_optimizer::MAX_CONFIGURED_IMAGE_WORKERS {
+        anyhow::bail!(
+            "RUV1602 config field `image.workers` must be between 0 and {}",
+            crate::image_optimizer::MAX_CONFIGURED_IMAGE_WORKERS
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_i18n(config: &I18nConfigOptions) -> anyhow::Result<()> {

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { workspacePackageDirs } from './workspace-packages.mjs'
+import { manifestDirs, workspacePackageDirs } from './workspace-packages.mjs'
 
 const rootPkg = JSON.parse(readFileSync('package.json', 'utf8'))
 const expectedVersion = rootPkg.version
@@ -15,9 +15,25 @@ const { dirs: packageDirs, ignored: ignoredPackageDirs } = workspacePackageDirs(
 
 const failures = []
 
+// The major, and deliberately not the minor.
+//
+// The two sibling checks below are exact, and this one is not, which reads like
+// an oversight -- `@types/node` is `24.13.3` against an `engines.node` floor of
+// `>=24.19.0`, six minors apart, so APIs added after 24.13 are untyped while the
+// floor promises they exist. That much is real. What is not available is a fix
+// by pinning: DefinitelyTyped publishes `@types/node` when the *types* change,
+// not once per Node release, and there is no `24.19.x` line to move to -- the
+// newest 24.x ever published is `24.13.3`, which is what this workspace is
+// already on. Requiring minor parity, or even `>=` on the minor, would fail
+// against every version that exists.
+//
+// So the major stays the contract and both numbers go into the message, because
+// the next reader deserves to see the gap rather than rediscover it.
 check(
   workspaceNodeTypesVersion?.split('.')[0] === requiredRuntimeNodeMajor,
-  `workspace @types/node must match the engines.node major (${requiredRuntimeNodeMajor})`,
+  `workspace @types/node (${workspaceNodeTypesVersion}) must match the engines.node major ` +
+    `(${requiredRuntimeNodeMajor}, floor ${requiredRuntimeNodeVersion}). The minor is not ` +
+    `compared: @types/node is published when the types change, not per Node release.`,
 )
 check(
   readFileSync('.node-version', 'utf8').trim() === requiredRuntimeNodeMajor,
@@ -77,9 +93,13 @@ if (failures.length > 0) {
 
 console.log(`Validated ${packageDirs.length} npm package manifests for ${expectedVersion}.`)
 
-const templateDirs = readdirSync('templates')
-  .map((name) => `templates/${name}`)
-  .filter((dir) => statSync(dir).isDirectory())
+const { dirs: templateDirs, ignored: ignoredTemplateDirs } = manifestDirs(
+  'templates',
+  'package.json',
+)
+for (const dir of ignoredTemplateDirs) {
+  console.log(`Skipped ${dir}: no package.json`)
+}
 
 for (const dir of templateDirs) {
   const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
@@ -123,9 +143,10 @@ if (failures.length > 0) {
 console.log(`Validated ${templateDirs.length} starter template manifests for ${expectedVersion}.`)
 
 // Validate Rust crate versions match
-const crateDirs = readdirSync('crates')
-  .map((name) => `crates/${name}`)
-  .filter((dir) => statSync(dir).isDirectory())
+const { dirs: crateDirs, ignored: ignoredCrateDirs } = manifestDirs('crates', 'Cargo.toml')
+for (const dir of ignoredCrateDirs) {
+  console.log(`Skipped ${dir}: no Cargo.toml`)
+}
 
 for (const dir of crateDirs) {
   const cargoToml = readFileSync(join(dir, 'Cargo.toml'), 'utf8')

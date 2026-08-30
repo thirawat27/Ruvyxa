@@ -26,23 +26,31 @@ const fixture = JSON.parse(
   readFileSync(path.join(workspaceRoot, 'tests/fixtures/source-scanner-conformance.json'), 'utf8'),
 ).erasedSyntax
 
-/** Compile one dependency and return both the emitted text and the loaded module. */
-async function compile(dependency, entry) {
+/**
+ * Compile one dependency and return the emitted text, and the loaded module
+ * when `load` is asked for.
+ *
+ * A JSX case cannot be loaded: the project is a bare temporary directory, so the
+ * `react/jsx-runtime` import the transform emits has nothing to resolve against.
+ * The emitted text is what those cases are about anyway — whether the bytes the
+ * route would send still hold what the author wrote.
+ */
+async function compile(dependency, entry, { extension = '.ts', load = true } = {}) {
   const root = await mkdtemp(path.join(realpathSync(os.tmpdir()), 'ruvyxa-erased-'))
   try {
-    await writeFile(path.join(root, 'dep.ts'), dependency)
+    await writeFile(path.join(root, `dep${extension}`), dependency)
     const outfile = path.join(root, 'out.mjs')
     await compileBundleWithMetadata({
       projectRoot: root,
       entrySource: entry,
-      sourcefile: 'entry.ts',
+      sourcefile: `entry${extension}`,
       outfile,
       platform: 'node',
       bundleTarget: 'ssr',
     })
     return {
       code: readFileSync(outfile, 'utf8'),
-      module: await import(pathToFileURL(outfile).href),
+      module: load ? await import(pathToFileURL(outfile).href) : undefined,
     }
   } finally {
     await rm(root, { recursive: true, force: true }).catch(() => {})
@@ -67,6 +75,33 @@ describe('syntax the linker has to erase', () => {
       "import { email, pattern } from './dep.ts'\nexport const value = email + String(pattern.test('@handle'))\n",
     )
     assert.equal(module.value, 'a@b.testtrue')
+  })
+
+  /**
+   * The half of the decorator rule that deletes rendered text when it is wrong.
+   *
+   * `@` is not a JavaScript operator, so a code-position one begins a decorator
+   * — and the scanner used to call JSX children a code position. In
+   * `<p>write to @support</p>` the `@` follows an alphanumeric, which is exactly
+   * where a decorator on a class member sits, so `stripDecorators` removed it
+   * and the page rendered `write to `. Silently, on every server render.
+   *
+   * Compiled rather than masked, because the mask is the thing under test: this
+   * asserts on what the route would actually send.
+   */
+  it('leaves an `@` in JSX text alone', async () => {
+    const jsx = fixture.decorators.untouched.filter((source) => source.includes('<'))
+    assert.ok(jsx.length > 0, 'the shared table must carry the JSX cases')
+    for (const source of jsx) {
+      const { code } = await compile(
+        `${source.replace(/^const /, 'export const ')}`,
+        "import { el } from './dep.tsx'\nexport const value = el\n",
+        { extension: '.tsx', load: false },
+      )
+      for (const handle of source.match(/@[a-z]+/g) ?? []) {
+        assert.ok(code.includes(handle), `${handle} was deleted from the page:\n${source}`)
+      }
+    }
   })
 
   it('removes a shebang without moving the lines below it', async () => {

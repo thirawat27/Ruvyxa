@@ -2737,18 +2737,14 @@ export const marker = 'reached'
         plugins: ['ruvyxa:observability', 'ruvyxa:content-engine', 'ruvyxa:openapi'],
         environment: 'production',
         http: {
-          request: 3,
+          // `contentEngine` contributes no request hook here: like `feed()` and
+          // `searchIndex()`, its live re-derivation registers in development
+          // only, and in production the build has written every one of its
+          // artifacts under `assets/`.
+          request: 2,
           response: 1,
           routes: 0,
-          requestMatch: [
-            '/api/*',
-            '/content.json',
-            '/search-index.json',
-            '/rss.xml',
-            '/sitemap.xml',
-            '/llms.txt',
-            '/openapi.json',
-          ],
+          requestMatch: ['/api/*', '/openapi.json'],
           responseMatch: ['/api/*'],
         },
         build: { start: 0, resolve: 0, load: 0, transform: 0, complete: 2 },
@@ -2844,14 +2840,24 @@ export const marker = 'reached'
 
       const described = await runJson(pluginRuntime, [root, 'describe'], {})
       assert.deepEqual(described.result.plugins, ['ruvyxa:content-engine'])
-      assert.deepEqual(described.result.http.requestMatch, [
+      // The live artifacts are a development affordance: serving them in
+      // production re-walks and re-stats the whole content tree per request and
+      // shadows the built `assets/` copy with a second source of truth.
+      assert.deepEqual(described.result.http.requestMatch, [])
+      assert.equal(described.result.build.complete, 1)
+
+      const inDevelopment = await runJson(
+        pluginRuntime,
+        [root, 'describe', '--environment=development'],
+        {},
+      )
+      assert.deepEqual(inDevelopment.result.http.requestMatch, [
         '/content.json',
         '/search-index.json',
         '/rss.xml',
         '/sitemap.xml',
         '/llms.txt',
       ])
-      assert.equal(described.result.build.complete, 1)
     })
   })
 

@@ -15,31 +15,56 @@ import { arch, platform } from 'node:process'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 import { createCodeIndex } from '../packages/ruvyxa/runtime/scanner.mjs'
+import { workspacePackageDirs } from './workspace-packages.mjs'
 
 const destination = '.npm-pack'
 const currentPlatformPackage = `@ruvyxa/cli-${platform}-${arch}`
-const packages = [
-  '@ruvyxa/core',
-  '@ruvyxa/react',
-  '@ruvyxa/auth',
-  '@ruvyxa/database',
-  '@ruvyxa/realtime',
-  '@ruvyxa/testing',
-  '@ruvyxa/adapter-aws',
-  '@ruvyxa/adapter-node',
-  '@ruvyxa/adapter-vercel',
-  '@ruvyxa/adapter-cloudflare',
-  '@ruvyxa/adapter-netlify',
-  '@ruvyxa/adapter-firebase',
-  '@ruvyxa/adapter-railway',
-  '@ruvyxa/adapter-render',
-  '@ruvyxa/adapter-bun',
-  '@ruvyxa/adapter-deno',
-  '@ruvyxa/adapter-static',
+
+/** Every workspace package's manifest, discovered the way pnpm discovers them. */
+const workspaceManifests = workspacePackageDirs().dirs.map((dir) =>
+  JSON.parse(readFileSync(`${dir}/package.json`, 'utf8')),
+)
+const ruvyxaManifest = workspaceManifests.find((manifest) => manifest.name === 'ruvyxa')
+assert(ruvyxaManifest !== undefined, 'the workspace no longer contains a `ruvyxa` package')
+
+/**
+ * The packages this smoke packs — derived, not listed.
+ *
+ * `workspace-packages.mjs` exists so package discovery happens once, and
+ * `validate-release-publish-plan.mjs` already proves its hand-ordered publish
+ * list against it. This file imported neither and kept its own copy, so a new
+ * package was correct in three scripts and missing from the fourth.
+ *
+ * The four native CLI packages are excluded and the one for this host is added
+ * back: packing five platform binaries would need five toolchains, and only the
+ * local one has anything to pack. Order is not meaningful — everything is
+ * packed before anything is read back.
+ */
+export const packages = [
+  ...workspaceManifests
+    .map((manifest) => manifest.name)
+    .filter((name) => !name.startsWith('@ruvyxa/cli-')),
   currentPlatformPackage,
-  'ruvyxa',
-  'create-ruvyxa',
 ]
+
+/**
+ * Every workspace package the `ruvyxa` package itself depends on.
+ *
+ * All of them are unpublished at this point in a release, so the freshly packed
+ * tarballs have to satisfy those ranges instead of the registry. Left to a hand
+ * list, a workspace dependency added to `ruvyxa` and forgotten here sent the
+ * scaffolded install to npm for a version that does not exist yet, and npm's
+ * `No matching version found for @ruvyxa/adapter-x` names neither this file nor
+ * the missing entry. Reading `ruvyxa`'s own dependencies is the same question
+ * with no second copy to forget.
+ *
+ * `@ruvyxa/core` is one of them, so it is no longer written out separately. The
+ * platform CLI package is not — it is an *optional* dependency — so that one
+ * still gets its own line below.
+ */
+export const workspaceOverridePackages = Object.keys(ruvyxaManifest.dependencies ?? {})
+  .filter((name) => name.startsWith('@ruvyxa/'))
+  .sort()
 
 const ruvyxaRuntimeSource = resolve('packages/ruvyxa/runtime')
 const corepackPnpm = resolve(dirname(process.execPath), 'node_modules/corepack/dist/pnpm.js')
@@ -100,246 +125,252 @@ function packagedRuntimeGraph(entryFiles) {
   return [...visited].sort()
 }
 
-rmSync(destination, { recursive: true, force: true })
-mkdirSync(destination, { recursive: true })
+async function main() {
+  rmSync(destination, { recursive: true, force: true })
+  mkdirSync(destination, { recursive: true })
 
-for (const pkg of packages) {
-  const packageDestination = resolve(
-    destination,
-    'packages',
-    pkg.replaceAll('@', '').replaceAll('/', '-'),
-  )
-  mkdirSync(packageDestination, { recursive: true })
-  execPnpm(['--filter', pkg, 'pack', '--pack-destination', packageDestination], {
+  for (const pkg of packages) {
+    const packageDestination = resolve(
+      destination,
+      'packages',
+      pkg.replaceAll('@', '').replaceAll('/', '-'),
+    )
+    mkdirSync(packageDestination, { recursive: true })
+    execPnpm(['--filter', pkg, 'pack', '--pack-destination', packageDestination], {
+      stdio: 'inherit',
+    })
+    const tarballs = readdirSync(packageDestination).filter((file) => file.endsWith('.tgz'))
+    assert(tarballs.length === 1, `${pkg} should produce exactly one tarball`)
+    copyFileSync(`${packageDestination}/${tarballs[0]}`, `${destination}/${tarballs[0]}`)
+  }
+
+  for (const file of readdirSync(destination).filter((name) => name.endsWith('.tgz'))) {
+    const tarball = `${destination}/${file}`
+    const listing = execFileSync('tar', ['-tf', tarball]).toString()
+    const verboseListing = execFileSync('tar', ['-tvf', tarball]).toString()
+    const packageJson = JSON.parse(
+      execFileSync('tar', ['-xOf', tarball, 'package/package.json']).toString(),
+    )
+    const serialized = JSON.stringify(packageJson)
+
+    assert(!serialized.includes('workspace:'), `${file} contains workspace protocol`)
+    assert(!listing.includes('.test.'), `${file} includes test files`)
+
+    if (
+      ['@ruvyxa/auth', '@ruvyxa/database', '@ruvyxa/realtime', '@ruvyxa/testing'].includes(
+        packageJson.name,
+      )
+    ) {
+      assert(listing.includes('package/dist/index.js'), `${packageJson.name} missing dist/index.js`)
+      assert(
+        listing.includes('package/dist/index.d.ts'),
+        `${packageJson.name} missing declarations`,
+      )
+    }
+    if (['@ruvyxa/auth', '@ruvyxa/realtime'].includes(packageJson.name)) {
+      assert(
+        listing.includes('package/dist/client.js'),
+        `${packageJson.name} missing client entrypoint`,
+      )
+      assert(
+        listing.includes('package/dist/client.d.ts'),
+        `${packageJson.name} missing client declarations`,
+      )
+    }
+
+    if (packageJson.name === 'ruvyxa') {
+      assert(
+        /-rwxr-xr-x\s+.*package\/bin\/ruvyxa\.js/.test(verboseListing),
+        'ruvyxa package launcher must be executable',
+      )
+      const executable = platform === 'win32' ? 'ruvyxa.exe' : 'ruvyxa'
+      assert(
+        listing.includes(`package/native-bin/${platform}-${arch}/${executable}`),
+        'ruvyxa package missing native binary',
+      )
+      for (const runtimeFile of packagedRuntimeGraph([
+        'compiler.mjs',
+        'worker-pool.mjs',
+        'config-renderer.mjs',
+      ])) {
+        assert(
+          listing.includes(`package/runtime/${runtimeFile}`),
+          `ruvyxa package missing runtime/${runtimeFile}`,
+        )
+      }
+      assert(
+        listing.includes('package/dist/plugins.js'),
+        'ruvyxa package missing built-in plugin entrypoint',
+      )
+      const pluginDeclarations = execFileSync('tar', [
+        '-xOf',
+        tarball,
+        'package/dist/plugins.d.ts',
+      ]).toString()
+      assert(
+        pluginDeclarations.includes('contentEngine'),
+        'ruvyxa package missing Content Engine declarations',
+      )
+      for (const typeFile of [
+        'css.d.ts',
+        'index.d.ts',
+        'config.d.ts',
+        'server.d.ts',
+        'plugins.d.ts',
+      ]) {
+        assert(
+          listing.includes(`package/types/${typeFile}`),
+          `ruvyxa package missing types/${typeFile}`,
+        )
+      }
+    }
+
+    if (packageJson.name === 'create-ruvyxa') {
+      for (const template of ['minimal', 'blog', 'crud', 'api']) {
+        assert(
+          listing.includes(`package/template/${template}/package.json`),
+          `create-ruvyxa package missing ${template} template`,
+        )
+        assert(
+          listing.includes(`package/template/${template}/gitignore`),
+          `create-ruvyxa package missing ${template} scaffold ignore template`,
+        )
+      }
+    }
+  }
+
+  const extracted = '.npm-smoke'
+  rmSync(extracted, { recursive: true, force: true })
+  mkdirSync(extracted, { recursive: true })
+
+  const ruvyxaTgz = packedTarball('ruvyxa')
+  const createRuvyxaTgz = packedTarball('create-ruvyxa')
+  const reactTgz = packedTarball('@ruvyxa/react')
+  const authTgz = packedTarball('@ruvyxa/auth')
+  const databaseTgz = packedTarball('@ruvyxa/database')
+  const realtimeTgz = packedTarball('@ruvyxa/realtime')
+  const currentPlatformTgz = packedTarball(currentPlatformPackage)
+
+  execFileSync('tar', ['-xzf', `${destination}/${ruvyxaTgz}`, '-C', extracted])
+  execFileSync('node', [`${extracted}/package/bin/ruvyxa.js`, '--help'], {
     stdio: 'inherit',
   })
-  const tarballs = readdirSync(packageDestination).filter((file) => file.endsWith('.tgz'))
-  assert(tarballs.length === 1, `${pkg} should produce exactly one tarball`)
-  copyFileSync(`${packageDestination}/${tarballs[0]}`, `${destination}/${tarballs[0]}`)
-}
-
-for (const file of readdirSync(destination).filter((name) => name.endsWith('.tgz'))) {
-  const tarball = `${destination}/${file}`
-  const listing = execFileSync('tar', ['-tf', tarball]).toString()
-  const verboseListing = execFileSync('tar', ['-tvf', tarball]).toString()
-  const packageJson = JSON.parse(
-    execFileSync('tar', ['-xOf', tarball, 'package/package.json']).toString(),
-  )
-  const serialized = JSON.stringify(packageJson)
-
-  assert(!serialized.includes('workspace:'), `${file} contains workspace protocol`)
-  assert(!listing.includes('.test.'), `${file} includes test files`)
-
-  if (
-    ['@ruvyxa/auth', '@ruvyxa/database', '@ruvyxa/realtime', '@ruvyxa/testing'].includes(
-      packageJson.name,
-    )
-  ) {
-    assert(listing.includes('package/dist/index.js'), `${packageJson.name} missing dist/index.js`)
-    assert(listing.includes('package/dist/index.d.ts'), `${packageJson.name} missing declarations`)
-  }
-  if (['@ruvyxa/auth', '@ruvyxa/realtime'].includes(packageJson.name)) {
-    assert(
-      listing.includes('package/dist/client.js'),
-      `${packageJson.name} missing client entrypoint`,
-    )
-    assert(
-      listing.includes('package/dist/client.d.ts'),
-      `${packageJson.name} missing client declarations`,
-    )
-  }
-
-  if (packageJson.name === 'ruvyxa') {
-    assert(
-      /-rwxr-xr-x\s+.*package\/bin\/ruvyxa\.js/.test(verboseListing),
-      'ruvyxa package launcher must be executable',
-    )
-    const executable = platform === 'win32' ? 'ruvyxa.exe' : 'ruvyxa'
-    assert(
-      listing.includes(`package/native-bin/${platform}-${arch}/${executable}`),
-      'ruvyxa package missing native binary',
-    )
-    for (const runtimeFile of packagedRuntimeGraph([
-      'compiler.mjs',
-      'worker-pool.mjs',
-      'config-renderer.mjs',
-    ])) {
-      assert(
-        listing.includes(`package/runtime/${runtimeFile}`),
-        `ruvyxa package missing runtime/${runtimeFile}`,
-      )
-    }
-    assert(
-      listing.includes('package/dist/plugins.js'),
-      'ruvyxa package missing built-in plugin entrypoint',
-    )
-    const pluginDeclarations = execFileSync('tar', [
-      '-xOf',
-      tarball,
-      'package/dist/plugins.d.ts',
-    ]).toString()
-    assert(
-      pluginDeclarations.includes('contentEngine'),
-      'ruvyxa package missing Content Engine declarations',
-    )
-    for (const typeFile of [
-      'css.d.ts',
-      'index.d.ts',
-      'config.d.ts',
-      'server.d.ts',
-      'plugins.d.ts',
-    ]) {
-      assert(
-        listing.includes(`package/types/${typeFile}`),
-        `ruvyxa package missing types/${typeFile}`,
-      )
-    }
-  }
-
-  if (packageJson.name === 'create-ruvyxa') {
-    for (const template of ['minimal', 'blog', 'crud', 'api']) {
-      assert(
-        listing.includes(`package/template/${template}/package.json`),
-        `create-ruvyxa package missing ${template} template`,
-      )
-      assert(
-        listing.includes(`package/template/${template}/gitignore`),
-        `create-ruvyxa package missing ${template} scaffold ignore template`,
-      )
-    }
-  }
-}
-
-const extracted = '.npm-smoke'
-rmSync(extracted, { recursive: true, force: true })
-mkdirSync(extracted, { recursive: true })
-
-const ruvyxaTgz = packedTarball('ruvyxa')
-const createRuvyxaTgz = packedTarball('create-ruvyxa')
-const coreTgz = packedTarball('@ruvyxa/core')
-const reactTgz = packedTarball('@ruvyxa/react')
-const authTgz = packedTarball('@ruvyxa/auth')
-const databaseTgz = packedTarball('@ruvyxa/database')
-const realtimeTgz = packedTarball('@ruvyxa/realtime')
-const currentPlatformTgz = packedTarball(currentPlatformPackage)
-
-execFileSync('tar', ['-xzf', `${destination}/${ruvyxaTgz}`, '-C', extracted])
-execFileSync('node', [`${extracted}/package/bin/ruvyxa.js`, '--help'], {
-  stdio: 'inherit',
-})
-const pluginSmokeDir = `${extracted}/scaffolded-plugin`
-execFileSync(
-  'node',
-  [
-    `${extracted}/package/bin/ruvyxa.js`,
-    'plugin',
-    'create',
-    'request-logger',
-    '--root',
-    extracted,
-    '--dir',
-    'scaffolded-plugin',
-  ],
-  { stdio: 'inherit' },
-)
-const pluginSmokePackagePath = `${pluginSmokeDir}/package.json`
-const pluginSmokePackage = JSON.parse(readFileSync(pluginSmokePackagePath, 'utf8'))
-assert(pluginSmokePackage.ruvyxa === undefined, 'generated plugin must not include Ruvyxa metadata')
-assert(
-  pluginSmokePackage.devDependencies?.typescript === '^7.0.2',
-  'generated plugin must use TypeScript 7',
-)
-pluginSmokePackage.peerDependencies.ruvyxa = `file:../../${destination}/${ruvyxaTgz}`
-pluginSmokePackage.devDependencies.ruvyxa = `file:../../${destination}/${ruvyxaTgz}`
-writeFileSync(pluginSmokePackagePath, JSON.stringify(pluginSmokePackage, null, 2) + '\n')
-mkdirSync(`${extracted}/create-ruvyxa`)
-execFileSync('tar', [
-  '-xzf',
-  `${destination}/${createRuvyxaTgz}`,
-  '-C',
-  `${extracted}/create-ruvyxa`,
-])
-const starters = ['minimal', 'blog', 'crud', 'api']
-const scaffoldTarball = (file) => `file:../../${destination}/${file}`
-const workspaceTarball = (file) => `file:../${destination}/${file}`
-
-// Verify every packaged starter can scaffold, install, and type-check against the freshly packed
-// unpublished packages. A single temporary workspace keeps this release gate reasonably fast.
-for (const starter of starters) {
-  const appDir = `${extracted}/scaffolded-${starter}`
-  const createArgs = [`${extracted}/create-ruvyxa/package/bin/create-ruvyxa.js`, appDir]
-  if (starter !== 'minimal') createArgs.push('--template', starter)
-  execFileSync('node', createArgs, {
-    stdio: 'inherit',
-  })
-  assert(existsSync(`${appDir}/.gitignore`), `${starter} scaffold missing .gitignore`)
-  assert(
-    !existsSync(`${appDir}/app/css.d.ts`),
-    `${starter} scaffold should use the framework-owned CSS declaration`,
-  )
-
-  const packageJsonPath = `${appDir}/package.json`
-  const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8'))
-  packageJson.dependencies.ruvyxa = scaffoldTarball(ruvyxaTgz)
-  packageJson.dependencies['@ruvyxa/react'] = scaffoldTarball(reactTgz)
-  packageJson.dependencies['@ruvyxa/auth'] = scaffoldTarball(authTgz)
-  packageJson.dependencies['@ruvyxa/database'] = scaffoldTarball(databaseTgz)
-  packageJson.dependencies['@ruvyxa/realtime'] = scaffoldTarball(realtimeTgz)
-  writeFileSync(packageJsonPath, JSON.stringify(packageJson, null, 2) + '\n')
-  writeFileSync(`${appDir}/app/type-check.module.scss`, '.typeCheck {}\n')
-  writeFileSync(
-    `${appDir}/app/framework-type-entries.ts`,
+  const pluginSmokeDir = `${extracted}/scaffolded-plugin`
+  execFileSync(
+    'node',
     [
-      "import 'ruvyxa'",
-      "import 'ruvyxa/config'",
-      "import { contentEngine } from 'ruvyxa/plugins'",
-      "import 'ruvyxa/server'",
-      "import type { AuthSession } from '@ruvyxa/auth/client'",
-      "import { databasePlugin } from '@ruvyxa/database'",
-      "import { realtime } from '@ruvyxa/realtime'",
-      "import { createRealtimeClient } from '@ruvyxa/realtime/client'",
-      "import type { AnswerProps, SeoProps } from '@ruvyxa/react'",
-      "import styles from './type-check.module.scss'",
-      'const moduleClass: string = styles.typeCheck',
-      "const contentPlugin = contentEngine({ siteUrl: 'https://example.com', title: 'Example', description: 'Articles' })",
-      'const databaseBuildPlugin = databasePlugin()',
-      'const realtimePlugin = realtime()',
-      'const realtimeClient = createRealtimeClient()',
-      'const authSession: AuthSession | null = null',
-      "const answerProps: AnswerProps = { question: 'Is it typed?', answer: 'Yes.' }",
-      "const seoProps: SeoProps = { title: 'Guide', article: { authors: [{ name: 'Ada' }] } }",
-      'void moduleClass',
-      'void contentPlugin',
-      'void databaseBuildPlugin',
-      'void realtimePlugin',
-      'void realtimeClient',
-      'void authSession',
-      'void answerProps',
-      'void seoProps',
-      '',
-    ].join('\n'),
+      `${extracted}/package/bin/ruvyxa.js`,
+      'plugin',
+      'create',
+      'request-logger',
+      '--root',
+      extracted,
+      '--dir',
+      'scaffolded-plugin',
+    ],
+    { stdio: 'inherit' },
   )
+  const pluginSmokePackagePath = `${pluginSmokeDir}/package.json`
+  const pluginSmokePackage = JSON.parse(readFileSync(pluginSmokePackagePath, 'utf8'))
+  assert(
+    pluginSmokePackage.ruvyxa === undefined,
+    'generated plugin must not include Ruvyxa metadata',
+  )
+  assert(
+    pluginSmokePackage.devDependencies?.typescript === '^7.0.2',
+    'generated plugin must use TypeScript 7',
+  )
+  pluginSmokePackage.peerDependencies.ruvyxa = `file:../../${destination}/${ruvyxaTgz}`
+  pluginSmokePackage.devDependencies.ruvyxa = `file:../../${destination}/${ruvyxaTgz}`
+  writeFileSync(pluginSmokePackagePath, JSON.stringify(pluginSmokePackage, null, 2) + '\n')
+  mkdirSync(`${extracted}/create-ruvyxa`)
+  execFileSync('tar', [
+    '-xzf',
+    `${destination}/${createRuvyxaTgz}`,
+    '-C',
+    `${extracted}/create-ruvyxa`,
+  ])
+  const starters = ['minimal', 'blog', 'crud', 'api']
+  const scaffoldTarball = (file) => `file:../../${destination}/${file}`
+  const workspaceTarball = (file) => `file:../${destination}/${file}`
 
-  if (starter === 'minimal') {
-    const configPath = `${appDir}/ruvyxa.config.ts`
-    const configSource = readFileSync(configPath, 'utf8')
-    // A text replace that finds nothing returns the source unchanged, so a
-    // template that stops carrying this line leaves the three imports below
-    // unused and fails `tsc` with a message that names none of this. Checked
-    // rather than assumed: the anchor moved once already, when the scaffold's
-    // config was trimmed to the two decisions a new project actually makes.
-    const anchor = 'export default config({'
-    if (!configSource.includes(anchor)) {
-      throw new Error(
-        `pack:smoke expected "${anchor}" in the scaffolded ruvyxa.config.ts so it could add ` +
-          'plugins to it. Update this injection to match the template.',
-      )
-    }
+  // Verify every packaged starter can scaffold, install, and type-check against the freshly packed
+  // unpublished packages. A single temporary workspace keeps this release gate reasonably fast.
+  for (const starter of starters) {
+    const appDir = `${extracted}/scaffolded-${starter}`
+    const createArgs = [`${extracted}/create-ruvyxa/package/bin/create-ruvyxa.js`, appDir]
+    if (starter !== 'minimal') createArgs.push('--template', starter)
+    execFileSync('node', createArgs, {
+      stdio: 'inherit',
+    })
+    assert(existsSync(`${appDir}/.gitignore`), `${starter} scaffold missing .gitignore`)
+    assert(
+      !existsSync(`${appDir}/app/css.d.ts`),
+      `${starter} scaffold should use the framework-owned CSS declaration`,
+    )
+
+    const packageJsonPath = `${appDir}/package.json`
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8'))
+    packageJson.dependencies.ruvyxa = scaffoldTarball(ruvyxaTgz)
+    packageJson.dependencies['@ruvyxa/react'] = scaffoldTarball(reactTgz)
+    packageJson.dependencies['@ruvyxa/auth'] = scaffoldTarball(authTgz)
+    packageJson.dependencies['@ruvyxa/database'] = scaffoldTarball(databaseTgz)
+    packageJson.dependencies['@ruvyxa/realtime'] = scaffoldTarball(realtimeTgz)
+    writeFileSync(packageJsonPath, JSON.stringify(packageJson, null, 2) + '\n')
+    writeFileSync(`${appDir}/app/type-check.module.scss`, '.typeCheck {}\n')
     writeFileSync(
-      configPath,
-      `import { databasePlugin } from '@ruvyxa/database'\nimport { realtime } from '@ruvyxa/realtime'\nimport { contentEngine } from 'ruvyxa/plugins'\n${configSource.replace(
-        anchor,
-        `${anchor}
+      `${appDir}/app/framework-type-entries.ts`,
+      [
+        "import 'ruvyxa'",
+        "import 'ruvyxa/config'",
+        "import { contentEngine } from 'ruvyxa/plugins'",
+        "import 'ruvyxa/server'",
+        "import type { AuthSession } from '@ruvyxa/auth/client'",
+        "import { databasePlugin } from '@ruvyxa/database'",
+        "import { realtime } from '@ruvyxa/realtime'",
+        "import { createRealtimeClient } from '@ruvyxa/realtime/client'",
+        "import type { AnswerProps, SeoProps } from '@ruvyxa/react'",
+        "import styles from './type-check.module.scss'",
+        'const moduleClass: string = styles.typeCheck',
+        "const contentPlugin = contentEngine({ siteUrl: 'https://example.com', title: 'Example', description: 'Articles' })",
+        'const databaseBuildPlugin = databasePlugin()',
+        'const realtimePlugin = realtime()',
+        'const realtimeClient = createRealtimeClient()',
+        'const authSession: AuthSession | null = null',
+        "const answerProps: AnswerProps = { question: 'Is it typed?', answer: 'Yes.' }",
+        "const seoProps: SeoProps = { title: 'Guide', article: { authors: [{ name: 'Ada' }] } }",
+        'void moduleClass',
+        'void contentPlugin',
+        'void databaseBuildPlugin',
+        'void realtimePlugin',
+        'void realtimeClient',
+        'void authSession',
+        'void answerProps',
+        'void seoProps',
+        '',
+      ].join('\n'),
+    )
+
+    if (starter === 'minimal') {
+      const configPath = `${appDir}/ruvyxa.config.ts`
+      const configSource = readFileSync(configPath, 'utf8')
+      // A text replace that finds nothing returns the source unchanged, so a
+      // template that stops carrying this line leaves the three imports below
+      // unused and fails `tsc` with a message that names none of this. Checked
+      // rather than assumed: the anchor moved once already, when the scaffold's
+      // config was trimmed to the two decisions a new project actually makes.
+      const anchor = 'export default config({'
+      if (!configSource.includes(anchor)) {
+        throw new Error(
+          `pack:smoke expected "${anchor}" in the scaffolded ruvyxa.config.ts so it could add ` +
+            'plugins to it. Update this injection to match the template.',
+        )
+      }
+      writeFileSync(
+        configPath,
+        `import { databasePlugin } from '@ruvyxa/database'\nimport { realtime } from '@ruvyxa/realtime'\nimport { contentEngine } from 'ruvyxa/plugins'\n${configSource.replace(
+          anchor,
+          `${anchor}
   plugins: [
     databasePlugin(),
     realtime(),
@@ -350,85 +381,76 @@ for (const starter of starters) {
       locale: 'en',
     }),
   ],`,
-      )}`,
-    )
-    mkdirSync(`${appDir}/app/guide`, { recursive: true })
-    writeFileSync(
-      `${appDir}/app/guide/page.md`,
-      '---\ntitle: Packed Content Engine\ntags: [release, smoke]\n---\n# Packed guide\n',
-    )
+        )}`,
+      )
+      mkdirSync(`${appDir}/app/guide`, { recursive: true })
+      writeFileSync(
+        `${appDir}/app/guide/page.md`,
+        '---\ntitle: Packed Content Engine\ntags: [release, smoke]\n---\n# Packed guide\n',
+      )
+    }
   }
-}
 
-// Every workspace package the ruvyxa package itself depends on — the official
-// adapters and the React integration — is unpublished at this point in the
-// release, so the freshly packed tarballs must satisfy those ranges instead of
-// the registry. A workspace dependency added to `ruvyxa` and left out here
-// sends the scaffolded install to npm for a version that does not exist yet.
-const workspaceOverrides = [
-  '@ruvyxa/adapter-aws',
-  '@ruvyxa/adapter-bun',
-  '@ruvyxa/adapter-deno',
-  '@ruvyxa/adapter-cloudflare',
-  '@ruvyxa/adapter-firebase',
-  '@ruvyxa/adapter-netlify',
-  '@ruvyxa/adapter-node',
-  '@ruvyxa/adapter-railway',
-  '@ruvyxa/adapter-render',
-  '@ruvyxa/adapter-static',
-  '@ruvyxa/adapter-vercel',
-  '@ruvyxa/react',
-].map((name) => `  '${name}': ${JSON.stringify(workspaceTarball(packedTarball(name)))}`)
+  const workspaceOverrides = workspaceOverridePackages.map(
+    (name) => `  '${name}': ${JSON.stringify(workspaceTarball(packedTarball(name)))}`,
+  )
 
-writeFileSync(
-  `${extracted}/pnpm-workspace.yaml`,
-  [
-    'packages:',
-    "  - 'scaffolded-*'",
-    'overrides:',
-    `  '@ruvyxa/core': ${JSON.stringify(workspaceTarball(coreTgz))}`,
-    `  '${currentPlatformPackage}': ${JSON.stringify(workspaceTarball(currentPlatformTgz))}`,
-    ...workspaceOverrides,
-    'allowBuilds:',
-    "  '@parcel/watcher': false",
-    '',
-  ].join('\n'),
-)
+  writeFileSync(
+    `${extracted}/pnpm-workspace.yaml`,
+    [
+      'packages:',
+      "  - 'scaffolded-*'",
+      'overrides:',
+      `  '${currentPlatformPackage}': ${JSON.stringify(workspaceTarball(currentPlatformTgz))}`,
+      ...workspaceOverrides,
+      'allowBuilds:',
+      "  '@parcel/watcher': false",
+      '',
+    ].join('\n'),
+  )
 
-execPnpm(['install', '--no-lockfile'], {
-  cwd: extracted,
-  stdio: 'inherit',
-})
-for (const starter of starters) {
-  execPnpm(['run', 'typecheck'], {
-    cwd: `${extracted}/scaffolded-${starter}`,
+  execPnpm(['install', '--no-lockfile'], {
+    cwd: extracted,
     stdio: 'inherit',
   })
+  for (const starter of starters) {
+    execPnpm(['run', 'typecheck'], {
+      cwd: `${extracted}/scaffolded-${starter}`,
+      stdio: 'inherit',
+    })
+  }
+  execPnpm(['run', 'test'], {
+    cwd: pluginSmokeDir,
+    stdio: 'inherit',
+  })
+  execPnpm(['exec', 'ruvyxa', 'check', '--root', '.'], {
+    cwd: `${extracted}/scaffolded-minimal`,
+    stdio: 'inherit',
+  })
+  const packedManifest = JSON.parse(
+    readFileSync(`${extracted}/scaffolded-minimal/.ruvyxa/assets/content.json`, 'utf8'),
+  )
+  assert(
+    packedManifest.entries.some((entry) => entry.route === '/guide'),
+    'packed Content Engine did not emit the Markdown route',
+  )
+  const packedLlms = readFileSync(`${extracted}/scaffolded-minimal/.ruvyxa/assets/llms.txt`, 'utf8')
+  assert(
+    packedLlms.includes('[Packed Content Engine](<https://example.com/guide>)'),
+    'packed Content Engine did not emit the llms.txt route',
+  )
+
+  await rmWithRetry(extracted)
+
+  console.log('npm pack smoke passed.')
 }
-execPnpm(['run', 'test'], {
-  cwd: pluginSmokeDir,
-  stdio: 'inherit',
-})
-execPnpm(['exec', 'ruvyxa', 'check', '--root', '.'], {
-  cwd: `${extracted}/scaffolded-minimal`,
-  stdio: 'inherit',
-})
-const packedManifest = JSON.parse(
-  readFileSync(`${extracted}/scaffolded-minimal/.ruvyxa/assets/content.json`, 'utf8'),
-)
-assert(
-  packedManifest.entries.some((entry) => entry.route === '/guide'),
-  'packed Content Engine did not emit the Markdown route',
-)
-const packedLlms = readFileSync(`${extracted}/scaffolded-minimal/.ruvyxa/assets/llms.txt`, 'utf8')
-assert(
-  packedLlms.includes('[Packed Content Engine](<https://example.com/guide>)'),
-  'packed Content Engine did not emit the llms.txt route',
-)
 
-await rmWithRetry(extracted)
-
-console.log('npm pack smoke passed.')
+// Running the file packs and installs the workspace; importing it hands the two
+// derived package lists to a test. Nothing above may run on import — this
+// script deletes directories and shells out to pnpm.
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === import.meta.filename) {
+  await main()
+}
 
 function assert(condition, message) {
   if (!condition) {

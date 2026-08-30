@@ -263,11 +263,14 @@ impl SourceMapBuilder {
     pub fn to_json(&self) -> String {
         let mappings_str = self.encode_mappings();
 
-        let sources_content: Vec<&str> = self
-            .sources_content
-            .iter()
-            .map(|c| c.as_deref().unwrap_or(""))
-            .collect();
+        // `null`, not `""`. Source Map v3 gives the two different meanings:
+        // `null` is "content not available", which sends the debugger to fetch
+        // the original, while `""` claims the file is empty and DevTools shows
+        // a blank pane. `build_source_map` registers every module it has no
+        // linked text for with `None`, so collapsing the two hid exactly the
+        // sources a reader most needed fetched.
+        let sources_content: Vec<Option<&str>> =
+            self.sources_content.iter().map(Option::as_deref).collect();
 
         // Build ignore list only if non-empty.
         let ignore_list: Option<Vec<u32>> = if self.ignore_list.is_empty() {
@@ -358,7 +361,9 @@ struct SourceMapJson<'a> {
     source_root: &'a str,
     sources: &'a [String],
     #[serde(rename = "sourcesContent")]
-    sources_content: &'a [&'a str],
+    /// `None` serializes as `null` — the Source Map v3 spelling of "content
+    /// not available", which is a different answer from an empty string.
+    sources_content: &'a [Option<&'a str>],
     names: &'a [String],
     mappings: &'a str,
     /// Indices of sources that should be ignored by DevTools step-through.
@@ -677,6 +682,37 @@ mod tests {
         assert!(
             parsed.get("x_google_ignoreList").is_none(),
             "should omit x_google_ignoreList when empty"
+        );
+    }
+
+    /// A source whose text was never recorded is `null`, not `""`.
+    ///
+    /// Source Map v3 reserves `null` in `sourcesContent` for "content not
+    /// available", which tells a debugger to go and fetch the original.
+    /// `""` is a different claim — "this file is empty" — so DevTools opened a
+    /// blank pane instead of the module, and stepping into anything the bundle
+    /// registered without content (every module served from the shared-route
+    /// registry) landed nowhere.
+    #[test]
+    fn a_source_with_no_recorded_content_is_null_not_empty() {
+        let mut builder = SourceMapBuilder::new("bundle.js", PathBuf::from("/p"));
+        builder.add_source(Path::new("/p/registered.ts"), None);
+        builder.add_source(Path::new("/p/inlined.ts"), Some("const x = 1;"));
+        builder.add_source(Path::new("/p/genuinely-empty.ts"), Some(""));
+
+        let json = builder.to_json();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let contents = parsed["sourcesContent"].as_array().unwrap();
+        assert_eq!(contents.len(), 3);
+        assert!(
+            contents[0].is_null(),
+            "an unrecorded source must be null: {json}"
+        );
+        assert_eq!(contents[1].as_str().unwrap(), "const x = 1;");
+        assert_eq!(
+            contents[2].as_str().unwrap(),
+            "",
+            "a genuinely empty file must stay distinguishable from an absent one"
         );
     }
 

@@ -28,7 +28,7 @@ import {
   clientRegistrySource,
 } from './client-references.mjs'
 import { toImportPath } from './paths.mjs'
-import { compareCodeUnits } from './order.mjs'
+import { compareCodePoints } from './order.mjs'
 // One owner for the element id the Flight payload rides in. `rsc-client-runtime`
 // is the reader and declares no import-time side effect, so importing it here
 // costs nothing — unlike `rsc-client-install.mjs`, which exists to hold one.
@@ -220,6 +220,7 @@ function __ruvyxaEscapeAttribute(value) {
     .split("<").join("&lt;")
     .split(">").join("&gt;")
     .split('"').join("&quot;")
+    .split("'").join("&#39;")
 }
 
 /** Twin of \`url_encode_component\`. */
@@ -983,7 +984,7 @@ function slotProps(level) {
   const defaults = level.slots ?? {}
   const intercepts = level.intercepts ?? []
   const names = [...new Set([...Object.keys(defaults), ...intercepts.map((entry) => entry.name)])]
-  names.sort(compareCodeUnits)
+  names.sort(compareCodePoints)
   const props = names
     .map((name) => {
       const matching = intercepts.filter((entry) => entry.name === name)

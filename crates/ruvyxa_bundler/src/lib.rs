@@ -2702,6 +2702,115 @@ export default function Page() { return null }
             .expect("the linked bundle must parse");
     }
 
+    /// The default-plus-named form of the same defect.
+    ///
+    /// `import React, {` is what Prettier produces for a React import that
+    /// outgrows the print width, so it is by far the most common of the shapes
+    /// the re-print trigger used to miss: the brace is not the first token
+    /// after the keyword, so "is the brace first?" answered no, the module
+    /// reached the line-based linker verbatim, and the build failed with
+    /// `RUV1612` blaming a specifier that had resolved perfectly well.
+    #[test]
+    fn a_default_plus_named_import_in_a_javascript_dependency_links_into_a_parseable_bundle() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
+        let app = root.join("app");
+        let pkg = root.join("node_modules").join("wide-pkg");
+        fs::create_dir_all(&app).unwrap();
+        fs::create_dir_all(&pkg).unwrap();
+        fs::write(
+            pkg.join("package.json"),
+            r#"{"type":"module","main":"index.js"}"#,
+        )
+        .unwrap();
+        fs::write(
+            pkg.join("names.js"),
+            "const BASE = 1\nexport default BASE\nexport const WIDE = 2\nexport const ALSO_WIDE = 3\n",
+        )
+        .unwrap();
+        // Exactly what Prettier emits for `import Default, { … }` once the list
+        // outgrows the print width.
+        fs::write(
+            pkg.join("index.js"),
+            "import BASE, {\n  WIDE,\n  ALSO_WIDE,\n} from \"./names.js\"\n\nexport const TOTAL = BASE + WIDE + ALSO_WIDE\n",
+        )
+        .unwrap();
+
+        let page = app.join("page.tsx");
+        fs::write(
+            &page,
+            "import { TOTAL } from 'wide-pkg';\nexport default function Page() { return <b>{TOTAL}</b>; }\n",
+        )
+        .unwrap();
+
+        let mut input = client_input(&root, &app, page, vec![], "/");
+        input.options.minify = false;
+        input.options.tree_shaking = false;
+        input.options.source_map = false;
+        input.options.emit_chunk_manifest = false;
+        let output = bundle(input).expect("a default-plus-named import clause must link");
+
+        assert!(
+            output.code.contains("__exports.TOTAL"),
+            "the dependency's export must reach the module namespace:\n{}",
+            output.code
+        );
+        minifier::minify_with_options(&output.code, BundleTarget::Client, false, EsTarget::EsNext)
+            .expect("the linked bundle must parse");
+    }
+
+    /// A dependency that cannot be parsed still reaches the linker untouched,
+    /// and RUV1612 then names the real cause.
+    ///
+    /// `expand_multi_statement_esm` returns `None` on a parse failure by
+    /// design — re-printing is an optimisation for the linker's benefit, never
+    /// a reason to fail a build in the compiler. So the one shape that can
+    /// still arrive with a clause broken across lines is one oxc refused, and
+    /// the hint used to blame either a specifier that resolved fine or a
+    /// re-print that was never attempted. Neither named the brace.
+    #[test]
+    fn an_unparseable_multiline_clause_is_rejected_with_a_hint_naming_the_brace() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
+        let app = root.join("app");
+        let pkg = root.join("node_modules").join("broken-pkg");
+        fs::create_dir_all(&app).unwrap();
+        fs::create_dir_all(&pkg).unwrap();
+        fs::write(
+            pkg.join("package.json"),
+            r#"{"type":"module","main":"index.js"}"#,
+        )
+        .unwrap();
+        fs::write(pkg.join("names.js"), "const V = 1\nexport default V\n").unwrap();
+        // A Prettier-wrapped clause plus syntax oxc refuses, so the re-print is
+        // skipped and the module reaches the linker exactly as written.
+        fs::write(
+            pkg.join("index.js"),
+            "import V, {\n  missing,\n} from \"./names.js\"\nconst = ;\nexport const TOTAL = V\n",
+        )
+        .unwrap();
+
+        let page = app.join("page.tsx");
+        fs::write(
+            &page,
+            "import { TOTAL } from 'broken-pkg';\nexport default function Page() { return <b>{TOTAL}</b>; }\n",
+        )
+        .unwrap();
+
+        let mut input = client_input(&root, &app, page, vec![], "/");
+        input.options.minify = false;
+        input.options.tree_shaking = false;
+        input.options.source_map = false;
+        input.options.emit_chunk_manifest = false;
+        let error = bundle(input).expect_err("an unparseable clause must fail the build");
+        let message = error.to_string();
+        assert!(
+            message.contains("RUV1612")
+                && message.contains("opens a `{` that this line does not close"),
+            "the hint must name the unclosed clause brace, not a specifier:\n{message}"
+        );
+    }
+
     /// The clause form triggers a re-print; the forms the linker already spans
     /// do not, so working output keeps its exact bytes.
     #[test]
@@ -2709,6 +2818,14 @@ export default function Page() { return null }
         for source in [
             "export {\n  a,\n  b,\n}\n",
             "import {\n  a,\n} from \"./m.js\"\n",
+            // The brace is not the first token after the keyword, which is
+            // exactly what Prettier emits for a React import that outgrows the
+            // print width. Asking "is the brace first?" answered no.
+            "import React, {\n  useState,\n} from \"react\"\n",
+            "import * as ns, {\n  a,\n} from \"./m.js\"\n",
+            // The clause is closed, but `from` is on the line after it, so the
+            // linker still has no whole statement to read.
+            "export {\n  a,\n}\nfrom \"./m.js\"\n",
         ] {
             assert!(
                 compiler::has_esm_clause_spanning_lines(source),
@@ -2722,6 +2839,15 @@ export default function Page() { return null }
             "export default {\n  name: \"x\",\n}\n",
             "export const config = {\n  name: \"x\",\n}\n",
             "export default class Page {\n  render() {}\n}\n",
+            // A declaration body is not a clause. These open a brace they do
+            // not close on the same line, and the linker spans every one of
+            // them: re-printing an ordinary module for this would rewrite the
+            // bytes of nearly every `.js` dependency in the graph.
+            "export function widen(options) {\n  return options\n}\n",
+            "export async function load() {\n  return 1\n}\n",
+            "export class Page {\n  render() {}\n}\n",
+            "export let mutable = {\n  a: 1,\n}\n",
+            "export var legacy = {\n  a: 1,\n}\n",
             // One line each: nothing to expand.
             "export { a, b }\nimport { c } from \"./m.js\"\n",
             // Not ESM at all.

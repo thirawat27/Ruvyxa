@@ -104,20 +104,22 @@ export function usePresence<T>(state: T): readonly CollabPeer[] {
  * peers writing at once converge instead of diverging — but the later write
  * replaces the earlier one rather than merging with it. Split a document across
  * keys when concurrent edits must both survive.
+ *
+ * The setter returns `false` when the socket was not open: the write is held
+ * for the next reconnect rather than sent, and until then the value read here
+ * is still the server's, because this hook renders server state only. React
+ * ignores the return of an event handler, so an `onChange` may keep discarding
+ * it — but a component that wants to show "not saved yet" can read it, which is
+ * the only signal available while the room is down.
  */
 export function useSharedState<T>(
   key: string,
   fallback: T,
-): readonly [T, (value: T | null) => void] {
+): readonly [T, (value: T | null) => boolean] {
   const client = useCollabClient()
   const room = useCollabRoom()
   const entry = room.state[key]
   const value = entry === undefined ? fallback : (entry.value as T)
-  const setValue = useCallback(
-    (next: T | null) => {
-      client.setState({ [key]: next })
-    },
-    [client, key],
-  )
+  const setValue = useCallback((next: T | null) => client.setState({ [key]: next }), [client, key])
   return [value, setValue]
 }

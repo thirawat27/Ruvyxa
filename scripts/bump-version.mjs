@@ -15,10 +15,27 @@ import { workspacePackageDirs } from './workspace-packages.mjs'
 const rootPkg = JSON.parse(readFileSync('package.json', 'utf8'))
 const newVersion = process.argv[2] || rootPkg.version
 
+// Every file this run rewrote, so the reformat below is over exactly those.
+const rewritten = []
+
+/**
+ * Write a manifest and remember it.
+ *
+ * `JSON.stringify(value, null, 2)` is not the formatting this repository keeps:
+ * Prettier collapses an array that fits inside `printWidth`, and `JSON.stringify`
+ * never does. So a bump left every manifest it touched failing `pnpm
+ * format:check` -- a CI step on all five platforms and a `verify-release` step
+ * -- and the failure named ~20 files, none of which said "bump".
+ */
+function writeManifest(file, value) {
+  writeFileSync(file, JSON.stringify(value, null, 2) + '\n')
+  rewritten.push(file)
+}
+
 // Update root package.json
 if (rootPkg.version !== newVersion) {
   rootPkg.version = newVersion
-  writeFileSync('package.json', JSON.stringify(rootPkg, null, 2) + '\n')
+  writeManifest('package.json', rootPkg)
   console.log(`root package.json → ${newVersion}`)
 }
 
@@ -30,7 +47,7 @@ for (const dir of packageDirs) {
   const pkg = JSON.parse(readFileSync(file, 'utf8'))
   if (pkg.version !== newVersion) {
     pkg.version = newVersion
-    writeFileSync(file, JSON.stringify(pkg, null, 2) + '\n')
+    writeManifest(file, pkg)
     console.log(`${pkg.name} → ${newVersion}`)
   }
 }
@@ -83,7 +100,7 @@ for (const dir of templateDirs) {
     const tmpl = JSON.parse(readFileSync(templatePkg, 'utf8'))
     const changed = repinFrameworkDeps(tmpl, newVersion)
     if (changed) {
-      writeFileSync(templatePkg, JSON.stringify(tmpl, null, 2) + '\n')
+      writeManifest(templatePkg, tmpl)
       console.log(`${dir} framework deps → ^${newVersion}`)
     }
   } catch {
@@ -98,6 +115,21 @@ try {
 } catch (err) {
   console.error('Warning: failed to update Cargo.lock — run `cargo update --workspace` manually')
   console.error(err.message)
+}
+
+// Reformat what was written, so the bump leaves a tree that passes the gate it
+// has to pass. Over the touched files rather than the whole repository: a bump
+// should not quietly reformat something it did not change.
+if (rewritten.length > 0) {
+  try {
+    execSync(`npx prettier --write ${rewritten.map((file) => JSON.stringify(file)).join(' ')}`, {
+      stdio: 'inherit',
+    })
+    console.log(`Formatted ${rewritten.length} manifest(s)`)
+  } catch (err) {
+    console.error('Warning: failed to format the rewritten manifests — run `pnpm format` manually')
+    console.error(err.message)
+  }
 }
 
 console.log(`\nAll versions synced to ${newVersion}`)

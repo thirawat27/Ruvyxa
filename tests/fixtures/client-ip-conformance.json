@@ -41,7 +41,20 @@
     "`client: null` means no hop could be attributed. The native host reports",
     "that as None and falls back to the transport peer; the deployed host",
     "reports the literal \"unknown\", which buckets more aggressively than the",
-    "traffic warrants — the direction a limiter is allowed to be wrong in."
+    "traffic warrants — the direction a limiter is allowed to be wrong in.",
+    "",
+    "A case carries either `headers` (a JSON object) or `headerLines` (an array",
+    "of [name, value] pairs). The object form cannot express one field name",
+    "arriving twice, and a duplicate field line is a second, independent axis",
+    "from the comma list inside one value: RFC 7230 §3.2.2 says repeated field",
+    "lines are semantically the comma-joined list, so the proxy's own line is the",
+    "*last* one and the caller's is the first. The native host read only the",
+    "first with `HeaderMap::get`, which inverts the whole right-to-left",
+    "guarantee — HAProxy's `option forwardfor` appends a field line rather than",
+    "extending the existing one, so this is the ordinary deployment and not an",
+    "exotic one. No case here could reach it while the only form was an object,",
+    "and the Rust replay's helper built its map with `insert`, which replaces.",
+    "The `headerLines` cases are appended on both sides."
   ],
   "cases": [
     {
@@ -145,6 +158,67 @@
       "headers": { "x-forwarded-for": "203.0.113.9, 10.1.2.3" },
       "trustedProxyIps": ["10.1.2.3/8"],
       "client": "203.0.113.9"
+    },
+    {
+      "name": "a single field line reads the same either way it is spelled",
+      "headerLines": [["x-forwarded-for", "198.51.100.1, 203.0.113.9"]],
+      "trustedProxyIps": [],
+      "client": "203.0.113.9"
+    },
+    {
+      "name": "the field line a proxy appended wins over the one the client sent",
+      "headerLines": [
+        ["x-forwarded-for", "198.51.100.1"],
+        ["x-forwarded-for", "203.0.113.9"]
+      ],
+      "trustedProxyIps": [],
+      "client": "203.0.113.9"
+    },
+    {
+      "name": "a forged run of field lines cannot displace the one the proxy appended",
+      "headerLines": [
+        ["x-forwarded-for", "1.1.1.1, 2.2.2.2"],
+        ["x-forwarded-for", "3.3.3.3"],
+        ["x-forwarded-for", "203.0.113.9"]
+      ],
+      "trustedProxyIps": [],
+      "client": "203.0.113.9"
+    },
+    {
+      "name": "an appended line of nothing but trusted hops falls back into the line before it",
+      "headerLines": [
+        ["x-forwarded-for", "203.0.113.9"],
+        ["x-forwarded-for", "10.0.0.9"]
+      ],
+      "trustedProxyIps": ["10.0.0.0/8"],
+      "client": "203.0.113.9"
+    },
+    {
+      "name": "an appended line of junk falls back into the line before it",
+      "headerLines": [
+        ["x-forwarded-for", "203.0.113.9"],
+        ["x-forwarded-for", "unknown"]
+      ],
+      "trustedProxyIps": [],
+      "client": "203.0.113.9"
+    },
+    {
+      "name": "duplicate x-real-ip lines are read from the last one",
+      "headerLines": [
+        ["x-real-ip", "198.51.100.1"],
+        ["x-real-ip", "203.0.113.9"]
+      ],
+      "trustedProxyIps": [],
+      "client": "203.0.113.9"
+    },
+    {
+      "name": "an empty first x-forwarded-for line still suppresses x-real-ip",
+      "headerLines": [
+        ["x-forwarded-for", ""],
+        ["x-real-ip", "198.51.100.1"]
+      ],
+      "trustedProxyIps": [],
+      "client": null
     }
   ]
 }

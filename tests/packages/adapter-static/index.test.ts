@@ -67,4 +67,19 @@ describe('static', () => {
     assert.throws(() => staticOutput({ outputDir: 'C:\\public' }), /inside the build output/)
     assert.throws(() => staticOutput({ outputDir: 'assets' }), /overlaps protected build output/)
   })
+
+  // The client build report sits at the build root as `client-report.json`
+  // rather than inside the published `client/` directory, so `client` no longer
+  // covers it: an `outputDir` named after it would have the static site
+  // clobber the report the pre-renderer and every adapter function read.
+  it('rejects an output directory that would clobber the client build report', () => {
+    assert.throws(
+      () => staticOutput({ outputDir: 'client-report.json' }),
+      /overlaps protected build output/,
+    )
+    assert.throws(
+      () => staticOutput({ outputDir: 'client-report.json/nested' }),
+      /overlaps protected build output/,
+    )
+  })
 })

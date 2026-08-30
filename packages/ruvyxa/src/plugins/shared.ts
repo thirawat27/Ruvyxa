@@ -114,6 +114,132 @@ export function validateRoutePattern(value: unknown, field: string): asserts val
   }
 }
 
+// ─── fixed-window rate limiting ──────────────────────────────────────────────
+//
+// The fifth limiter in the workspace. `crates/ruvyxa_middleware/src/lib.rs`
+// carries the contract every one of them keeps — bounded memory whatever the
+// caller wrote, a slot taken back rather than a refusal at capacity, and one
+// identity per bucket — and its table names this one. The algorithm and the
+// bucket shape are the deployed host's `consumeFixedWindow` in
+// `packages/ruvyxa/runtime/serverless-handler.mjs`, and
+// `tests/fixtures/rate-limit-conformance.json` is replayed against this copy
+// too, because a limiter that agrees with the others only by inspection is a
+// limiter that will stop agreeing.
+//
+// This is a separate copy rather than an import: `serverless-handler.mjs` is
+// the module every adapter copies verbatim into a function bundle, and a plugin
+// barrel loaded by `ruvyxa.config.ts` has no business pulling that graph in to
+// borrow thirty lines.
+
+export const MAX_TRACKED_PLUGIN_RATE_LIMIT_KEYS = 10_000
+
+/** The widest a tracked key may be, matching the deployed host's bound. */
+const MAX_PLUGIN_RATE_LIMIT_KEY_LENGTH = 64
+
+export interface FixedWindowBucket {
+  remaining: number
+  startedAt: number
+}
+
+/**
+ * Sixteen hex digits that separate two identities sharing a long prefix.
+ *
+ * Not a cryptographic hash and not offered as one: two thirty-two-bit FNV-1a
+ * passes with different offset bases, spliced. It is only ever appended after
+ * the first characters of the identity it describes, so producing the same
+ * bounded key as another client still means reproducing that client's prefix.
+ */
+function identityDigest(value: string): string {
+  let low = 0x811c9dc5
+  let high = 0x01000193
+  const bytes = new TextEncoder().encode(value)
+  for (const byte of bytes) {
+    low = Math.imul(low ^ byte, 0x01000193)
+    high = Math.imul(high ^ byte, 0x85ebca6b)
+  }
+  return `${(low >>> 0).toString(16).padStart(8, '0')}${(high >>> 0).toString(16).padStart(8, '0')}`
+}
+
+/**
+ * The fixed-width map key one identity is tracked under.
+ *
+ * The identity is whatever a project's own resolver returned, so its length is
+ * not ours to assume: ten thousand unbounded keys retain as much memory as the
+ * caller cares to spend. Truncating alone would collapse two identities that
+ * share a long prefix into one bucket, and two clients sharing a bucket means
+ * either can limit the other — so a longer identity is truncated *onto* a
+ * digest of the whole.
+ */
+export function boundedRateLimitKey(identity: string): string {
+  const value = String(identity)
+  if (value.length <= MAX_PLUGIN_RATE_LIMIT_KEY_LENGTH) return value
+  return `${value.slice(0, MAX_PLUGIN_RATE_LIMIT_KEY_LENGTH - 17)}#${identityDigest(value)}`
+}
+
+/**
+ * Spend one unit from a fixed-window bucket.
+ *
+ * Answers `null` when the request is admitted, and the whole seconds a caller
+ * should wait when it is not.
+ *
+ * At capacity the map sweeps buckets whose window has fully elapsed and then
+ * evicts the least recently started bucket rather than refusing the arrival:
+ * the limiter is out of slots, not out of answers, and a slot can be taken
+ * back. Refusing there would let one caller rotating its identity deny the
+ * endpoint to every client the map had not already seen.
+ */
+export function consumeFixedWindow(
+  buckets: Map<string, FixedWindowBucket>,
+  key: string,
+  max: number,
+  windowSeconds: number,
+): number | null {
+  const now = Date.now()
+  const windowMs = windowSeconds * 1000
+  let bucket = buckets.get(key)
+  if (bucket && now - bucket.startedAt >= windowMs) {
+    buckets.delete(key)
+    bucket = undefined
+  }
+  if (!bucket) {
+    if (buckets.size >= MAX_TRACKED_PLUGIN_RATE_LIMIT_KEYS) {
+      for (const [trackedKey, tracked] of buckets) {
+        if (now - tracked.startedAt >= windowMs) buckets.delete(trackedKey)
+      }
+      while (buckets.size >= MAX_TRACKED_PLUGIN_RATE_LIMIT_KEYS) {
+        const oldest = leastRecentlyStartedKey(buckets)
+        if (oldest === undefined) break
+        buckets.delete(oldest)
+      }
+    }
+    bucket = { remaining: max, startedAt: now }
+    buckets.set(key, bucket)
+  }
+  if (bucket.remaining > 0) {
+    bucket.remaining -= 1
+    return null
+  }
+  return Math.max(1, Math.ceil((windowMs - (now - bucket.startedAt)) / 1000))
+}
+
+/**
+ * The bucket that started longest ago.
+ *
+ * Scanned rather than read off the Map's insertion order, which stops being the
+ * same answer the day a bucket is restarted in place.
+ */
+function leastRecentlyStartedKey(buckets: Map<string, FixedWindowBucket>): string | undefined {
+  let oldestKey: string | undefined
+  let oldestStartedAt = Infinity
+  for (const [key, bucket] of buckets) {
+    if (bucket.startedAt < oldestStartedAt) {
+      oldestStartedAt = bucket.startedAt
+      oldestKey = key
+    }
+  }
+  return oldestKey
+}
+
 export function normalizeHeaderName(value: string, field: string): string {
   try {
     const probe = new Headers()

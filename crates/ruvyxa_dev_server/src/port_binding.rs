@@ -13,6 +13,26 @@ use crate::cli_output::{accent, dim, warn_text};
 /// Highest port offset tried past the requested port before giving up.
 pub(crate) const PORT_FALLBACK_SCAN_LIMIT: u16 = 100;
 
+/// The furthest port past the requested one this server may move to.
+///
+/// Scanning forward is a convenience for a developer reading the terminal, and
+/// `config.watch` is what separates that reader from a production process: it
+/// is set by `ServerConfig::dev` and cleared by `ServerConfig::production`,
+/// which `ruvyxa start` and `ruvyxa preview` both use. A container routes to
+/// the port it was configured with, so a `ruvyxa start` that quietly took the
+/// next one is healthy-looking and unreachable — the health check fails, the
+/// supervisor restarts it, and the real cause (usually the previous instance
+/// still holding the port) is reported only as a line on stdout. The other
+/// self-hosted host, the generated standalone server, has always read `PORT`
+/// and let `EADDRINUSE` surface as a crash the supervisor can act on.
+pub(crate) fn port_fallback_scan_limit(config: &ServerConfig) -> u16 {
+    if config.watch {
+        PORT_FALLBACK_SCAN_LIMIT
+    } else {
+        0
+    }
+}
+
 /// Bind every address the configured host answers to, on one shared port.
 ///
 /// A host is not an address. `localhost` is two of them on any dual-stack
@@ -35,7 +55,7 @@ pub(crate) async fn bind_listeners(
     let mut first_addr_in_use = None;
     let targets = bind_addresses(&config.host, address.ip());
 
-    for offset in 0..=PORT_FALLBACK_SCAN_LIMIT {
+    for offset in 0..=port_fallback_scan_limit(config) {
         let Some(port) = address.port().checked_add(offset) else {
             break;
         };
@@ -199,9 +219,29 @@ pub(crate) fn port_conflict_diagnostic(
     let owner = port_owner(address.port())
         .map(|owner| format!("\n\nDetected owner:\n  {owner}"))
         .unwrap_or_default();
-    let end_port = address.port().saturating_add(PORT_FALLBACK_SCAN_LIMIT);
+    let scan = port_fallback_scan_limit(config);
     let os_hint = port_lookup_hint(address.port());
 
+    // A production host scans nothing, so the message must not describe a
+    // range it never tried — and it does not need to: the owning PID above is
+    // the whole answer, which makes the production message the better of the
+    // two. The title stays the one RUV1201 has always carried, because
+    // `one_diagnostic_code_carries_one_meaning` reads these literals and a
+    // second title here would be a new collision, not a clearer message.
+    if scan == 0 {
+        return Diagnostic::new("RUV1201", "No available server port was found")
+            .explain(format!(
+                "{}:{} could not be bound ({error}).{owner}\n\nA production server binds the port it was given rather than moving to another one, because a container, proxy, or health check routes to the configured port and would not follow.",
+                config.host,
+                address.port(),
+            ))
+            .suggest(format!(
+                "Stop the process using port {}, or set `PORT` / pass `--port <free-port>`. {os_hint}",
+                address.port(),
+            ));
+    }
+
+    let end_port = address.port().saturating_add(scan);
     Diagnostic::new("RUV1201", "No available server port was found")
         .explain(format!(
             "{}:{} could not be bound, and Ruvyxa could not find a free port through {} ({error}).{owner}",

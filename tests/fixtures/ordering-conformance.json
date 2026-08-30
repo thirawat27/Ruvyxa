@@ -1,0 +1,80 @@
+{
+  "$comment": [
+    "The one string ordering both module graphs sort by.",
+    "",
+    "Rust orders a `String` by its UTF-8 bytes, which is code-point order.",
+    "JavaScript's `<` orders by UTF-16 code units. The two agree everywhere",
+    "below U+10000 and disagree wherever a surrogate pair meets U+E000-U+FFFF,",
+    "because a surrogate code unit (U+D800-U+DFFF) sorts below U+E000 while the",
+    "scalar it encodes (>= U+10000) sorts above it.",
+    "",
+    "What this decides is not cosmetic: the sites that sort through it are cache",
+    "keys, content fingerprints, `import.meta.glob` key order, and emitted",
+    "bytes. Two hosts disagreeing here means one project builds to two different",
+    "outputs.",
+    "",
+    "`expect` is the sign of comparing `left` to `right`: -1, 0, or 1."
+  ],
+  "cases": [
+    {
+      "name": "ordinary ASCII, where nothing is at stake",
+      "left": "a.ts",
+      "right": "b.ts",
+      "expect": -1
+    },
+    {
+      "name": "upper case sorts first, which is what banning localeCompare is for",
+      "left": "B.ts",
+      "right": "a.ts",
+      "expect": -1
+    },
+    {
+      "name": "a prefix sorts before the string that extends it",
+      "left": "app",
+      "right": "app/page.tsx",
+      "expect": -1
+    },
+    {
+      "name": "equal strings compare equal",
+      "left": "app/page.tsx",
+      "right": "app/page.tsx",
+      "expect": 0
+    },
+    {
+      "name": "a private-use character sorts below an astral one",
+      "left": "x",
+      "right": "😀x",
+      "expect": -1
+    },
+    {
+      "name": "and the same pair the other way round",
+      "left": "😀x",
+      "right": "x",
+      "expect": 1
+    },
+    {
+      "name": "an astral character sorts above the highest BMP one",
+      "left": "￿x",
+      "right": "😀x",
+      "expect": -1
+    },
+    {
+      "name": "two astral characters order by scalar",
+      "left": "😀",
+      "right": "😁",
+      "expect": -1
+    },
+    {
+      "name": "an astral character still sorts above ASCII",
+      "left": "z",
+      "right": "😀",
+      "expect": -1
+    },
+    {
+      "name": "a combining mark is compared as its own scalar, not folded away",
+      "left": "é",
+      "right": "é",
+      "expect": -1
+    }
+  ]
+}

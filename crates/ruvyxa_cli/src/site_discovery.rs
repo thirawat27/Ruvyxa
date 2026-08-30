@@ -285,9 +285,16 @@ impl OneOrManyRules {
     }
 }
 
+/// `pub(crate)` only so `config_surface_matches_the_rust_config` can name it.
+///
+/// It is reachable from a config exclusively through `OneOrManyRules`, which is
+/// `#[serde(untagged)]` — and untagged deserialization buffers the content and
+/// reports "data did not match any variant", discarding the field list its
+/// `deny_unknown_fields` produced. The conformance probe has to deserialize
+/// this struct directly to read what it accepts.
 #[derive(Debug, Default, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RobotsRuleOptions {
+pub(crate) struct RobotsRuleOptions {
     user_agent: Option<OneOrManyStrings>,
     allow: Option<OneOrManyStrings>,
     disallow: Option<OneOrManyStrings>,
@@ -361,6 +368,26 @@ where
         .map_err(|message| format!("{source} {message}"))
 }
 
+/// What an already-present `sitemap.xml` or `robots.txt` means.
+///
+/// The same two documents are written into two directories with opposite
+/// lifetimes, and "the file is already there" means the opposite thing in each.
+/// Inferring the answer from `exists()` alone served the build correctly and
+/// froze the dev server's copy at whatever the route set was the first time it
+/// ran, so the mode is a parameter each caller states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Regenerate {
+    /// Leave an existing file alone. `ruvyxa build` copies `public/` into the
+    /// staged assets directory before this runs, so a file already there is
+    /// project-owned and always wins.
+    Never,
+    /// Rewrite from the current route set, and delete what the current
+    /// configuration no longer generates. The dev server's cache directory
+    /// holds nothing but this function's own output, so an existing file there
+    /// is stale, not project-owned.
+    Always,
+}
+
 /// Write missing crawler-discovery files into the staged public assets.
 pub fn write_discovery_files(
     manifest: &RouteManifest,
@@ -369,14 +396,54 @@ pub fn write_discovery_files(
     site_url: Option<&str>,
     options: &SiteConfigOptions,
 ) -> std::io::Result<DiscoveryReport> {
+    write_discovery_files_with(
+        manifest,
+        prerendered_paths,
+        assets_dir,
+        site_url,
+        options,
+        Regenerate::Never,
+    )
+}
+
+/// Bring a generated-only directory in step with the current route set.
+///
+/// For the dev server's `cache/discovery`, which nothing but this function
+/// writes to and which outlives every route change in a session.
+pub fn regenerate_discovery_files(
+    manifest: &RouteManifest,
+    prerendered_paths: &[String],
+    assets_dir: &Path,
+    site_url: Option<&str>,
+    options: &SiteConfigOptions,
+) -> std::io::Result<DiscoveryReport> {
+    write_discovery_files_with(
+        manifest,
+        prerendered_paths,
+        assets_dir,
+        site_url,
+        options,
+        Regenerate::Always,
+    )
+}
+
+fn write_discovery_files_with(
+    manifest: &RouteManifest,
+    prerendered_paths: &[String],
+    assets_dir: &Path,
+    site_url: Option<&str>,
+    options: &SiteConfigOptions,
+    regenerate: Regenerate,
+) -> std::io::Result<DiscoveryReport> {
     let mut report = DiscoveryReport::default();
     let sitemap_path = assets_dir.join("sitemap.xml");
     let sitemap_route_exists = manifest
         .routes
         .iter()
         .any(|route| route.path == "/sitemap.xml");
+    let sitemap_is_project_owned = regenerate == Regenerate::Never && sitemap_path.exists();
 
-    if options.sitemap.enabled() && !sitemap_path.exists() && !sitemap_route_exists {
+    if options.sitemap.enabled() && !sitemap_is_project_owned && !sitemap_route_exists {
         match site_url {
             Some(url) => {
                 let entries =
@@ -389,7 +456,10 @@ pub fn write_discovery_files(
                 } else {
                     for (index, document) in documents.iter().enumerate() {
                         let shard_path = assets_dir.join(format!("sitemap-{index}.xml"));
-                        if shard_path.exists() {
+                        // Only staging can collide with a project file; in a
+                        // generated-only directory a shard of this name is this
+                        // function's own output from a previous route set.
+                        if regenerate == Regenerate::Never && shard_path.exists() {
                             return Err(invalid_input(format!(
                                 "generated sitemap shard would overwrite project file {}",
                                 shard_path.display()
@@ -401,9 +471,24 @@ pub fn write_discovery_files(
                     report.sitemap_files_written = documents.len() + 1;
                 }
                 report.sitemap_written = true;
+                if regenerate == Regenerate::Always {
+                    // A route set that shrank writes fewer shards than the last
+                    // one; the surplus is no longer indexed and must not stay
+                    // reachable.
+                    let first_stale = if documents.len() == 1 {
+                        0
+                    } else {
+                        documents.len()
+                    };
+                    remove_stale_sitemap_shards(assets_dir, first_stale)?;
+                }
             }
             None => report.sitemap_needs_site_url = true,
         }
+    }
+    if regenerate == Regenerate::Always && !report.sitemap_written {
+        remove_generated_file(&sitemap_path)?;
+        remove_stale_sitemap_shards(assets_dir, 0)?;
     }
 
     let robots_path = assets_dir.join("robots.txt");
@@ -411,7 +496,8 @@ pub fn write_discovery_files(
         .routes
         .iter()
         .any(|route| route.path == "/robots.txt");
-    if options.robots.enabled() && !robots_path.exists() && !robots_route_exists {
+    let robots_is_project_owned = regenerate == Regenerate::Never && robots_path.exists();
+    if options.robots.enabled() && !robots_is_project_owned && !robots_route_exists {
         fs::create_dir_all(assets_dir)?;
         let automatic_sitemap = site_url
             .filter(|_| report.sitemap_written || sitemap_path.exists() || sitemap_route_exists);
@@ -420,9 +506,35 @@ pub fn write_discovery_files(
             robots_txt(automatic_sitemap, options.robots.options())?,
         )?;
         report.robots_written = true;
+    } else if regenerate == Regenerate::Always {
+        remove_generated_file(&robots_path)?;
     }
 
     Ok(report)
+}
+
+/// Delete one generated document, tolerating its absence.
+fn remove_generated_file(path: &Path) -> std::io::Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+/// Delete generated sitemap shards from `first` upward.
+///
+/// Shards are numbered from zero without gaps, so the first missing index ends
+/// the run.
+fn remove_stale_sitemap_shards(assets_dir: &Path, first: usize) -> std::io::Result<()> {
+    let mut index = first;
+    loop {
+        let shard_path = assets_dir.join(format!("sitemap-{index}.xml"));
+        if !shard_path.exists() {
+            return Ok(());
+        }
+        remove_generated_file(&shard_path)?;
+        index += 1;
+    }
 }
 
 fn sitemap_entries(
@@ -1476,6 +1588,96 @@ mod tests {
             fs::read_to_string(assets.join("sitemap.xml")).unwrap(),
             "<urlset/>"
         );
+    }
+
+    /// The dev server's `cache/discovery` directory holds nothing but this
+    /// function's own output, so a second call with a larger route set must
+    /// answer with the larger route set. `Never` — the build's staged
+    /// `assets/`, where a project's own `public/sitemap.xml` has already been
+    /// copied in — must keep refusing.
+    #[test]
+    fn regeneration_follows_the_current_route_set_and_staging_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        for (mode, expected) in [(Regenerate::Always, true), (Regenerate::Never, false)] {
+            let assets = dir.path().join(format!("{mode:?}"));
+            let first = write_discovery_files_with(
+                &manifest(&[("/", RouteKind::Page)]),
+                &["/".to_string()],
+                &assets,
+                Some("https://ruvyxa.dev"),
+                &SiteConfigOptions::default(),
+                mode,
+            )
+            .unwrap();
+            assert!(first.sitemap_written && first.robots_written);
+
+            let second = write_discovery_files_with(
+                &manifest(&[("/", RouteKind::Page), ("/added", RouteKind::Page)]),
+                &["/".to_string(), "/added".to_string()],
+                &assets,
+                Some("https://ruvyxa.dev"),
+                &SiteConfigOptions::default(),
+                mode,
+            )
+            .unwrap();
+            assert_eq!(second.sitemap_written, expected, "{mode:?}");
+
+            let xml = fs::read_to_string(assets.join("sitemap.xml")).unwrap();
+            assert_eq!(
+                xml.contains("<loc>https://ruvyxa.dev/added</loc>"),
+                expected,
+                "{mode:?} sitemap: {xml}"
+            );
+        }
+    }
+
+    /// The dev server keeps serving this directory after the configuration
+    /// changes, so what the current configuration does not generate must not
+    /// survive in it — including shards an earlier, larger route set wrote.
+    #[test]
+    fn regeneration_removes_what_the_configuration_no_longer_generates() {
+        let dir = tempfile::tempdir().unwrap();
+        let assets = dir.path().join("discovery");
+        regenerate_discovery_files(
+            &manifest(&[("/", RouteKind::Page)]),
+            &["/".to_string()],
+            &assets,
+            Some("https://ruvyxa.dev"),
+            &SiteConfigOptions::default(),
+        )
+        .unwrap();
+        assert!(assets.join("sitemap.xml").exists() && assets.join("robots.txt").exists());
+
+        // A previous route set large enough to shard left these behind.
+        fs::write(assets.join("sitemap-0.xml"), "<urlset/>").unwrap();
+        fs::write(assets.join("sitemap-1.xml"), "<urlset/>").unwrap();
+        let report = regenerate_discovery_files(
+            &manifest(&[("/", RouteKind::Page)]),
+            &["/".to_string()],
+            &assets,
+            Some("https://ruvyxa.dev"),
+            &SiteConfigOptions::default(),
+        )
+        .unwrap();
+        assert!(report.sitemap_written);
+        assert!(!assets.join("sitemap-0.xml").exists());
+        assert!(!assets.join("sitemap-1.xml").exists());
+
+        let report = regenerate_discovery_files(
+            &manifest(&[("/", RouteKind::Page)]),
+            &["/".to_string()],
+            &assets,
+            Some("https://ruvyxa.dev"),
+            &SiteConfigOptions {
+                sitemap: SitemapSetting::Enabled(false),
+                robots: RobotsSetting::Enabled(false),
+                ..SiteConfigOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(report, DiscoveryReport::default());
+        assert!(!assets.join("sitemap.xml").exists());
+        assert!(!assets.join("robots.txt").exists());
     }
 
     #[test]

@@ -20,6 +20,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use anyhow::Context;
 use ruvyxa_dev_server::{JavaScriptRuntime, escape_html};
 use ruvyxa_graph::{HydrationMode, RenderStrategy, RouteEntry, RouteManifest, RouteParams};
 use tracing::info;
@@ -47,6 +48,25 @@ pub(crate) struct PrerenderArtifactCache {
     pub(crate) render_context_hash: String,
     pub(crate) fingerprints: Arc<ArtifactFingerprintCache>,
     pub(crate) enabled: bool,
+}
+
+/// How many cached artifacts the pre-render phase has read.
+///
+/// Test-only, and the reason it exists is the finding it gates: a pre-scan used
+/// to decide "does any render need a Node process?" by calling
+/// `load_prerender_artifact` for every job and discarding the answer, so a
+/// fully warm build read and JSON-parsed each artifact — whole rendered
+/// document included — twice. Only [`render_prerender_job`] reaches the counter,
+/// and only [`prerender_static_routes`] reaches that, so a single test owns it.
+#[cfg(test)]
+pub(crate) static PRERENDER_ARTIFACT_READS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Read one cached artifact, through the crate's single counted seam.
+fn read_prerender_artifact(cache: &PrerenderArtifactCache, job: &PrerenderJob) -> Option<String> {
+    #[cfg(test)]
+    PRERENDER_ARTIFACT_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    load_prerender_artifact(cache, job)
 }
 
 /// What every pre-rendered document carries in its `<head>` besides its own
@@ -149,7 +169,7 @@ pub(crate) async fn prerender_static_routes(
     app_dir: &Path,
     manifest: &RouteManifest,
     prerender_dir: &Path,
-    client_dir: &Path,
+    client_report: &Path,
     head: PrerenderHead,
     build: &BuildConfigOptions,
     cache: RuvyxaBuildCache<'_>,
@@ -164,7 +184,7 @@ pub(crate) async fn prerender_static_routes(
     }
 
     fs::create_dir_all(prerender_dir)?;
-    let client_assets = Arc::new(load_prerender_client_assets(client_dir));
+    let client_assets = Arc::new(load_prerender_client_assets(client_report)?);
     let i18n = manifest.i18n.clone();
 
     let parallelism = prerender_parallelism(build.parallelism, routes_to_prerender.len());
@@ -186,14 +206,24 @@ pub(crate) async fn prerender_static_routes(
     // The caller is given the chance to have started that pool already, because
     // nothing about it depends on the phases in between — see
     // [`start_static_params_worker_pool`].
+    //
+    // The pool is held behind a cell rather than decided up front. A pre-scan
+    // used to answer "will any render miss the cache?" by *doing the work* —
+    // loading and JSON-parsing every artifact, whole rendered document
+    // included, and throwing the answer away. `any()` short-circuits on the
+    // first miss, so a cold build paid one extra load and a fully warm build
+    // paid one per page: the entire cost landed on the case the pre-scan was
+    // added to make fast.
     let needs_static_params_worker = needs_static_params_worker(&routes_to_prerender);
-    let mut worker_pool = match started_worker_pool {
-        Some(pool) => Some(pool),
-        None if needs_static_params_worker => {
-            Some(start_prerender_worker_pool(root, &worker_env, parallelism, runtime).await?)
-        }
-        None => None,
-    };
+    let worker_pool = Arc::new(LazyPrerenderWorkerPool::new(
+        root,
+        worker_env,
+        parallelism,
+        runtime,
+    ));
+    if let Some(started) = started_worker_pool {
+        worker_pool.adopt(started);
+    }
 
     let prerendered = async {
         let mut jobs = Vec::new();
@@ -217,9 +247,9 @@ pub(crate) async fn prerender_static_routes(
         // errors and job ordering.
         if needs_static_params_worker {
             let permits = Arc::new(tokio::sync::Semaphore::new(parallelism));
-            let worker_pool = worker_pool.as_ref().cloned().ok_or_else(|| {
-                anyhow::anyhow!("Static-parameter worker pool was not initialized")
-            })?;
+            // Enumerating the jobs needs project code run, so this is the one
+            // caller that starts the pool without waiting for a cache miss.
+            let worker_pool = worker_pool.get().await?.clone();
             for (index, route) in routes_to_prerender.iter().enumerate() {
                 if !route.render.has_static_params || !route_has_dynamic_segments(&route.path) {
                     continue;
@@ -316,17 +346,6 @@ pub(crate) async fn prerender_static_routes(
             }
         }
 
-        let needs_render_worker = jobs.iter().any(|job| match &job.kind {
-            PrerenderJobKind::Csr => false,
-            PrerenderJobKind::Render { .. } => {
-                !artifact_cache.enabled || load_prerender_artifact(&artifact_cache, job).is_none()
-            }
-        });
-        if needs_render_worker && worker_pool.is_none() {
-            worker_pool =
-                Some(start_prerender_worker_pool(root, &worker_env, parallelism, runtime).await?);
-        }
-
         let parallelism = prerender_parallelism(build.parallelism, jobs.len());
         let total_jobs = jobs.len();
         let mut completed_jobs = 0usize;
@@ -350,7 +369,7 @@ pub(crate) async fn prerender_static_routes(
                 let i18n = i18n.clone();
                 pending.spawn(async move {
                     render_prerender_job(
-                        worker_pool.as_deref(),
+                        worker_pool.as_ref(),
                         &root,
                         &app_dir,
                         &prerender_dir,
@@ -408,9 +427,12 @@ pub(crate) async fn prerender_static_routes(
         Ok(prerendered)
     }
     .await;
-    if let Some(worker_pool) = worker_pool {
-        worker_pool.shutdown().await;
-    }
+    // Whatever the cell ended up holding — the pool the caller handed over, the
+    // one static-parameter discovery started, or the one the first cache miss
+    // started — is the one shut down. `NodeWorkerPool` has no `Drop`, and a
+    // retired worker is no longer in `workers`, so `shutdown()` is the only
+    // owner that reaches its process.
+    worker_pool.shutdown().await;
     prerendered
 }
 
@@ -475,6 +497,82 @@ pub(crate) async fn start_static_params_worker_pool(
         .map(Some)
 }
 
+/// The pre-render worker pool, started at most once and only when something
+/// actually needs a Node process.
+///
+/// Two properties this type exists to hold, both of which were previously
+/// spread across the phase:
+///
+/// - **A fully cached build starts no worker.** That used to be decided by a
+///   pre-scan which answered the question by doing the work — loading and
+///   parsing every cached artifact, entire rendered document included, and
+///   discarding it. The cell answers it instead, by never being initialised.
+/// - **`parallelism` concurrent misses start one pool, not `parallelism`.**
+///   `OnceCell::get_or_try_init` runs the initialiser under its own lock, so
+///   the losing tasks await the winner's pool rather than spawning their own.
+///
+/// [`shutdown`](Self::shutdown) reaches whatever the cell ended up holding.
+/// `NodeWorkerPool` has no `Drop`, and a *retired* worker is no longer in its
+/// `workers` list, so nothing else can reach that worker's process.
+pub(crate) struct LazyPrerenderWorkerPool {
+    cell: tokio::sync::OnceCell<Arc<ruvyxa_dev_server::NodeWorkerPool>>,
+    root: PathBuf,
+    worker_env: BTreeMap<String, String>,
+    parallelism: usize,
+    runtime: JavaScriptRuntime,
+}
+
+impl LazyPrerenderWorkerPool {
+    pub(crate) fn new(
+        root: &Path,
+        worker_env: BTreeMap<String, String>,
+        parallelism: usize,
+        runtime: JavaScriptRuntime,
+    ) -> Self {
+        Self {
+            cell: tokio::sync::OnceCell::new(),
+            root: root.to_path_buf(),
+            worker_env,
+            parallelism,
+            runtime,
+        }
+    }
+
+    /// Take ownership of a pool the caller started ahead of this phase.
+    ///
+    /// Ownership matters more than reuse here: an adopted pool is the one
+    /// [`shutdown`](Self::shutdown) closes, so the caller does not have to.
+    pub(crate) fn adopt(&self, pool: Arc<ruvyxa_dev_server::NodeWorkerPool>) {
+        let _ = self.cell.set(pool);
+    }
+
+    /// The pool, starting it if this is the first caller to need one.
+    pub(crate) async fn get(&self) -> anyhow::Result<&Arc<ruvyxa_dev_server::NodeWorkerPool>> {
+        self.cell
+            .get_or_try_init(|| {
+                start_prerender_worker_pool(
+                    &self.root,
+                    &self.worker_env,
+                    self.parallelism,
+                    self.runtime,
+                )
+            })
+            .await
+    }
+
+    /// Whether a Node process was ever started for this phase.
+    #[cfg(test)]
+    pub(crate) fn started(&self) -> bool {
+        self.cell.get().is_some()
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        if let Some(pool) = self.cell.get() {
+            pool.shutdown().await;
+        }
+    }
+}
+
 pub(crate) async fn start_prerender_worker_pool(
     root: &Path,
     worker_env: &BTreeMap<String, String>,
@@ -532,7 +630,7 @@ pub(crate) fn build_worker_env(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn render_prerender_job(
-    worker_pool: Option<&ruvyxa_dev_server::NodeWorkerPool>,
+    worker_pool: &LazyPrerenderWorkerPool,
     root: &Path,
     app_dir: &Path,
     prerender_dir: &Path,
@@ -563,17 +661,14 @@ pub(crate) async fn render_prerender_job(
             server_components,
         } => {
             if artifact_cache.enabled
-                && let Some(html) = load_prerender_artifact(artifact_cache, job)
+                && let Some(html) = read_prerender_artifact(artifact_cache, job)
             {
                 artifact_cache_hit = true;
                 html
             } else {
-                let worker_pool = worker_pool.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Pre-rendering worker pool was not initialized for cache miss {}",
-                        job.render_path
-                    )
-                })?;
+                // The first miss is what starts a Node process; a build whose
+                // every render is a hit never reaches this line.
+                let worker_pool = worker_pool.get().await?;
                 let result = worker_pool
                     .render_ssg_isolated(ruvyxa_dev_server::RenderSsgRequest {
                         project_root: root,
@@ -770,50 +865,24 @@ pub(crate) async fn prerender_not_found_document(
             // build already used for routes has been dropped by now, and a
             // project whose not-found page is unchanged never reaches this arm.
             let worker_pool = start_prerender_worker_pool(root, &worker_env, 1, runtime).await?;
-            let result = worker_pool
-                .render_ssg_isolated(ruvyxa_dev_server::RenderSsgRequest {
-                    project_root: root,
-                    app_dir,
-                    page_file: &route_file,
-                    request_path: NOT_FOUND_ROUTE_PATH,
-                    route_path: NOT_FOUND_ROUTE_PATH,
-                    params: &RouteParams::new(),
-                    mode: "full",
-                    server_components: false,
-                })
-                .await
-                .map_err(|error| anyhow::anyhow!("Pre-rendering not-found.tsx failed: {error}"))?;
-            if !result.ok {
-                let message = ruvyxa_diagnostics::worker_failure_message(result.message);
-                let code = result.code.unwrap_or_else(|| "RUV1205".to_string());
-                anyhow::bail!(
-                    "Pre-rendering not-found.tsx failed: {}",
-                    ruvyxa_diagnostics::label_with_code(&code, &message)
-                );
-            }
-            let html = result.html.ok_or_else(|| {
-                anyhow::anyhow!("Pre-rendering not-found.tsx completed without HTML")
-            })?;
-            let html = inject_prerender_head(&html, head);
-            if artifact_cache.enabled {
-                let mut inputs =
-                    stable_prerender_inputs(root, app_dir, &result.inputs.unwrap_or_default());
-                inputs.extend(stable_prerender_inputs(
-                    root,
-                    app_dir,
-                    std::slice::from_ref(&route_file),
-                ));
-                store_prerender_artifact(
-                    &artifact_cache,
-                    &job,
-                    &result
-                        .dependency_hash
-                        .unwrap_or_else(|| "worker-legacy-renderer".to_string()),
-                    &inputs,
-                    &html,
-                );
-            }
-            html
+            // Every exit from here shuts the pool down, including the success
+            // one. `NodeWorkerPool` has no `Drop`, and a worker that retired
+            // mid-phase is owned by a detached drain task that only `shutdown()`
+            // joins — so dropping the pool leaves an orphaned `node` process
+            // holding handles on the build directory, which on Windows is
+            // exactly what makes the next build's renames fail.
+            let rendered = render_not_found_document(
+                &worker_pool,
+                root,
+                app_dir,
+                &route_file,
+                head,
+                &artifact_cache,
+                &job,
+            )
+            .await;
+            worker_pool.shutdown().await;
+            rendered?
         }
     };
 
@@ -830,6 +899,72 @@ pub(crate) async fn prerender_not_found_document(
     Ok(Some(document))
 }
 
+/// Render the not-found document on one worker, and store its artifact.
+///
+/// Extracted so every exit — the transport error, the worker's own failure
+/// report, a completion with no HTML, and success — is a `Result` returned to
+/// one caller that shuts the pool down afterwards.
+#[allow(clippy::too_many_arguments)]
+async fn render_not_found_document(
+    worker_pool: &ruvyxa_dev_server::NodeWorkerPool,
+    root: &Path,
+    app_dir: &Path,
+    route_file: &Path,
+    head: &PrerenderHead,
+    artifact_cache: &PrerenderArtifactCache,
+    job: &PrerenderJob,
+) -> anyhow::Result<String> {
+    let result = worker_pool
+        .render_ssg_isolated(ruvyxa_dev_server::RenderSsgRequest {
+            project_root: root,
+            app_dir,
+            page_file: route_file,
+            request_path: NOT_FOUND_ROUTE_PATH,
+            route_path: NOT_FOUND_ROUTE_PATH,
+            params: &RouteParams::new(),
+            mode: "full",
+            server_components: false,
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("Pre-rendering not-found.tsx failed: {error}"))?;
+    if !result.ok {
+        let message = ruvyxa_diagnostics::worker_failure_message(result.message);
+        let code = result.code.unwrap_or_else(|| "RUV1205".to_string());
+        anyhow::bail!(
+            "Pre-rendering not-found.tsx failed: {}",
+            ruvyxa_diagnostics::label_with_code(&code, &message)
+        );
+    }
+    let html = result
+        .html
+        .ok_or_else(|| anyhow::anyhow!("Pre-rendering not-found.tsx completed without HTML"))?;
+    let html = inject_prerender_head(&html, head);
+    if artifact_cache.enabled {
+        let mut inputs = stable_prerender_inputs(root, app_dir, &result.inputs.unwrap_or_default());
+        inputs.extend(stable_prerender_inputs(
+            root,
+            app_dir,
+            &[route_file.to_path_buf()],
+        ));
+        store_prerender_artifact(
+            artifact_cache,
+            job,
+            &result
+                .dependency_hash
+                .unwrap_or_else(|| "worker-legacy-renderer".to_string()),
+            &inputs,
+            &html,
+        );
+    }
+    Ok(html)
+}
+
+/// Resolve the worker's reported input paths into canonical project paths.
+///
+/// Every path returned is canonical, on every branch. `store_prerender_artifact`
+/// keys its cached artifact by exactly what this returns and does not
+/// canonicalize again, so a branch that answered with an unresolved path would
+/// key the same file two ways depending on how the worker happened to report it.
 pub(crate) fn stable_prerender_inputs(
     root: &Path,
     app_dir: &Path,
@@ -858,7 +993,11 @@ pub(crate) fn stable_prerender_inputs(
                 .and_then(|staging_root| {
                     input.strip_prefix(staging_root).ok().map(|relative| {
                         let relative = relative.strip_prefix("server").unwrap_or(relative);
-                        root.join(relative)
+                        // Normalized like the branch above it. `root` is the
+                        // `--root` value as the CLI received it, so rejoining
+                        // onto it reintroduces whatever spelling the caller
+                        // typed — and this value is a cache key.
+                        ruvyxa_diagnostics::normalized_canonical_path(&root.join(relative))
                     })
                 })
                 .unwrap_or(input)
@@ -1206,20 +1345,58 @@ pub(crate) struct PrerenderClientAssets {
     pub(crate) hydration_loader: Option<String>,
 }
 
-pub(crate) fn load_prerender_client_assets(
-    client_dir: &Path,
-) -> BTreeMap<String, PrerenderClientAssets> {
-    let Ok(source) = fs::read_to_string(client_dir.join("manifest.json")) else {
-        return BTreeMap::new();
-    };
-    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&source) else {
-        return BTreeMap::new();
-    };
-    let Some(routes) = manifest.get("routes").and_then(|routes| routes.as_array()) else {
-        return BTreeMap::new();
-    };
+/// What to say about a client build report that exists and cannot be used.
+///
+/// One sentence for three failures, because the answer to all three is the
+/// same: the file is not the report, and nothing downstream can tell the
+/// difference between "no routes ship a bundle" and "this document could not be
+/// read".
+fn unusable_client_report(client_report: &Path) -> String {
+    format!(
+        "{} is present but is not a readable client build report; delete it and \
+         rebuild rather than pre-rendering documents with no client script",
+        client_report.display()
+    )
+}
 
-    routes
+/// Read each route's browser assets out of the client build report.
+///
+/// `client_report` is the file itself, not the directory holding it: the report
+/// lives at the build root as `client-report.json`, outside the public
+/// `client/` directory it used to sit in. See `CLIENT_BUILD_REPORT_FILE`.
+///
+/// A missing file is an empty map, and only a missing file is. Absence stays
+/// tolerated because a build that emits no client half legitimately writes no
+/// report, and because the two other Rust readers of this file answer it the
+/// same way. Every other failure is an error naming the path, because an empty
+/// map makes [`inject_prerender_client_assets`] hand every document back
+/// unchanged — no bootstrap block, no `<script type="module">` — on a build that
+/// reports success. `output_audit` cannot see it either: it looks for references
+/// that do not resolve, and a document that references *nothing* has none. The
+/// three readers of this same file that already separate the two answers are
+/// `prebuilt_client_assets` in `ruvyxa_dev_server`, `read_cache_observation` in
+/// `bench.rs`, and `loadClientAssets` in
+/// `packages/ruvyxa/runtime/adapter-runner.mjs`.
+pub(crate) fn load_prerender_client_assets(
+    client_report: &Path,
+) -> anyhow::Result<BTreeMap<String, PrerenderClientAssets>> {
+    let source = match fs::read_to_string(client_report) {
+        Ok(source) => source,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(BTreeMap::new());
+        }
+        Err(error) => {
+            return Err(anyhow::Error::new(error).context(unusable_client_report(client_report)));
+        }
+    };
+    let manifest = serde_json::from_str::<serde_json::Value>(&source)
+        .with_context(|| unusable_client_report(client_report))?;
+    let routes = manifest
+        .get("routes")
+        .and_then(|routes| routes.as_array())
+        .ok_or_else(|| anyhow::anyhow!(unusable_client_report(client_report)))?;
+
+    Ok(routes
         .iter()
         .filter_map(|route| {
             let path = route.get("path")?.as_str()?.to_string();
@@ -1251,7 +1428,7 @@ pub(crate) fn load_prerender_client_assets(
                 },
             ))
         })
-        .collect()
+        .collect())
 }
 
 pub(crate) fn module_preload_links(preloads: &[String]) -> String {
@@ -1321,6 +1498,45 @@ pub(crate) fn inject_prerender_client_assets(
 // itself and it does the serializing and escaping, so the helper had no callers
 // and, more to the point, no reason to exist — a payload that escapes itself
 // cannot be embedded unescaped.
+
+/// What keeps the read-count gate from being satisfied by accident.
+///
+/// [`PRERENDER_ARTIFACT_READS`] counts [`read_prerender_artifact`], not the
+/// loader underneath it, so `a_fully_warm_prerender_reads_each_artifact_once…`
+/// can only see reads that go through the wrapper. Restoring the deleted
+/// pre-scan *exactly as it was originally written* — a `jobs.iter().any(…)`
+/// calling the loader directly — reads every artifact twice again and leaves
+/// that test **green**; this was verified by doing it, not reasoned about. A
+/// counter on the wrapper alone is therefore a gate with a hole, and the hole
+/// is shaped precisely like the regression the gate exists to catch.
+///
+/// Widening the counter to the loader itself is not the fix: the loader is
+/// also called directly by
+/// `prerender_artifact_cache_reuses_and_invalidates_dependency_content`, and a
+/// process-global counter read by an exact `assert_eq!` would then depend on
+/// which tests happen to be running beside it.
+#[cfg(test)]
+mod artifact_read_seam_tests {
+    /// The uncounted loader keeps the two call sites it is allowed.
+    ///
+    /// The allowed two are [`read_prerender_artifact`] — the counted seam every
+    /// render goes through — and [`prerender_not_found_document`], which reads
+    /// one artifact once, outside the loop the counter measures. A third is a
+    /// read the gate cannot see.
+    #[test]
+    fn the_uncounted_artifact_loader_keeps_its_two_call_sites() {
+        // Split so this file's own scan does not match the needle it defines.
+        let needle = concat!("load_prerender_", "artifact(");
+        let sites = include_str!("prerender.rs").matches(needle).count();
+        assert_eq!(
+            sites, 2,
+            "a direct call to the uncounted loader is invisible to the \
+             read-count gate: route it through read_prerender_artifact, or \
+             raise this number together with the reason the new site is one \
+             the warm-build read count must not include"
+        );
+    }
+}
 
 #[cfg(test)]
 mod csr_shell_tests {

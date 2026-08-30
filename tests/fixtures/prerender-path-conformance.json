@@ -72,6 +72,11 @@
       "path": "ab",
       "safe": false,
       "why": "DEL is a control character too"
+    },
+    {
+      "path": "a\u0085b",
+      "safe": false,
+      "why": "C1 controls are control characters too: Rust's `char::is_control()` covers U+0080-U+009F, and the JavaScript copy stopped at U+007F, so the three owners of this rule disagreed with no case here to say so"
     }
   ]
 }

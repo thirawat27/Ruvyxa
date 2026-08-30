@@ -16,7 +16,7 @@
 //! same purpose. This is the synchronous half of that same rule.
 
 use std::io::{self, Read};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 /// How often the wait loop re-checks a child that has not exited yet.
@@ -97,27 +97,42 @@ pub fn output_with_timeout(
     let stderr_reader = std::thread::spawn(move || drain(stderr_pipe.as_mut()));
 
     let deadline = Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait()? {
-            Some(status) => break Some(status),
-            None if Instant::now() >= deadline => {
+    // The loop breaks with a value rather than returning, so every exit from it
+    // reaches the joins below. An earlier version wrote `child.try_wait()?` and
+    // returned straight out of the loop when the wait itself failed: the
+    // `Child` was dropped without being killed — and `std::process::Child` does
+    // not terminate on drop — while both drain threads stayed blocked on
+    // `read_to_end`. That is precisely the orphaned runtime holding handles on
+    // the build directory that this module exists to prevent, reached through
+    // the one path that had no cleanup.
+    let waited = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(Some(status)),
+            Ok(None) if Instant::now() >= deadline => {
                 // Kill and reap before returning: a caller that gives up must
                 // not leave the process behind, which is exactly what made a
                 // stalled build leave orphaned runtimes running.
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
+                stop(&mut child);
+                break Ok(None);
             }
-            None => std::thread::sleep(POLL_INTERVAL),
+            Ok(None) => std::thread::sleep(POLL_INTERVAL),
+            Err(error) => {
+                // An unexpected `waitpid`/`WaitForSingleObject` failure says
+                // nothing about whether the child is still running, so treat it
+                // as running and stop it.
+                stop(&mut child);
+                break Err(error);
+            }
         }
     };
 
     // Joined after the child is gone either way, so the pipes are closed and
-    // neither reader can still be blocked.
+    // neither reader can still be blocked. Joined before `waited` is inspected,
+    // so a failed wait unwinds the threads too rather than detaching them.
     let stdout = stdout_reader.join().unwrap_or_else(|_| Ok(Vec::new()))?;
     let stderr = stderr_reader.join().unwrap_or_else(|_| Ok(Vec::new()))?;
 
-    let Some(status) = status else {
+    let Some(status) = waited? else {
         return Err(ProcessError::TimedOut { after: timeout });
     };
 
@@ -126,6 +141,16 @@ pub fn output_with_timeout(
         stdout,
         stderr,
     })
+}
+
+/// Terminate a child that is still running and reap it.
+///
+/// Both halves matter and neither is allowed to fail the call: `kill` on a
+/// process that has already exited is an error on some platforms, and the
+/// `wait` is what releases the operating-system entry so no zombie is left.
+fn stop(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn drain(pipe: Option<&mut impl Read>) -> io::Result<Vec<u8>> {
@@ -235,6 +260,38 @@ mod tests {
         let output = output_with_timeout(&mut command, Duration::from_secs(60)).unwrap();
         assert_eq!(output.stdout.len(), 2_000_000);
         assert!(output.status.success());
+    }
+
+    /// The cleanup every exit from the wait loop runs, on its own.
+    ///
+    /// The wait-failure branch cannot be provoked portably — `try_wait` fails
+    /// only on an unexpected `waitpid`/`WaitForSingleObject` error — so what is
+    /// tested is the cleanup that branch now shares with the timeout branch:
+    /// after `stop`, the child is gone and reaped rather than left running.
+    #[test]
+    fn stop_terminates_and_reaps_a_running_child() {
+        if !node_available() {
+            eprintln!("skipping: node is not available on this machine");
+            return;
+        }
+        let mut child = Command::new(crate::JavaScriptRuntime::Node.executable())
+            .arg("-e")
+            .arg("setInterval(() => {}, 1000)")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the child starts");
+
+        stop(&mut child);
+
+        // Reaped: a second wait answers immediately with the status the first
+        // one already collected, rather than blocking on a live process.
+        let status = child.try_wait().expect("the child was reaped");
+        assert!(
+            status.is_some(),
+            "a stopped child must have exited before `stop` returns"
+        );
     }
 
     /// stdin is closed, so a child that reads it gets EOF instead of blocking.

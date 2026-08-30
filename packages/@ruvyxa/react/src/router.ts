@@ -216,24 +216,116 @@ export interface RouterInstance {
 }
 
 /**
- * Resolve `href` against the current document, or return `null` when it is not
- * a same-origin navigation this router can own.
+ * Schemes the router will hand to the browser when the URL is not its own.
  *
- * Cross-origin links, downloads, and non-HTTP schemes must reach the browser
- * untouched; intercepting them would break `mailto:`, `tel:`, and file
- * downloads.
+ * Deliberately generous: these are the schemes an ordinary `<a href>` reaches
+ * for, and refusing one would break a link the browser has always handled. It
+ * is an allow-list rather than a deny-list because a `router.push()` argument
+ * is frequently *data* — a CMS link field, a `?next=` parameter, a profile URL
+ * — and a new scheme should have to be admitted deliberately.
  */
-function resolveInternalUrl(href: string): URL | null {
-  if (typeof window === 'undefined') return null
+const NAVIGABLE_EXTERNAL_PROTOCOLS = new Set(['http:', 'https:', 'mailto:', 'tel:', 'sms:'])
+
+/**
+ * What `href` turned out to be.
+ *
+ * `internal` is a same-origin page this router can render itself; `external` is
+ * a real navigation the browser must perform; `refused` is not a navigation at
+ * all. Separating the last two matters: the old `URL | null` answer conflated
+ * "not mine, hand it to the browser" with "not a navigation", and the
+ * fall-through then replayed the caller's *raw string* into
+ * `location.assign` — which executes a `javascript:` URL in this document.
+ */
+export type NavigationTarget =
+  | { kind: 'internal'; url: URL }
+  | { kind: 'external'; url: URL }
+  /**
+   * `reason` is absent only when there is nothing to report — no browser to
+   * navigate in at all. Every refusal a caller could have avoided carries one,
+   * which is what lets the classifier stay silent and the callers that *asked
+   * for a navigation* do the reporting.
+   */
+  | { kind: 'refused'; reason?: string }
+
+/**
+ * A `#fragment` against the page already showing.
+ *
+ * Same-origin http(s) documents never reach this — the internal arm already
+ * claimed them. It exists so a document served over some other scheme (an
+ * exported site opened from `file:`) keeps its in-page anchors working.
+ */
+function isSamePageFragment(url: URL): boolean {
+  if (url.hash === '') return false
+  const here = new URL(window.location.href)
+  here.hash = ''
+  const there = new URL(url.href)
+  there.hash = ''
+  return here.href === there.href
+}
+
+/**
+ * Classify `href` against the current document, reporting nothing.
+ *
+ * Cross-origin links, downloads, and `mailto:`/`tel:`/`sms:` must reach the
+ * browser untouched; intercepting them would break links that have always
+ * worked. Everything else is refused rather than passed along, because
+ * `useRouter().push()` is a sink an `<a>` click is not: without the router
+ * there is no way for a page to turn a data string into a navigation.
+ *
+ * Exported for `<Link>`, which has to ask the question *before* it calls
+ * `preventDefault()`: a click it suppresses and the router then refuses is a
+ * link that does nothing at all. It asks silently because a refusal there is
+ * not one — the anchor still carries the href and the browser goes on to
+ * handle it, exactly as it did before this router existed. Not part of the
+ * package's public surface: `index.ts` does not re-export it and the
+ * `exports` map does not expose this module.
+ */
+export function classifyNavigationTarget(href: string): NavigationTarget {
+  // Not a browser: there is nothing to navigate, and nothing to report.
+  if (typeof window === 'undefined') return { kind: 'refused' }
   let url: URL
   try {
     url = new URL(href, window.location.href)
   } catch {
-    return null
+    return { kind: 'refused', reason: 'it is not a URL' }
   }
-  if (url.origin !== window.location.origin) return null
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
-  return url
+  if (
+    url.origin === window.location.origin &&
+    (url.protocol === 'http:' || url.protocol === 'https:')
+  ) {
+    return { kind: 'internal', url }
+  }
+  if (NAVIGABLE_EXTERNAL_PROTOCOLS.has(url.protocol) || isSamePageFragment(url)) {
+    return { kind: 'external', url }
+  }
+  return {
+    kind: 'refused',
+    reason: `"${url.protocol}" is not a scheme a router may navigate to`,
+  }
+}
+
+/**
+ * Classify `href` for a caller that asked for a navigation, and say so loudly
+ * when the answer is no.
+ *
+ * `navigate()` and `prefetch()` were handed a URL and are about to do nothing
+ * with it; silence there is how a `javascript:` href in a CMS field looks like
+ * a dead button rather than a refused one.
+ */
+function resolveNavigationTarget(href: string): NavigationTarget {
+  const target = classifyNavigationTarget(href)
+  if (target.kind === 'refused' && target.reason !== undefined) {
+    refuseNavigation(href, target.reason)
+  }
+  return target
+}
+
+function refuseNavigation(href: string, reason: string): void {
+  console.error(
+    `Ruvyxa router refused to navigate to ${JSON.stringify(href)}: ${reason}. ` +
+      `Navigable schemes are ${[...NAVIGABLE_EXTERNAL_PROTOCOLS].join(', ')} ` +
+      'and same-origin paths.',
+  )
 }
 
 function loadManifestRoutes(): RouteManifestEntry[] {
@@ -748,11 +840,14 @@ function createRouter(): RouterInstance {
     href: string,
     options: NavigateOptions & { history?: 'push' | 'replace' | 'none' } = {},
   ): Promise<void> {
-    const url = resolveInternalUrl(href)
-    if (!url) {
-      if (typeof window !== 'undefined') window.location.assign(href)
+    const target = resolveNavigationTarget(href)
+    if (target.kind === 'refused') return
+    if (target.kind === 'external') {
+      // The *parsed* value. Replaying `href` here was the whole defect.
+      window.location.assign(target.url.href)
       return
     }
+    const url = target.url
 
     const historyMode = options.history ?? (options.replace ? 'replace' : 'push')
     const id = ++navigationId
@@ -889,8 +984,12 @@ function createRouter(): RouterInstance {
   }
 
   function prefetch(href: string): void {
-    const url = resolveInternalUrl(href)
-    if (!url) return
+    // The same guard as `navigate`, from the same function: a href this router
+    // will refuse to navigate to is not one it should warm a bundle for, and
+    // the rule must not be written down in only one of the two places.
+    const target = resolveNavigationTarget(href)
+    if (target.kind !== 'internal') return
+    const url = target.url
     void ensureManifest().then(() => {
       const matched = match(url.pathname)
       if (!matched?.route.src) return
@@ -970,7 +1069,16 @@ function createRouter(): RouterInstance {
       // `useSyncExternalStore` would treat the re-render as a no-op.
       snapshot = { ...snapshot, flight: value }
     } finally {
+      // The clear and the notification are one act. Clearing alone left
+      // `getPending()` answering `false` to a `useSyncExternalStore` that had
+      // never been told to ask again, so the `true` React last rendered stood —
+      // a spinner that never stopped after the retry failed, which is the
+      // moment a user is most likely to press the button again. On the success
+      // path `refresh()` emits a second time and nothing re-renders for it: the
+      // snapshot reference is unchanged by then, so every subscriber bails out
+      // on the read.
       pendingNavigationId = null
+      emit()
     }
     refresh()
   }

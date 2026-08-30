@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { describe, it } from 'node:test'
 import { pathToFileURL } from 'node:url'
 
@@ -6,12 +7,13 @@ import type { RuvyxaConfig } from '../../../packages/@ruvyxa/core/dist/types.js'
 import { repoPath } from '../../repo-root.ts'
 
 /**
- * `ruvyxa.config` has two descriptions of the same object, and they drifted.
+ * `ruvyxa.config` has three descriptions of the same object, and they drifted.
  *
- * `CONFIG_KEY_SCHEMA` in `packages/ruvyxa/runtime/config-schema.mjs` decides
- * what the build accepts; `RuvyxaConfig` in `@ruvyxa/core` decides what
- * TypeScript accepts. `build.target` lived in the first for several releases
- * and never reached the second, so a project that set it was refused by `tsc`
+ * `ProjectConfig` in `crates/ruvyxa_cli/src/config.rs` decides what the compiler
+ * reads; `CONFIG_KEY_SCHEMA` in `packages/ruvyxa/runtime/config-schema.mjs`
+ * decides what the build accepts; `RuvyxaConfig` in `@ruvyxa/core` decides what
+ * TypeScript accepts. `build.target` lived in the second for several releases
+ * and never reached the third, so a project that set it was refused by `tsc`
  * against a build that honoured the value, applied it in both compilers, and
  * documented it.
  *
@@ -19,12 +21,41 @@ import { repoPath } from '../../repo-root.ts'
  * declare fails compilation, and its key set is compared against the schema, so
  * a key the schema declares and the literal omits fails at run time. Neither
  * side can grow a key alone.
+ *
+ * That pair alone is not enough, which is how `image.maxWidth` was lost: Rust
+ * declared it, the public type declared it, and both of the descriptions this
+ * file compared agreed with each other in leaving it out — so every command
+ * refused a config that set the documented option. The third edge is
+ * `tests/fixtures/config-surface-conformance.json`, generated from serde by
+ * `config_surface_matches_the_rust_config` in `crates/ruvyxa_cli/src/tests.rs`
+ * and replayed against the schema below.
  */
 const { CONFIG_KEY_SCHEMA, DEPRECATED_CONFIG_KEYS } = (await import(
   pathToFileURL(repoPath('packages/ruvyxa/runtime/config-schema.mjs')).href
 )) as {
   CONFIG_KEY_SCHEMA: Readonly<Record<string, readonly string[]>>
   DEPRECATED_CONFIG_KEYS: readonly string[]
+}
+
+/**
+ * The field set of the Rust config structs, read back out of serde.
+ *
+ * Nothing in it is transcribed by hand: every struct behind it carries
+ * `deny_unknown_fields`, so it names the fields it accepts in the error it
+ * raises for one it does not, and the Rust test regenerates this table from
+ * those errors. `react` and `typescript` are present here as well as in the
+ * schema — `ProjectConfig` accepts both so an older config still validates —
+ * so `DEPRECATED_CONFIG_KEYS` plays no part in this comparison.
+ */
+const configSurface = JSON.parse(
+  readFileSync(repoPath('tests/fixtures/config-surface-conformance.json'), 'utf8'),
+) as {
+  sections: Record<string, { fields: string[] }>
+}
+
+/** Code-unit order, which is what both replays and the fixture are written in. */
+function sorted(values: readonly string[]): string[] {
+  return values.slice().sort()
 }
 
 /**
@@ -69,6 +100,7 @@ const authored: RuvyxaConfig = {
     lossless: false,
     keepOriginal: false,
     variantWidths: [640, 1280],
+    maxWidth: 3840,
     workers: 0,
     effort: 4,
     onDemand: { enabled: true, maxWidth: 3840 },
@@ -238,6 +270,35 @@ describe('config schema', () => {
       assert.ok(
         CONFIG_KEY_SCHEMA.config.includes(key),
         `${key} must stay accepted so an older config still validates`,
+      )
+    }
+  })
+
+  /**
+   * The edge that was missing while `image.maxWidth` was unusable.
+   *
+   * Both directions, deliberately. A key in Rust and not in the schema is that
+   * defect: the compiler reads the option, the renderer refuses the config, and
+   * every command fails before it starts. A key in the schema and not in Rust
+   * is the quieter one: the config validates, the option is dropped by the
+   * projection or ignored by the compiler, and the project never learns that
+   * the setting selects no behaviour.
+   */
+  it('declares every key the Rust config declares, and nothing more', () => {
+    assert.deepEqual(
+      sorted(Object.keys(CONFIG_KEY_SCHEMA)),
+      sorted(Object.keys(configSurface.sections)),
+      'config-schema.mjs and tests/fixtures/config-surface-conformance.json describe ' +
+        'different sets of config sections',
+    )
+
+    for (const [schemaPath, section] of Object.entries(configSurface.sections)) {
+      assert.deepEqual(
+        sorted(CONFIG_KEY_SCHEMA[schemaPath] ?? []),
+        sorted(section.fields),
+        `${schemaPath} disagrees between config-schema.mjs and the Rust config. ` +
+          'A field only Rust has is refused by RUV1602 before any command runs; ' +
+          'a field only the schema has is accepted and then ignored.',
       )
     }
   })

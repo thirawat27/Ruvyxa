@@ -13,6 +13,17 @@
 //! The compiler version is included so that cache entries are automatically
 //! invalidated when the compiler is updated.
 //!
+//! ## Entry format
+//!
+//! ```text
+//! blake3(compiled_js) as 64 hex chars, "\n", compiled_js
+//! ```
+//!
+//! The key hashes the *source*, so it says nothing about whether the file at
+//! that path is whole — a torn publish leaves a short file exactly where the
+//! next lookup looks. The digest line makes the entry self-describing, and a
+//! mismatch is a miss: a miss costs a recompile, never a wrong answer.
+//!
 //! ## Memory cache (LRU eviction)
 //!
 //! The in-process cache holds up to [`MEMORY_CACHE_LIMIT`] entries.  When the
@@ -155,6 +166,36 @@ fn cache_entry_bytes(key: &str, value: &str) -> u64 {
     (key.len() as u64).saturating_add(value.len() as u64)
 }
 
+/// Length of the hex blake3 digest that opens every disk entry.
+const ENTRY_DIGEST_HEX_LEN: usize = 64;
+
+/// Frame `compiled_js` behind a digest of itself.
+///
+/// The cache key is a hash of the **source**, not of the stored bytes, so
+/// nothing about the path an entry sits at says whether the file under it is
+/// whole. A publish that tears — `atomic_file` falls back to a direct write on
+/// a cross-device target, and a build can share a cache directory with another
+/// process — leaves a short file exactly where the next lookup will find it,
+/// and it was returned as a hit and spliced into the bundle. One digest line
+/// makes the entry describe itself.
+fn encode_entry(compiled_js: &str) -> String {
+    let digest = blake3::hash(compiled_js.as_bytes()).to_hex();
+    format!("{digest}\n{compiled_js}")
+}
+
+/// The compiled output of a whole entry, or `None` for anything else.
+///
+/// `None` covers a truncated entry, a corrupted one, and an entry written
+/// before the header existed — all three are misses, and a miss costs a
+/// recompile that rewrites the entry complete.
+fn verify_entry(stored: &str) -> Option<&str> {
+    let (digest, compiled_js) = stored.split_once('\n')?;
+    if digest.len() != ENTRY_DIGEST_HEX_LEN || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    (blake3::hash(compiled_js.as_bytes()).to_hex().as_str() == digest).then_some(compiled_js)
+}
+
 #[derive(Debug, Default)]
 struct CacheTelemetry {
     hits: AtomicU64,
@@ -273,15 +314,22 @@ impl CompileCache {
             return CacheLookup::Hit(value.to_string());
         }
 
-        // Disk cache.
+        // Disk cache. The entry has to prove it is the whole of what was
+        // stored: the key is a hash of the source, so a torn file still sits at
+        // exactly the path this lookup asks for.
         let path = self.cache_dir.join(format!("{key}.js"));
-        match fs::read_to_string(&path) {
-            Ok(cached_js) => {
+        match fs::read_to_string(&path)
+            .ok()
+            .as_deref()
+            .and_then(verify_entry)
+        {
+            Some(cached_js) => {
+                let cached_js = cached_js.to_string();
                 self.insert_to_memory(key, cached_js.clone());
                 self.telemetry.hits.fetch_add(1, Ordering::Relaxed);
                 CacheLookup::Hit(cached_js)
             }
-            Err(_) => {
+            None => {
                 self.telemetry.misses.fetch_add(1, Ordering::Relaxed);
                 CacheLookup::Miss(key)
             }
@@ -305,7 +353,7 @@ impl CompileCache {
         // A cache miss costs a recompile, never a wrong answer, so a failed
         // publish is dropped rather than propagated.
         let path = self.cache_dir.join(format!("{key}.js"));
-        let _ = crate::atomic_file::write_atomic(&path, compiled_js.as_bytes());
+        let _ = crate::atomic_file::write_atomic(&path, encode_entry(compiled_js).as_bytes());
     }
 
     /// Insert a value into the in-memory LRU cache, evicting the LRU entry
@@ -598,6 +646,65 @@ mod tests {
         }
     }
 
+    /// A disk entry must describe its own bytes.
+    ///
+    /// The key is a hash of the **source**, not of what was stored, so a
+    /// half-written entry still sits exactly where the next lookup looks for
+    /// it. Nothing checked its length or content, so a torn file was returned
+    /// as a `Hit` and became the module's compiled body — a bundle that fails
+    /// to parse in a stage that cannot name the file, or a silently incomplete
+    /// module. A digest header turns that into the miss this cache is already
+    /// designed around: a miss costs a recompile, never a wrong answer.
+    #[test]
+    fn a_truncated_disk_entry_is_a_miss_not_a_wrong_answer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = "const value: number = 1;";
+        let compiled = "const value = 1;\nexport default value;\n";
+
+        let cache = CompileCache::at_dir(tmp.path(), true);
+        let key = match cache.lookup(source, false) {
+            CacheLookup::Miss(key) => key,
+            CacheLookup::Hit(_) => panic!("a cold cache must miss"),
+        };
+        cache.store(&key, compiled);
+
+        // A torn publish: the entry exists at its key with only part of the
+        // bytes on disk.
+        let path = tmp.path().join(format!("{key}.js"));
+        let stored = fs::read_to_string(&path).unwrap();
+        fs::write(&path, &stored[..stored.len() - 12]).unwrap();
+
+        // A cold handle, so the memory layer cannot answer instead of disk.
+        let reader = CompileCache::at_dir(tmp.path(), true);
+        match reader.lookup(source, false) {
+            CacheLookup::Miss(missed) => assert_eq!(missed, key),
+            CacheLookup::Hit(value) => {
+                panic!("a torn entry must not be served as compiled output: {value:?}")
+            }
+        }
+    }
+
+    /// An entry written by a build that predates the digest header has no way
+    /// to prove itself, so it misses once and is rewritten complete.
+    #[test]
+    fn a_headerless_legacy_entry_misses_once_instead_of_being_trusted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = "const legacy: number = 1;";
+        let key = CompileCache::cache_key(source, false);
+        fs::create_dir_all(tmp.path()).unwrap();
+        fs::write(
+            tmp.path().join(format!("{key}.js")),
+            "const legacy = 1;\nexport default legacy;\n",
+        )
+        .unwrap();
+
+        let cache = CompileCache::at_dir(tmp.path(), true);
+        assert!(
+            matches!(cache.lookup(source, false), CacheLookup::Miss(_)),
+            "an entry that cannot describe its own bytes must not be trusted"
+        );
+    }
+
     #[test]
     fn invalidate_removes_entry() {
         let tmp = tempfile::tempdir().unwrap();
@@ -637,7 +744,10 @@ mod tests {
         cache.store(&CompileCache::cache_key("y", true), "67890ab");
 
         assert_eq!(cache.entry_count(), 2);
-        assert_eq!(cache.total_bytes(), 12); // 5 + 7 bytes
+        // Disk accounting, so it counts the self-describing digest line each
+        // entry carries as well as the compiled output itself.
+        let header = (ENTRY_DIGEST_HEX_LEN + 1) as u64;
+        assert_eq!(cache.total_bytes(), 5 + 7 + 2 * header);
     }
 
     #[test]

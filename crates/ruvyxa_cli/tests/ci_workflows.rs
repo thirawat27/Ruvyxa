@@ -249,6 +249,142 @@ fn nothing_publishes_before_the_release_candidate_is_verified() {
     );
 }
 
+/// Every platform a runner in this job's matrix expands to.
+///
+/// `runs-on: ${{ matrix.os }}` is one string in the YAML and five machines at
+/// run time, so the literal is worth nothing on its own: it has to be resolved
+/// against the matrix that fills it in. A job with no matrix runs on exactly the
+/// one platform it names.
+fn platforms_of(job: &Value) -> Vec<String> {
+    let runs_on = job
+        .get("runs-on")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let matrix = job
+        .get("strategy")
+        .and_then(|strategy| strategy.get("matrix"));
+
+    if runs_on.contains("matrix.") {
+        let Some(matrix) = matrix else {
+            return Vec::new();
+        };
+        // Both spellings: a plain `os: [...]` axis and the `include:` list this
+        // repository uses so each leg can carry its own Node and Rust target.
+        let mut found: Vec<String> = matrix
+            .get("os")
+            .and_then(Value::as_sequence)
+            .map(|list| {
+                list.iter()
+                    .filter_map(|entry| entry.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(include) = matrix.get("include").and_then(Value::as_sequence) {
+            for entry in include {
+                if let Some(os) = entry.get("os").and_then(Value::as_str) {
+                    found.push(os.to_string());
+                }
+            }
+        }
+        found.sort();
+        found.dedup();
+        return found;
+    }
+    if runs_on.is_empty() {
+        return Vec::new();
+    }
+    vec![runs_on.to_string()]
+}
+
+/// Every `run:` script in a job, concatenated.
+fn run_scripts_of(job: &Value) -> String {
+    job.get("steps")
+        .and_then(Value::as_sequence)
+        .map(|steps| {
+            steps
+                .iter()
+                .filter_map(|step| step.get("run").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+/// The release gate has to *cover* the platforms, not merely be named.
+///
+/// `nothing_publishes_before_the_release_candidate_is_verified` asserts the
+/// dependency edge, and an edge onto a job that checks the wrong thing is a gate
+/// in name only. `verify-release` was `runs-on: ubuntu-latest` with no smoke
+/// lane in it at all, while `ci.yml` — which runs on the same tag and which
+/// `release.yml` does not reference — carried the five-platform matrix, the dev
+/// server smoke, and the scaffold-to-clean walk that is deliberately Windows
+/// only. This repository's history is dominated by Windows-specific defects
+/// (`\\?\`, CRLF, `%TEMP%` ancestors, a `process.exit` abort on the Windows
+/// runner) and not one of that class could block a publish.
+///
+/// Either shape closes it and both are accepted here: give `verify-release` the
+/// platforms itself, or make the release wait on CI's verdict with a
+/// `workflow_run` trigger. What is not accepted is a one-platform job with no
+/// end-to-end lane standing between a tag and npm.
+#[test]
+fn the_release_gate_covers_more_than_one_platform_and_runs_the_end_to_end_lanes() {
+    let workflows = workflows();
+    let release = &workflows["release.yml"];
+
+    // `expect` rather than a silent `None`: YAML 1.1 reads a bare `on:` key as
+    // the boolean `true`, and a lookup that quietly found nothing would turn the
+    // `workflow_run` escape hatch below into a branch that can never be taken.
+    let triggers = release
+        .get(Value::String("on".into()))
+        .or_else(|| release.get(Value::Bool(true)))
+        .expect("release.yml declares triggers under `on:`");
+    if triggers.get("workflow_run").is_some() {
+        return;
+    }
+
+    let (_, verify) = jobs_of(release)
+        .into_iter()
+        .find(|(name, _)| name == "verify-release")
+        .expect("release.yml declares verify-release");
+
+    let platforms = platforms_of(verify);
+    assert!(
+        platforms.len() > 1,
+        "verify-release covers {platforms:?}. Publishing waits on it, so a defect on any platform \
+         it does not run cannot block a tag. Give it a matrix, or make release.yml wait on ci.yml \
+         with `on: workflow_run`."
+    );
+    for platform in ["windows-latest", "macos-latest"] {
+        assert!(
+            platforms.iter().any(|os| os == platform),
+            "verify-release covers {platforms:?} and not {platform}. Windows-specific defects are \
+             this repository's most common class and none of them can currently block a publish."
+        );
+    }
+
+    // The lanes that exercise a running server rather than a compiler. Every
+    // step above them in `verify-release` is a check `cargo test` and `pnpm -r
+    // test` already answer on a developer's machine; these are the ones that
+    // only a workflow runs.
+    let scripts = run_scripts_of(verify);
+    for lane in [
+        "smoke-dev-server.mjs",
+        "smoke-runtime-adapter.mjs",
+        "pack:smoke",
+    ] {
+        assert!(
+            scripts.contains(lane),
+            "verify-release runs no {lane} lane. A release gate made only of static checks passes \
+             on every defect that needs the server to be started."
+        );
+    }
+    assert!(
+        scripts.contains("test:full-flow"),
+        "verify-release runs no test:full-flow lane. It is the scaffold-to-clean walk, it is \
+         windows-latest only, and it is the single most complete flow in the repository."
+    );
+}
+
 /// A cancelled run leaves a commit with no verdict.
 ///
 /// On a branch that is the point — the next push supersedes it. On `main` and
@@ -375,4 +511,67 @@ fn no_workflow_builds_packages_before_it_tests_rust() {
             );
         }
     }
+}
+
+/// A tag cannot publish while an advisory is outstanding.
+///
+/// Both audit lanes live in `security.yml`, which nothing in `release.yml`
+/// depends on and whose push triggers are path-filtered to manifest files. So
+/// the job that holds `NPM_TOKEN` could run with an advisory unexamined, and
+/// "verify release candidate" did not verify that.
+///
+/// Both lockfiles, and both halves of the JavaScript one: `--prod` excludes
+/// devDependencies, and the root manifest declares *only* devDependencies, so
+/// the production lane alone audits none of the tooling CI actually runs.
+#[test]
+fn the_release_verification_runs_both_dependency_audits() {
+    let workflows = workflows();
+    let commands: Vec<&str> = steps_of(&workflows["release.yml"])
+        .into_iter()
+        .filter(|(job, _)| job == "verify-release")
+        .filter_map(|(_, step)| step.get("run").and_then(Value::as_str))
+        .collect();
+
+    assert!(
+        !commands.is_empty(),
+        "release.yml declares no verify-release job with run steps",
+    );
+
+    for (needle, why) in [
+        ("cargo audit", "the Rust lockfile is unaudited at a tag"),
+        (
+            "pnpm audit --prod",
+            "the JavaScript production dependencies are unaudited at a tag",
+        ),
+        (
+            "pnpm audit --audit-level",
+            "devDependencies are unaudited, and the root manifest declares only those",
+        ),
+    ] {
+        assert!(
+            commands.iter().any(|command| command.contains(needle)),
+            "release.yml verify-release runs no step containing {needle:?}: {why}",
+        );
+    }
+}
+
+/// The scheduled audit covers devDependencies too.
+///
+/// `pnpm audit --prod` skips them, and every dependency the root manifest
+/// declares is a devDependency — the linter, the formatter, TypeScript, the
+/// unused-export checker. Those run inside CI, including inside the release job.
+#[test]
+fn the_security_workflow_audits_development_dependencies() {
+    let workflows = workflows();
+    let commands: Vec<&str> = steps_of(&workflows["security.yml"])
+        .into_iter()
+        .filter_map(|(_, step)| step.get("run").and_then(Value::as_str))
+        .collect();
+
+    assert!(
+        commands
+            .iter()
+            .any(|command| command.contains("pnpm audit") && !command.contains("--prod")),
+        "security.yml audits only production dependencies, and the root manifest has none",
+    );
 }

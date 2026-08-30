@@ -17,7 +17,31 @@
     "",
     "`ruvyxa build` reports a false against a project that uses ISR or PPR, the",
     "same way it reports an adapter with no image pipeline: a deployment without",
-    "instant revalidation is still a valid deployment, and a silent one is not."
+    "instant revalidation is still a valid deployment, and a silent one is not.",
+    "",
+    "`clientIpHeaders` is the header this adapter's own platform ingress writes",
+    "*and overwrites*, which the emitted handler passes to `createHandler`. Every",
+    "per-client control keys on the answer: the built-in `rate` middleware, the",
+    "server-action rate limiter, and the action replay guard's per-client quota.",
+    "It is required rather than defaulted, so a new adapter has to decide — the",
+    "way `onDemandImages` is. Netlify and Firebase both declared nothing while",
+    "having documented ingress of their own, so identity fell through to a",
+    "right-to-left scan of `X-Forwarded-For` on platforms whose real client is",
+    "not where that scan looks, and every visitor shared one bucket.",
+    "",
+    "An empty list is the correct answer, not a missing one, for the standalone",
+    "server the node, bun, deno, aws, railway, and render adapters emit: that is",
+    "an ordinary `0.0.0.0` HTTP server with no ingress writing anything, so it",
+    "weighs the transport peer against `security.trustedProxyIps` instead.",
+    "Declaring a header the platform does not overwrite reintroduces exactly the",
+    "bug this mechanism exists to prevent — one client rotating a fabricated",
+    "value for a fresh bucket per request — so a value is added only for an",
+    "ingress that is documented to overwrite it.",
+    "",
+    "Firebase is empty deliberately and not by oversight: for Cloud Functions v2",
+    "the client is the *left* end of `X-Forwarded-For`, the one end the",
+    "right-to-left scan will not take, so the fix there is a",
+    "`security.trustedProxyIps` guidance change and not a header name."
   ],
   "contract": "ruvyxa.adapter",
   "schemaVersion": 1,
@@ -29,7 +53,8 @@
       "platform": "aws",
       "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"],
       "onDemandImages": false,
-      "onDemandRevalidation": false
+      "onDemandRevalidation": false,
+      "clientIpHeaders": []
     },
     {
       "name": "bun",
@@ -38,7 +63,8 @@
       "platform": "bun",
       "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"],
       "onDemandImages": false,
-      "onDemandRevalidation": true
+      "onDemandRevalidation": true,
+      "clientIpHeaders": []
     },
     {
       "name": "cloudflare",
@@ -47,7 +73,8 @@
       "platform": "cloudflare",
       "supports": ["ssr", "ssg", "csr", "api"],
       "onDemandImages": true,
-      "onDemandRevalidation": true
+      "onDemandRevalidation": true,
+      "clientIpHeaders": ["cf-connecting-ip"]
     },
     {
       "name": "deno",
@@ -56,7 +83,8 @@
       "platform": "deno",
       "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"],
       "onDemandImages": false,
-      "onDemandRevalidation": true
+      "onDemandRevalidation": true,
+      "clientIpHeaders": []
     },
     {
       "name": "firebase",
@@ -65,7 +93,8 @@
       "platform": "firebase",
       "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"],
       "onDemandImages": false,
-      "onDemandRevalidation": false
+      "onDemandRevalidation": false,
+      "clientIpHeaders": []
     },
     {
       "name": "netlify",
@@ -74,7 +103,8 @@
       "platform": "netlify",
       "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"],
       "onDemandImages": false,
-      "onDemandRevalidation": true
+      "onDemandRevalidation": true,
+      "clientIpHeaders": ["x-nf-client-connection-ip"]
     },
     {
       "name": "node",
@@ -83,7 +113,8 @@
       "platform": "node",
       "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"],
       "onDemandImages": false,
-      "onDemandRevalidation": true
+      "onDemandRevalidation": true,
+      "clientIpHeaders": []
     },
     {
       "name": "railway",
@@ -92,7 +123,8 @@
       "platform": "railway",
       "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"],
       "onDemandImages": false,
-      "onDemandRevalidation": true
+      "onDemandRevalidation": true,
+      "clientIpHeaders": []
     },
     {
       "name": "render",
@@ -101,7 +133,8 @@
       "platform": "render",
       "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"],
       "onDemandImages": false,
-      "onDemandRevalidation": true
+      "onDemandRevalidation": true,
+      "clientIpHeaders": []
     },
     {
       "name": "static",
@@ -110,7 +143,8 @@
       "platform": "static",
       "supports": ["ssg", "csr"],
       "onDemandImages": false,
-      "onDemandRevalidation": true
+      "onDemandRevalidation": true,
+      "clientIpHeaders": []
     },
     {
       "name": "vercel",
@@ -119,7 +153,8 @@
       "platform": "vercel",
       "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"],
       "onDemandImages": true,
-      "onDemandRevalidation": true
+      "onDemandRevalidation": true,
+      "clientIpHeaders": ["x-vercel-forwarded-for"]
     }
   ],
   "unsupportedDiagnostics": {

@@ -175,11 +175,50 @@ export async function renderServerComponentsStream({
     },
   })
   const [forHtml, forPayload] = flight.tee()
+  // `tee()` makes two independent branches, and only one of them had an owner
+  // past the happy path: the caller reaches `payload` from a trailer it writes
+  // after the last chunk, so a render that times out or a client that
+  // disconnects cancelled the HTML reader and left this branch reading forever
+  // — retaining the in-progress React render, the un-cancelled branch, and the
+  // partial payload for the life of the process. `cancelPayload` is the handle
+  // that ends it, and it is why the reader is taken here instead of inside
+  // `readStreamText`: a caller holding only the promise cannot release a stream
+  // that promise has already locked.
+  const payloadReader = forPayload.getReader()
   // Started now, awaited by the caller at the end. Not awaited here: the point
   // of this function is to return before the render has finished.
-  const payload = readStreamText(forPayload)
+  const payload = readReaderText(payloadReader)
+  // Owned in every outcome. `payload` is handed back for the trailer to await
+  // and must still reject for that caller, so this attaches a handler rather
+  // than replacing the promise: an abandoned rejection is otherwise an
+  // unhandled rejection, and this process has no `unhandledRejection` handler
+  // to survive one. Reported rather than discarded — a swallowed failure here
+  // is a hidden one.
+  payload.catch((error) => {
+    console.error('[ruvyxa] server components payload stream failed', error)
+  })
   const stream = await flightStreamToHtmlStream(forHtml, ctx, routePath, { formState })
-  return { stream, payload, failures }
+  return {
+    stream,
+    payload,
+    /**
+     * Release the payload branch when the response it belonged to is lost.
+     *
+     * Safe on the error path precisely because the response is already gone:
+     * the partial text is worth nothing to anyone, and cancelling is what lets
+     * the tee source — and with both branches cancelled, the React render
+     * behind it — be collected. `cancel()` settles a parked `read()`, so
+     * `payload` resolves with whatever had arrived instead of hanging.
+     */
+    async cancelPayload(reason) {
+      try {
+        await payloadReader.cancel(reason)
+      } catch {
+        // Already closed or errored; the branch is released either way.
+      }
+    },
+    failures,
+  }
 }
 
 /**
@@ -415,8 +454,12 @@ function ssrModuleMap() {
 
 /** Read a whole `ReadableStream` of bytes as UTF-8 text. */
 export async function readStreamText(stream) {
+  return await readReaderText(stream.getReader())
+}
+
+/** The same read, from a reader the caller keeps so it can stop the read. */
+async function readReaderText(reader) {
   const decoder = new TextDecoder()
-  const reader = stream.getReader()
   let text = ''
   for (;;) {
     const { done, value } = await reader.read()

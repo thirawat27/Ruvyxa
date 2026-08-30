@@ -338,7 +338,15 @@ if (typeof setInterval !== 'undefined') {
   }
 }
 
-function parseTtl(value: string): number {
+/**
+ * Parse a cache duration into milliseconds, or throw.
+ *
+ * Exported so `@ruvyxa/testing`'s `mockCache` can refuse what `cache()` refuses.
+ * A double that accepted `'5 minutes'` reported success for a loader that throws
+ * at its first real request — the class of failure a test helper is least able
+ * to catch and the one that only ever surfaces in production.
+ */
+export function parseTtl(value: string): number {
   const match = /^(\d+)\s*(ms|s|m|h|d)$/.exec(value)
   if (!match) {
     throw invalidCacheDuration(value)
@@ -378,7 +386,8 @@ function invalidCacheDuration(value: string): Error {
   )
 }
 
-function validateCacheTag(tag: string): string {
+/** Validate one cache tag and return it. Shared with `@ruvyxa/testing`. */
+export function validateCacheTag(tag: string): string {
   if (typeof tag !== 'string' || !/^[A-Za-z0-9:._/-]{1,128}$/.test(tag)) {
     throw new TypeError(
       'cache tag must use 1-128 letters, digits, colon, dot, underscore, slash, or dash',
@@ -387,7 +396,43 @@ function validateCacheTag(tag: string): string {
   return tag
 }
 
-function assertSharedCachePrivacy(): void {
+/** Longest cache key accepted, in UTF-16 code units. */
+const CACHE_KEY_MAX_LENGTH = 8192
+
+/**
+ * Validate a cache key.
+ *
+ * A function rather than an inline check because `@ruvyxa/testing`'s `mockCache`
+ * has to answer the same way, and a second copy of the limit is a limit that
+ * drifts.
+ */
+export function assertCacheKey(key: string): void {
+  if (typeof key !== 'string' || key.length > CACHE_KEY_MAX_LENGTH) {
+    throw new TypeError(`cache() key must contain at most ${CACHE_KEY_MAX_LENGTH} characters`)
+  }
+}
+
+/**
+ * Validate, de-duplicate, and order the tags one cache entry carries.
+ *
+ * Plain `.sort()` is a UTF-16 code-unit ordering. Tag order is part of the cache
+ * entry's identity, and `localeCompare` would make that identity depend on the
+ * host's ICU locale.
+ */
+export function normalizeCacheTags(values: readonly string[]): string[] {
+  if (values.length > 32) throw new TypeError('cache().tags() accepts at most 32 tags')
+  return [...new Set(values.map(validateCacheTag))].sort()
+}
+
+/**
+ * Refuse to store a shared-cache value produced from request state (`RUV1840`).
+ *
+ * Exported for `@ruvyxa/testing`: this is the check that stops one visitor's
+ * data being served to another out of a deployment-scoped cache, and a suite
+ * built on a double that skipped it never exercised it at all. A no-op when no
+ * request-context host is installed — the same answer the real builder gives.
+ */
+export function assertSharedCachePrivacy(): void {
   if (host()?.wasRead?.()) {
     throw new Error(
       "RUV1840 shared cache producer read request state; use cache().scope('request') or pass an explicit safe partition key",
@@ -395,7 +440,13 @@ function assertSharedCachePrivacy(): void {
   }
 }
 
-function assertCacheSerializable(value: unknown): void {
+/**
+ * Refuse a cached value that is not a JSON-shaped tree (`RUV1841`).
+ *
+ * Exported for `@ruvyxa/testing`, where a cached `Date`, `Map`, or function used
+ * to round-trip through the double and throw only in production.
+ */
+export function assertCacheSerializable(value: unknown): void {
   const ancestors = new Set<object>()
   const visit = (current: unknown, depth: number): void => {
     if (depth > 64) throw new TypeError('RUV1841 cache value nesting exceeds 64 levels')
@@ -435,9 +486,7 @@ function assertCacheSerializable(value: unknown): void {
  * ```
  */
 export function cache(key: string): CacheBuilder {
-  if (typeof key !== 'string' || key.length > 8192) {
-    throw new TypeError('cache() key must contain at most 8192 characters')
-  }
+  assertCacheKey(key)
   let ttlMs = 60_000 // default 60 seconds
   let swrMs = 0 // default: no stale-while-revalidate
   let tags: string[] = []
@@ -453,11 +502,7 @@ export function cache(key: string): CacheBuilder {
       return this
     },
     tags(...values: string[]) {
-      if (values.length > 32) throw new TypeError('cache().tags() accepts at most 32 tags')
-      // Plain `.sort()` is a UTF-16 code-unit ordering. Tag order is part of
-      // the cache entry's identity, and `localeCompare` would make that
-      // identity depend on the host's ICU locale.
-      tags = [...new Set(values.map(validateCacheTag))].sort()
+      tags = normalizeCacheTags(values)
       return this
     },
     scope(value: 'deployment' | 'request') {

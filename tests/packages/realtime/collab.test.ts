@@ -27,6 +27,13 @@ class FakeSocket {
 
   close() {
     this.closed = true
+    this.readyState = 3
+  }
+
+  /** Drop the connection the way a browser does: state first, then the event. */
+  drop() {
+    this.readyState = 3
+    this.emit('close')
   }
 
   emit(type: string, event: any = {}) {
@@ -269,13 +276,158 @@ describe('createCollabClient()', () => {
   it('sends writes as one batch and rejects a non-object', () => {
     const { client, sockets } = harness()
     sockets[0].deliver({ type: 'welcome', peer: 'p1', peers: {}, state: {}, roomVersion: 0 })
-    client.setState({ title: 'A', body: 'B' })
-    client.setState({})
+    assert.equal(client.setState({ title: 'A', body: 'B' }), true, 'the frame reached the socket')
+    assert.equal(client.setState({}), true, 'an empty write leaves nothing waiting')
     assert.throws(() => client.setState([] as never), /object of keys/)
 
     const writes = sockets[0].frames().filter((frame) => frame.type === 'set')
     assert.equal(writes.length, 1, 'an empty write is not worth a frame')
     assert.deepEqual(writes[0].entries, { title: 'A', body: 'B' })
+  })
+
+  it('replays writes made while disconnected on the next welcome', () => {
+    const { client, sockets, runTimers } = harness()
+    sockets[0].deliver({ type: 'welcome', peer: 'p1', peers: {}, state: {}, roomVersion: 0 })
+
+    sockets[0].drop()
+    assert.equal(client.snapshot().connected, false)
+    assert.equal(client.setState({ title: 'A' }), false, 'nothing reached the socket')
+    client.setState({ title: 'B', body: 'C' })
+    assert.equal(
+      sockets[0].frames().filter((frame) => frame.type === 'set').length,
+      0,
+      'a dead socket is never written to',
+    )
+
+    runTimers()
+    assert.equal(sockets.length, 2, 'the close scheduled a reconnect')
+    sockets[1].deliver({ type: 'welcome', peer: 'p9', peers: {}, state: {}, roomVersion: 7 })
+
+    const writes = sockets[1].frames().filter((frame) => frame.type === 'set')
+    assert.equal(writes.length, 1, 'the pending keys flush as one frame')
+    assert.deepEqual(
+      writes[0].entries,
+      { title: 'B', body: 'C' },
+      'one entry per key, carrying the newest local value',
+    )
+
+    // A flushed write is gone: a second reconnect must not replay it and
+    // overwrite whatever the room agreed on in between.
+    sockets[1].drop()
+    runTimers()
+    sockets[2].deliver({ type: 'welcome', peer: 'p9', peers: {}, state: {}, roomVersion: 8 })
+    assert.deepEqual(
+      sockets[2].frames().filter((frame) => frame.type === 'set'),
+      [],
+      'the pending map is cleared by the flush that sent it',
+    )
+  })
+
+  it('reports overflow rather than growing the pending map without bound', () => {
+    const { client, sockets, runTimers } = harness()
+    const errors: string[] = []
+    client.onError((message) => errors.push(message))
+    sockets[0].deliver({ type: 'welcome', peer: 'p1', peers: {}, state: {}, roomVersion: 0 })
+    sockets[0].drop()
+
+    // 256 is what one room holds, so a pending map larger than that could never
+    // be flushed even if the socket came back.
+    for (let index = 0; index < 256; index += 1) client.setState({ [`k${index}`]: index })
+    assert.deepEqual(errors, [], 'a room-sized batch of pending keys is not an error')
+
+    client.setState({ overflow: true })
+    assert.equal(errors.length, 1, 'the dropped write is reported instead of vanishing')
+    assert.match(errors[0], /dropped 1 write while disconnected: 256 keys/)
+    client.setState({ k0: 'updated' })
+    assert.equal(errors.length, 1, 'a key already pending is replaced, not refused')
+
+    runTimers()
+    sockets[1].deliver({ type: 'welcome', peer: 'p9', peers: {}, state: {}, roomVersion: 1 })
+    const writes = sockets[1].frames().filter((frame) => frame.type === 'set')
+    assert.equal(writes.length, 8, '256 keys travel as eight frames')
+    for (const write of writes) {
+      assert.ok(
+        Object.keys(write.entries).length <= 32,
+        'the server refuses a write carrying more than 32 keys',
+      )
+    }
+    assert.equal(writes[0].entries.k0, 'updated')
+    assert.ok(
+      writes.every((write) => !('overflow' in write.entries)),
+      'the dropped key was never held',
+    )
+  })
+
+  it('splits a replay that would exceed the frame the server accepts', () => {
+    const { client, sockets, runTimers } = harness()
+    sockets[0].deliver({ type: 'welcome', peer: 'p1', peers: {}, state: {}, roomVersion: 0 })
+    sockets[0].drop()
+
+    // Six keys, well under the 32-per-frame ceiling, but 48 KiB together — and
+    // the server refuses a frame over 32 KiB whole.
+    for (let index = 0; index < 6; index += 1) client.setState({ [`k${index}`]: 'x'.repeat(8192) })
+
+    runTimers()
+    sockets[1].deliver({ type: 'welcome', peer: 'p9', peers: {}, state: {}, roomVersion: 1 })
+    const writes = sockets[1].sent.filter((payload) => payload.includes('"set"'))
+    assert.ok(writes.length > 1, 'the replay is split rather than sent as one refused frame')
+    for (const payload of writes) {
+      assert.ok(
+        Buffer.byteLength(payload, 'utf8') <= 32 * 1024,
+        `a replayed frame is ${Buffer.byteLength(payload, 'utf8')} bytes`,
+      )
+    }
+    const replayed = writes.flatMap((payload) => Object.keys(JSON.parse(payload).entries))
+    assert.equal(replayed.length, 6, 'every key still travels')
+  })
+
+  it('keeps a pending write off a socket that reconnects mid-flush', () => {
+    const { client, sockets, runTimers } = harness()
+    sockets[0].deliver({ type: 'welcome', peer: 'p1', peers: {}, state: {}, roomVersion: 0 })
+    sockets[0].drop()
+    for (let index = 0; index < 40; index += 1) client.setState({ [`k${index}`]: index })
+
+    runTimers()
+    // The replacement dies between the first batch and the second.
+    const replacement = sockets[1]
+    const originalSend = replacement.send.bind(replacement)
+    let sends = 0
+    replacement.send = (data: string) => {
+      sends += 1
+      originalSend(data)
+      if (sends === 1) replacement.readyState = 3
+    }
+    replacement.deliver({ type: 'welcome', peer: 'p9', peers: {}, state: {}, roomVersion: 1 })
+    assert.equal(replacement.frames().filter((frame) => frame.type === 'set').length, 1)
+
+    replacement.emit('close')
+    runTimers()
+    sockets[2].deliver({ type: 'welcome', peer: 'p9', peers: {}, state: {}, roomVersion: 2 })
+    const remainder = sockets[2].frames().filter((frame) => frame.type === 'set')
+    assert.equal(remainder.length, 1, 'the batch the dead socket never took is still pending')
+    assert.deepEqual(Object.keys(remainder[0].entries), [
+      'k32',
+      'k33',
+      'k34',
+      'k35',
+      'k36',
+      'k37',
+      'k38',
+      'k39',
+    ])
+  })
+
+  it('does not hold a write made after the client is closed', () => {
+    const { client, sockets, timers } = harness()
+    sockets[0].deliver({ type: 'welcome', peer: 'p1', peers: {}, state: {}, roomVersion: 0 })
+    client.close()
+
+    assert.equal(client.setState({ title: 'A' }), false, 'a closed room accepts no writes')
+    assert.equal(timers.length, 0, 'and schedules nothing to deliver them on')
+    assert.deepEqual(
+      sockets[0].frames().filter((frame) => frame.type === 'set'),
+      [],
+    )
   })
 
   it('stops reconnecting once closed', () => {

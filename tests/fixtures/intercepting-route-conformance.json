@@ -25,7 +25,7 @@
     "slot name, target pattern, and the file relative to the app directory.",
     "",
     "One rule is deliberately absent: a marker that climbs above the app root is",
-    "a build error (RUV1006) on the Rust side and is skipped by the worker,",
+    "a build error (RUV1018) on the Rust side and is skipped by the worker,",
     "which never sees such a tree because discovery already refused it. Each",
     "host covers that in its own suite."
   ],

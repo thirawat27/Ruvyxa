@@ -36,6 +36,29 @@ const ENCODER_IDENTITY: &str = env!("CARGO_PKG_VERSION");
 /// and the width of a 4K display.
 const DEFAULT_MAX_WIDTH: u32 = 3840;
 
+/// Highest `image.quality` a project may ask for.
+///
+/// The same ceiling `tests/fixtures/dynamic-image-conformance.json` declares
+/// for the on-demand endpoint, because it is the same setting: the build
+/// encodes with it and the two request hosts answer an absent `q` with it.
+pub(crate) const MAX_IMAGE_QUALITY: u8 = 100;
+
+/// Highest `image.effort` a project may ask for: libwebp's `method` scale.
+pub(crate) const MAX_IMAGE_EFFORT: u8 = 6;
+
+/// Highest `image.workers` a project may ask for.
+///
+/// Deliberately not `middleware.workers`' ceiling of 8: that bounds *processes*
+/// running project JavaScript, one of which is expensive, while this bounds
+/// Rayon threads inside the build. A build machine with more cores than eight
+/// may legitimately ask for more of them, and the value being bounded at all is
+/// what matters here — `image: { workers: 100000 }` used to reach
+/// `ThreadPoolBuilder` unmodified, where it fails with a message naming rayon
+/// rather than the config key, or commits hundreds of megabytes of thread stack
+/// on a host that permits it. Nothing has more logical CPUs than this, so no
+/// real machine's core count is refused.
+pub(crate) const MAX_CONFIGURED_IMAGE_WORKERS: usize = 256;
+
 /// Build-time decoding is deliberately unbounded.
 ///
 /// The runtime path caps decoded pixels because it answers untrusted request

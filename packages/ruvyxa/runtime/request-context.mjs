@@ -84,15 +84,33 @@ async function createStorage() {
 }
 
 /**
- * Install the reader half on `globalThis`.
+ * Install the reader *and* the writer on `globalThis`.
  *
  * Assigned unconditionally rather than with `??=`: two copies of this module in
- * one process share the `globalThis` key but not `storage`, and the last one
- * loaded is the one whose `runWithRequestContext` the host will call. Keeping
- * the reader paired with the most recently installed storage is what makes that
- * consistent.
+ * one process share the `globalThis` key but not `storage`. This used to install
+ * the reader alone, on the stated premise that "the last one loaded is the one
+ * whose `runWithRequestContext` the host will call" -- which is an assumption
+ * about module load order, not something the code could enforce. A function
+ * bundle can carry both the copy aliased into the SSR bundle and a second copy
+ * reached through a dependency's `dist`, and nothing decides which of those the
+ * host imported from.
+ *
+ * If that order ever inverted, the reader would be looking at one copy's storage
+ * while the host filled the other's: `cookies()`, `headers()` and `draftMode()`
+ * would throw "was called outside a request" for every request in a deployed
+ * build, and -- the dangerous half -- `usedRequestContext` would report `false`,
+ * letting a request-scoped render be stored in a cache shared with other users.
+ * It fails closed on the accessors and open on the cacheability flag.
+ *
+ * So `run` is installed beside the readers and `runWithRequestContext` goes
+ * through it. Whichever copy wins the assignment then owns both halves, and the
+ * pair cannot be split no matter which copy the host holds.
  */
 globalThis.__RUVYXA_REQUEST_CONTEXT__ = {
+  /** The writer half, so it cannot be separated from the readers below. */
+  run(context, task) {
+    return storage.run(context, task)
+  },
   current() {
     const store = storage.getStore()
     if (!store) return null
@@ -145,9 +163,19 @@ export function collectRevalidations(context) {
   return context?.revalidate ? [...context.revalidate] : []
 }
 
-/** Run `task` with `context` as the ambient request. */
+/**
+ * Run `task` with `context` as the ambient request.
+ *
+ * Through the installed object rather than this copy's own `storage`, so a
+ * second copy of this module cannot end up filling one store while the
+ * accessors read another. The fallback covers a host that installed an older
+ * shape with no `run`, where this copy's storage is the only one there is.
+ */
 export function runWithRequestContext(context, task) {
-  return storage.run(context, task)
+  const installed = globalThis.__RUVYXA_REQUEST_CONTEXT__
+  return typeof installed?.run === 'function'
+    ? installed.run(context, task)
+    : storage.run(context, task)
 }
 
 /**

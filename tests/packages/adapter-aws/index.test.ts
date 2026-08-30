@@ -96,6 +96,49 @@ describe('aws', () => {
     assert.match(source, /ruvyxa-isr-cache/)
   })
 
+  /**
+   * The compute bundle is immutable, so ISR refreshes go to the host's
+   * temporary directory. That directory used to be one fixed name shared by
+   * every Ruvyxa deployment on the machine and by every previous build of this
+   * one — and it is read before the bundled prerender output, so a redeploy
+   * served the *previous* build's documents, whose `<script src>` names client
+   * chunks the new build no longer publishes. The build id is the only thing
+   * this adapter knows that tells two builds apart.
+   */
+  it('names the temporary ISR cache after the build it deployed', async () => {
+    const withBuildId = async (buildId: string) => {
+      const output = await aws().build({
+        root: '.',
+        outDir: '.ruvyxa',
+        deployManifest: {
+          version: 1,
+          framework: 'ruvyxa',
+          frameworkVersion: '0.0.0',
+          buildId,
+          basePath: '/',
+          adapter: 'aws',
+          directories: { client: '', assets: '', prerender: '', server: '' },
+          endpoints: {},
+          headers: [],
+          assetClasses: { client: '', asset: '', document: '' },
+          routes: [],
+          staticPaths: [],
+          functionPaths: [],
+          prerendered: [],
+          notFound: null,
+        },
+      })
+      const compute = output.artifacts?.find(
+        (artifact) =>
+          artifact.kind === 'function' && artifact.path === '.amplify-hosting/compute/default',
+      )
+      return String(compute && 'handlerSource' in compute ? compute.handlerSource : '')
+    }
+
+    assert.match(await withBuildId('buildone'), /buildone/)
+    assert.notEqual(await withBuildId('buildone'), await withBuildId('buildtwo'))
+  })
+
   it('can keep output inside the Ruvyxa build directory', async () => {
     const output = await aws({ projectOutput: false }).build({
       root: '.',

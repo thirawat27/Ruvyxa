@@ -8,6 +8,16 @@ use serde::Serialize;
 static NEXT_EDIT: AtomicU64 = AtomicU64::new(1);
 const TRACE_LIMIT: usize = 128;
 
+/// Stages one trace keeps in full before it starts counting instead.
+///
+/// The store was bounded in traces but not in events per trace, and `record` is
+/// reachable from `/__ruvyxa/trace-ack` with a caller-supplied id: one trace
+/// could be grown without limit by request volume, and `snapshot` clones every
+/// event on each DevTools poll, so the endpoint got steadily more expensive as
+/// it did. A real edit produces a handful of stages; anything past this many is
+/// a client repeating itself, and the count says so without keeping the bytes.
+const TRACE_EVENT_LIMIT: usize = 64;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TraceEvent {
@@ -25,6 +35,15 @@ pub(crate) struct EditTrace {
     routes: Vec<String>,
     kind: String,
     events: Vec<TraceEvent>,
+    /// Stages dropped because this trace had already reached
+    /// [`TRACE_EVENT_LIMIT`]. Kept as a count so a truncated timeline says it is
+    /// truncated instead of quietly ending early. Absent when nothing was lost.
+    #[serde(skip_serializing_if = "is_zero")]
+    suppressed_events: u64,
+}
+
+fn is_zero(count: &u64) -> bool {
+    *count == 0
 }
 
 /// Bounded, process-local edit traces used by dev diagnostics.
@@ -48,6 +67,7 @@ impl TraceStore {
             routes: routes.to_vec(),
             kind: kind.to_string(),
             events: vec![event("graph", Some("edit accepted"))],
+            suppressed_events: 0,
         });
     }
 
@@ -58,7 +78,14 @@ impl TraceStore {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if let Some(trace) = traces.iter_mut().find(|trace| trace.trace_id == trace_id) {
-            trace.events.push(event(stage, Some(&detail)));
+            // Past the cap the stage is counted rather than kept. The answer is
+            // still `true`: whether this id exists is what the endpoint's
+            // 404-on-unknown-id semantics turn on, and it does exist.
+            if trace.events.len() >= TRACE_EVENT_LIMIT {
+                trace.suppressed_events += 1;
+            } else {
+                trace.events.push(event(stage, Some(&detail)));
+            }
             return true;
         }
         false
@@ -143,5 +170,42 @@ mod tests {
         assert_eq!(store.snapshot(Some("app/128.tsx")).len(), 1);
         assert!(store.record(&format!("{:032x}", TRACE_LIMIT), "browser", "received"));
         assert!(!store.record("ffffffffffffffffffffffffffffffff", "browser", "missing"));
+    }
+
+    /// `record` is reachable from an HTTP endpoint with a caller-supplied id, so
+    /// one trace must not grow without limit — and a truncated trace must say so
+    /// rather than simply ending.
+    #[test]
+    fn one_trace_bounds_its_own_events() {
+        let store = TraceStore::default();
+        let trace_id = "0".repeat(32);
+        store.start(
+            &trace_id,
+            &["app/page.tsx".to_string()],
+            &["/".to_string()],
+            "page",
+        );
+
+        for index in 0..TRACE_EVENT_LIMIT * 4 {
+            assert!(
+                store.record(&trace_id, "browser", format!("ack {index}")),
+                "a known id stays known however many stages it has already seen"
+            );
+        }
+
+        let traces = store.snapshot(None);
+        let trace = traces.first().expect("the trace is still stored");
+        assert_eq!(trace.events.len(), TRACE_EVENT_LIMIT);
+        // The `start` event holds one of the slots, so every push past the
+        // remaining ones is counted.
+        assert_eq!(
+            trace.suppressed_events,
+            (TRACE_EVENT_LIMIT * 4 - (TRACE_EVENT_LIMIT - 1)) as u64
+        );
+        let rendered = serde_json::to_string(trace).expect("a trace serializes");
+        assert!(
+            rendered.contains("suppressedEvents"),
+            "a truncated trace must report the loss: {rendered}"
+        );
     }
 }

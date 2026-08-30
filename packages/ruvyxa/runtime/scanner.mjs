@@ -98,10 +98,222 @@ export function containsJsx(source) {
   const index = createCodeIndex(source)
   for (let at = source.indexOf('<'); at >= 0; at = source.indexOf('<', at + 1)) {
     if (!index.isCode(at)) continue
-    const next = source[at + 1]
-    if (next === '>' || next === '/' || (next !== undefined && /[A-Za-z]/.test(next))) return true
+    if (looksLikeJsxAt(source, at)) return true
   }
   return false
+}
+
+/** A `<` followed by `>`, `/`, or a letter. The port of `looks_like_jsx_at`. */
+function looksLikeJsxAt(source, index) {
+  const next = source[index + 1]
+  return next === '>' || next === '/' || (next !== undefined && /[A-Za-z]/.test(next))
+}
+
+/**
+ * Whether a `<` at this position opens a JSX element rather than a comparison
+ * or a TypeScript type-argument list.
+ *
+ * The port of `jsx_can_start`. JSX, like a regular expression, *is* a value, so
+ * it can only appear where one is expected — the question `regexCanStart`
+ * already answers, and asking it here is what keeps `foo<Bar>(x)` and
+ * `new Map<string, number>()` out of text mode. `export default <p>hi</p>` is
+ * the one shape that rule turns down and JSX allows, because no regular
+ * expression may follow `default`.
+ */
+function jsxCanStart(source, previousSignificant) {
+  if (regexCanStart(source, previousSignificant)) return true
+  if (previousSignificant < 0) return false
+  return previousWord(source, previousSignificant) === 'default'
+}
+
+/**
+ * Read a JSX element whole, or return `null`.
+ *
+ * The port of `jsx_element` in `crates/ruvyxa_bundler/src/ast.rs`; the two are
+ * held level by the `jsx` cases of `tests/fixtures/source-scanner-conformance.json`.
+ *
+ * Returning `null` is the safe answer and this walk takes it for anything it
+ * does not recognize, because the two directions of a mistake are not
+ * symmetric. Reading text as code deletes an `@` from a rendered page — visible,
+ * and the defect this was written for. Reading *code* as text is silent and
+ * worse: an import inside it stops being a graph edge and the linker stops
+ * rewriting an `export` it has already bundled. So the element must close. A
+ * generic arrow written `<T extends object>(x: T) => x` opens what looks like a
+ * tag and nothing ever closes it, so the walk reaches the end of the input,
+ * declines, and the caller scans those characters exactly as it did before.
+ *
+ * Handled: children of elements and fragments, arbitrarily nested; self-closing
+ * tags; `{ … }` containers in children and in attribute position, spreads and
+ * comment containers included; quoted attribute values, which JSX reads
+ * literally and so may hold an apostrophe or span lines.
+ *
+ * Declined, falling back to the previous behaviour: a raw `<` in children (JSX
+ * rejects it too — it must be written `{'<'}`), type arguments on a tag name,
+ * and any tag whose punctuation does not parse.
+ *
+ * Regions are `[start, end, kind]` with kind `'text'` or `'code'`, ascending and
+ * non-overlapping, in the order the walk met them.
+ */
+function jsxElement(source, start, end) {
+  const regions = []
+  let index = start
+  let depth = 0
+
+  for (;;) {
+    if (source[index] !== '<' || index >= end) return null
+    const after = source[index + 1]
+    if (after === undefined || index + 1 >= end) return null
+    if (after === '/') {
+      // `</name>` or `</>` closes the innermost element still open.
+      let cursor = skipJsxWhitespace(source, skipJsxName(source, index + 2, end), end)
+      if (source[cursor] !== '>' || cursor >= end) return null
+      index = cursor + 1
+      depth -= 1
+      if (depth < 0) return null
+    } else if (after === '>') {
+      // `<>` opens a fragment.
+      index += 2
+      depth += 1
+    } else if (isJsxNameStart(after)) {
+      const tag = jsxAttributes(source, skipJsxName(source, index + 1, end), end, regions)
+      if (tag === null) return null
+      index = tag.end
+      if (!tag.selfClosing) depth += 1
+    } else {
+      return null
+    }
+
+    if (depth === 0) return { end: index, regions }
+    index = jsxChildren(source, index, end, regions)
+    if (index === null) return null
+  }
+}
+
+/**
+ * Walk an opening tag's attributes, returning where it ends and whether it
+ * closed itself.
+ */
+function jsxAttributes(source, start, end, regions) {
+  let index = start
+  for (;;) {
+    index = skipJsxWhitespace(source, index, end)
+    if (index >= end) return null
+    const character = source[index]
+    if (character === '>') return { end: index + 1, selfClosing: false }
+    if (character === '/' && source[index + 1] === '>') return { end: index + 2, selfClosing: true }
+    if (character === '{') {
+      // `{...props}`.
+      const next = jsxContainer(source, index, end, regions)
+      if (next === null) return null
+      index = next
+      continue
+    }
+    if (!isJsxNameStart(character)) return null
+    const afterName = skipJsxName(source, index, end)
+    const afterGap = skipJsxWhitespace(source, afterName, end)
+    if (source[afterGap] !== '=' || afterGap >= end) {
+      // A valueless attribute (`<input disabled>`). Resume at the name's end;
+      // the next turn re-skips the gap.
+      index = afterName
+      continue
+    }
+    index = skipJsxWhitespace(source, afterGap + 1, end)
+    const value = source[index]
+    if (value === '"' || value === "'") {
+      // JSX reads a quoted attribute value literally: no escape sequences, and
+      // a newline inside it is ordinary text. That is why `skipString` — which
+      // stops at a newline, because a JavaScript string may not span one — is
+      // not used here.
+      const close = source.indexOf(value, index + 1)
+      if (close < 0 || close >= end) return null
+      pushRegion(regions, index + 1, close, 'text')
+      index = close + 1
+      continue
+    }
+    if (value === '{') {
+      const next = jsxContainer(source, index, end, regions)
+      if (next === null) return null
+      index = next
+      continue
+    }
+    return null
+  }
+}
+
+/**
+ * Walk children until the next `<`, recording their text and containers.
+ *
+ * Returns `null` at the end of the input: an element that never closes was not
+ * an element, and the caller must scan those characters as code.
+ */
+function jsxChildren(source, start, end, regions) {
+  let index = start
+  let textStart = index
+  while (index < end) {
+    const character = source[index]
+    if (character === '<') {
+      pushRegion(regions, textStart, index, 'text')
+      return index
+    }
+    if (character === '{') {
+      pushRegion(regions, textStart, index, 'text')
+      const next = jsxContainer(source, index, end, regions)
+      if (next === null) return null
+      index = next
+      textStart = index
+      continue
+    }
+    index += 1
+  }
+  return null
+}
+
+/**
+ * Record the `{ … }` container opening at `index` and return the index past its
+ * `}`.
+ *
+ * The brace is matched by `interpolationEnd`, the one place that already knows a
+ * `}` inside a string, a comment, a regular expression, or a nested JSX element
+ * closes nothing.
+ */
+function jsxContainer(source, index, end, regions) {
+  const close = interpolationEnd(source, index + 1, end)
+  if (close >= end) return null
+  pushRegion(regions, index + 1, close, 'code')
+  return close + 1
+}
+
+/** Append a region, dropping the empty ones a walk naturally produces. */
+function pushRegion(regions, start, end, kind) {
+  if (start < end) regions.push([start, end, kind])
+}
+
+function isJsxNameStart(character) {
+  return character !== undefined && /[A-Za-z_$]/.test(character)
+}
+
+/**
+ * Skip a tag name, which may be namespaced (`svg:path`), a member expression
+ * (`Foo.Bar`), or a custom element (`my-widget`).
+ */
+function skipJsxName(source, start, end) {
+  let index = start
+  // The trailing clause is the non-ASCII identifier characters JavaScript
+  // allows in a name; the Rust walk spells it `byte >= 0x80`.
+  while (index < end && (/[\w$\-.:]/.test(source[index]) || source.charCodeAt(index) > 0x7f))
+    index += 1
+  return index
+}
+
+/**
+ * ASCII whitespace only, which is what `is_ascii_whitespace` means on the Rust
+ * side. `\s` would also match `\v` and every Unicode space, and the two walks
+ * have to accept and decline the same tags.
+ */
+function skipJsxWhitespace(source, start, end) {
+  let index = start
+  while (index < end && ' \t\n\r\f'.includes(source[index])) index += 1
+  return index
 }
 
 /**
@@ -248,10 +460,47 @@ function maskRange(source, start, end, code, literals) {
       previousSignificant = slash
       continue
     }
+    // JSX children are text. Scanning them as code is what let
+    // `<p>write to @support</p>` report a decorator to `stripDecorators`, which
+    // then deleted `@support` from every server render of that page. Element
+    // structure — `<`, `/`, `>`, tag and attribute names — stays code, so a
+    // reader searching the mask still finds an element.
+    if (
+      source[index] === '<' &&
+      looksLikeJsxAt(source, index) &&
+      jsxCanStart(source, previousSignificant)
+    ) {
+      const element = jsxElement(source, index, end)
+      if (element !== null) {
+        maskJsxElement(source, index, element, code, literals)
+        previousSignificant = element.end - 1
+        index = element.end
+        continue
+      }
+    }
     code[index] = 1
     if (!/\s/.test(source[index])) previousSignificant = index
     index += 1
   }
+}
+
+/**
+ * Mark one JSX element: its structure is code, its text stays blank, and each
+ * container is walked as code so the strings and comments inside it are still
+ * masked.
+ */
+function maskJsxElement(source, start, element, code, literals) {
+  let cursor = start
+  for (const [regionStart, regionEnd, kind] of element.regions) {
+    markCode(code, cursor, regionStart)
+    if (kind === 'code') maskRange(source, regionStart, regionEnd, code, literals)
+    cursor = regionEnd
+  }
+  markCode(code, cursor, element.end)
+}
+
+function markCode(code, start, end) {
+  for (let at = start; at < end; at += 1) code[at] = 1
 }
 
 function isCommentStart(source, index, end) {
@@ -322,6 +571,23 @@ function interpolationEnd(source, start, end) {
       continue
     }
     const character = source[index]
+    // A container holds JSX far more often than it holds anything else —
+    // `{items.map((i) => <li>{i}</li>)}` is the shape of every list in the
+    // framework. Without this the `/` of `</li>` reads as a regular expression
+    // opener, because the token before it is `<`, and the literal then runs
+    // past the `}` that closes this interpolation.
+    if (
+      character === '<' &&
+      looksLikeJsxAt(source, index) &&
+      jsxCanStart(source, previousSignificant)
+    ) {
+      const element = jsxElement(source, index, end)
+      if (element !== null) {
+        previousSignificant = element.end - 1
+        index = element.end
+        continue
+      }
+    }
     if (character === '`') {
       previousSignificant = index
       index = templateLiteral(source, index, end).after
@@ -410,9 +676,14 @@ function regexCanStart(source, previousSignificant) {
 }
 
 function previousTokenIsKeyword(source, end) {
+  return KEYWORDS_BEFORE_REGEX.has(previousWord(source, end))
+}
+
+/** The identifier characters ending at `end`, inclusive. */
+function previousWord(source, end) {
   let start = end + 1
   while (start > 0 && isIdentContinue(source[start - 1])) start -= 1
-  return KEYWORDS_BEFORE_REGEX.has(source.slice(start, end + 1))
+  return source.slice(start, end + 1)
 }
 
 /**

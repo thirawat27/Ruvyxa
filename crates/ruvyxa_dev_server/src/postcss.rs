@@ -159,8 +159,8 @@ impl PostcssRunner {
     /// path would silently change which templates are scanned.
     pub fn run(&self, css: &str, from: &Path) -> Result<PostcssOutput> {
         let scratch = ScratchDir::new()?;
-        let css_file = scratch.path.join("input.css");
-        let request_file = scratch.path.join("request.json");
+        let css_file = scratch.path().join("input.css");
+        let request_file = scratch.path().join("request.json");
         fs::write(&css_file, css)?;
         fs::write(
             &request_file,
@@ -247,37 +247,89 @@ impl PostcssRunner {
 /// A temporary directory removed when the run ends, however it ends.
 ///
 /// The collected CSS travels by file because the caller closes the child's
-/// stdin and a stylesheet is far larger than an argument list may be.
+/// stdin and a stylesheet is far larger than an argument list may be. What
+/// travels with it is the project's whole compiled global stylesheet and a
+/// `request.json` naming the absolute project root.
+///
+/// Created by `tempfile`, not by hand. The hand-rolled version built
+/// `$TMPDIR/ruvyxa-postcss/{pid}-{nanos}` with `create_dir_all`, which succeeds
+/// on a directory that already exists -- so the path was *claimed* rather than
+/// created, and both name components are guessable by anyone who can watch the
+/// process table. On a shared build host that is a readable copy of the
+/// project's stylesheet and root path, and a directory an attacker can put
+/// content into for the PostCSS runner to read. `tempfile` creates with
+/// `O_EXCL` and mode 0700 and retries on collision, so the directory is this
+/// process's or the call fails.
 struct ScratchDir {
-    path: PathBuf,
+    /// Held for its `Drop`, which removes the directory however the run ends.
+    dir: tempfile::TempDir,
 }
 
 impl ScratchDir {
     fn new() -> Result<Self> {
-        let base = std::env::temp_dir().join("ruvyxa-postcss");
-        fs::create_dir_all(&base)?;
-        let path = base.join(format!(
-            "{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_nanos())
-                .unwrap_or_default()
-        ));
-        fs::create_dir_all(&path)?;
-        Ok(Self { path })
+        Ok(Self {
+            dir: tempfile::Builder::new()
+                .prefix("ruvyxa-postcss-")
+                .tempdir()?,
+        })
     }
-}
 
-impl Drop for ScratchDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
+    fn path(&self) -> &Path {
+        self.dir.path()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The scratch directory is this process's, or the call fails.
+    ///
+    /// The hand-rolled version keyed the name on the process id and a
+    /// nanosecond clock and created it with `create_dir_all`, which succeeds on
+    /// a directory that is already there. Two runs inside the same process --
+    /// `ruvyxa dev` recompiling on a save while a build runs -- could therefore
+    /// land on one directory and overwrite each other's `input.css`, and
+    /// anything that guessed the name first was simply adopted.
+    #[test]
+    fn two_scratch_directories_never_collide() {
+        let first = ScratchDir::new().expect("a scratch directory");
+        let second = ScratchDir::new().expect("a second scratch directory");
+        assert_ne!(first.path(), second.path());
+        assert!(first.path().is_dir() && second.path().is_dir());
+
+        // Distinct directories mean distinct files, which is the property the
+        // caller actually depends on.
+        std::fs::write(first.path().join("input.css"), b"a{}").expect("write");
+        std::fs::write(second.path().join("input.css"), b"b{}").expect("write");
+        assert_eq!(
+            std::fs::read_to_string(first.path().join("input.css")).expect("read"),
+            "a{}",
+        );
+
+        let path = first.path().to_path_buf();
+        drop(first);
+        assert!(!path.exists(), "the directory is removed when the run ends");
+    }
+
+    /// Not readable by anyone else on the host.
+    ///
+    /// The project's whole compiled stylesheet and the absolute project root go
+    /// into this directory. On Windows the equivalent guarantee comes from the
+    /// per-user temp directory rather than from a mode, so there is nothing to
+    /// assert there -- stated rather than silently skipped.
+    #[cfg(unix)]
+    #[test]
+    fn the_scratch_directory_is_private_to_this_user() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = ScratchDir::new().expect("a scratch directory");
+        let mode = std::fs::metadata(scratch.path())
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700, "mode was {:o}", mode & 0o777);
+    }
 
     #[test]
     fn a_project_without_a_config_has_no_postcss_stage() {

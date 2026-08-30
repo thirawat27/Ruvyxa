@@ -21,7 +21,7 @@
  */
 import { availableParallelism } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
@@ -66,8 +66,13 @@ import { cache as serverCache } from '@ruvyxa/core/server'
 // process boundary, which strips it before the response reaches the network. A
 // deployed build has no such reader, so `runAction` returns the event instead
 // of attaching it — see the note there.
-import { actionRealtimeEvent, encodeRealtimeEvent } from './action-runtime.mjs'
-import { methodNotAllowed, selectRouteHandler } from './api-methods.mjs'
+import {
+  actionRealtimeEvent,
+  encodeRealtimeEvent,
+  normalizeActionResult,
+  parseActionPayload,
+} from './action-runtime.mjs'
+import { methodNotAllowed, normalizeResponse, selectRouteHandler } from './api-methods.mjs'
 import {
   clientEntrySource,
   metaSourceImports,
@@ -119,6 +124,23 @@ const MAX_NODE_TIMEOUT_MS = 2_147_483_647
 const WORKER_REQUEST_TIMEOUT_MS = positiveIntegerEnv(
   'RUVYXA_WORKER_TIMEOUT_MS',
   30_000,
+  MAX_NODE_TIMEOUT_MS,
+)
+/**
+ * How long this worker keeps running after its stdin closes.
+ *
+ * Held to `DEFAULT_WORKER_SHUTDOWN_GRACE_MS` in
+ * `crates/ruvyxa_dev_server/src/worker_pool.rs`, which waits this long plus a
+ * margin before killing the process. The two numbers were written
+ * independently once — 5 s here against a 2 s host wait — so a shutdown that
+ * arrived while a request was still running was always killed, and this window
+ * could never be spent. The host normalizes the value into
+ * `RUVYXA_WORKER_SHUTDOWN_MS`, so both halves move together.
+ */
+const DEFAULT_WORKER_SHUTDOWN_GRACE_MS = 5000
+const WORKER_SHUTDOWN_GRACE_MS = positiveIntegerEnv(
+  'RUVYXA_WORKER_SHUTDOWN_MS',
+  DEFAULT_WORKER_SHUTDOWN_GRACE_MS,
   MAX_NODE_TIMEOUT_MS,
 )
 const MEMORY_PRESSURE_THRESHOLD_MB = positiveIntegerEnv('RUVYXA_MEMORY_LIMIT_MB', 512)
@@ -208,6 +230,24 @@ const renderCoalesceMap = new Map()
 // measurable rather than inferred from heap growth.
 const registeredModuleUrls = new Set()
 
+// Request id -> the `AbortController` for a request that has been read and has
+// not yet had its terminal frame written.
+//
+// The host's half of a client disconnect used to be its own bookkeeping and
+// nothing else, so this side never learned that the reader had walked away: a
+// render kept running with its response discarded, and a streamed route kept
+// producing forever, because the stream loop below is bounded only by *idle*
+// time between chunks and an SSE route is never idle. A `cancel` frame aborts
+// the entry here, which reaches the route handler's `request.signal` and the
+// reader draining its response body.
+//
+// The entry is deleted when the request settles, which is what makes a `cancel`
+// for an already-answered id a no-op rather than a stray abort. Ids come from a
+// monotonic counter on the host (`next_request_id` in
+// `crates/ruvyxa_dev_server/src/worker_protocol.rs`), so a later request cannot
+// reuse a cancelled one's id and inherit its abort.
+const inflightRequests = new Map()
+
 let isShuttingDown = false
 let moduleImportVersion = 0
 const admission = new WorkerAdmissionController({
@@ -231,6 +271,23 @@ function note(level, message) {
   process.stderr.write(`[ruvyxa:${level}] ${message}\n`)
 }
 
+// Requests that hold no admission slot, which `shutdown` still has to wait for.
+//
+// `needsSlot` is false for exactly `ping` and `invalidate`, so neither ever
+// touches `admission.activeRequests` -- the only counter `shutdown` consulted.
+// Their responses go out through `writeWorkerMessage`, whose own docstring says
+// stdout is a pipe here and `process.exit()` does not drain a queued
+// asynchronous write, and `rl.on('close')` fires the moment the host closes
+// stdin. So the final `ping` or `invalidate` response could reach the host
+// truncated, which it reports as unparsable worker output: a clean retirement
+// turned into a spurious error line.
+let slotlessRequests = 0
+
+/** True when nothing is left to write, by either counter. */
+function workerIsIdle() {
+  return admission.activeRequests === 0 && slotlessRequests === 0
+}
+
 // --- Graceful Shutdown ---
 function shutdown(reason = 'unknown') {
   if (isShuttingDown) return
@@ -244,8 +301,8 @@ function shutdown(reason = 'unknown') {
   // Settle parked handlers so shutdown has no dangling admission promises.
   // Rust also observes the process exit and closes their pending responses.
   admission.close()
-  if (admission.activeRequests === 0) process.exit(0)
-  setTimeout(() => process.exit(0), 5000).unref()
+  if (workerIsIdle()) process.exit(0)
+  setTimeout(() => process.exit(0), WORKER_SHUTDOWN_GRACE_MS).unref()
 }
 
 process.on('SIGTERM', () => shutdown('SIGTERM'))
@@ -298,39 +355,72 @@ rl.on('line', async (line) => {
   const { id } = request
   if (!id) return
 
+  // A withdrawal, not a request: it names the id of the work to abandon and is
+  // answered with nothing at all. Writing a frame here would be delivered to
+  // the pending entry of the request it names and read as that request's
+  // response. An id that already settled has no entry left, which is exactly
+  // what makes a late or repeated cancel a no-op.
+  if (request.type === 'cancel') {
+    inflightRequests.get(id)?.abort(new Error(`Request ${id} was cancelled by the host`))
+    return
+  }
+
   // Cheap requests must not queue behind renders: an invalidation or ping is
   // bookkeeping, and delaying it would leave workers serving stale bundles
   // precisely when the pool is busy.
   const needsSlot = request.type !== 'invalidate' && request.type !== 'ping'
+  // Registered before admission, so a request cancelled while it waits for a
+  // slot is abandoned instead of started: the queue is deepest exactly when
+  // clients are giving up.
+  const cancellation = new AbortController()
+  inflightRequests.set(id, cancellation)
+
+  // Counted before the dispatch below and released in the same `finally`, so a
+  // shutdown that arrives mid-`ping` waits for its response to be written.
+  if (!needsSlot) slotlessRequests += 1
+
   if (needsSlot) {
     const admitted = await admission.acquire()
     if (!admitted) {
       // `close()` settles parked handlers as false during shutdown. That is a
       // lifecycle event, not overload, and stdout may already be unavailable.
-      if (isShuttingDown) return
+      if (isShuttingDown) {
+        inflightRequests.delete(id)
+        return
+      }
       await writeWorkerMessage({
         id,
         ok: false,
         code: 'RUV1705',
         message: `JavaScript worker queue is full (${MAX_QUEUED_REQUESTS} waiting)`,
       })
+      inflightRequests.delete(id)
       return
     }
     // The worker may have started shutting down while this request waited.
     if (isShuttingDown) {
       admission.release()
+      inflightRequests.delete(id)
+      return
+    }
+    // Or the host may have withdrawn it while it queued. Starting the render now
+    // would burn the slot on a response nobody is waiting for, and no frame is
+    // owed: the host abandoned this request before it ever ran.
+    if (cancellation.signal.aborted) {
+      admission.release()
+      inflightRequests.delete(id)
       return
     }
   }
 
   try {
     const result = await withTimeout(
-      dispatchRequest(request),
+      dispatchRequest(request, cancellation.signal),
       WORKER_REQUEST_TIMEOUT_MS,
       `Request ${request.type}:${id} timed out after ${WORKER_REQUEST_TIMEOUT_MS}ms`,
     )
     if (result?.streamResponse instanceof Response) {
-      await emitApiStream(id, result)
+      await emitApiStream(id, result, cancellation.signal)
     } else {
       await writeWorkerMessage({ id, ...result, retainedModuleUrls: registeredModuleUrls.size })
     }
@@ -345,8 +435,12 @@ rl.on('line', async (line) => {
       shutdown('stdout-write-failed')
     }
   } finally {
+    // After the terminal frame, so a cancel that arrives while the response is
+    // being written still reaches a live controller.
+    inflightRequests.delete(id)
     if (needsSlot) admission.release()
-    if (isShuttingDown && admission.activeRequests === 0) process.exit(0)
+    else slotlessRequests -= 1
+    if (isShuttingDown && workerIsIdle()) process.exit(0)
   }
 })
 
@@ -354,7 +448,14 @@ rl.on('close', () => shutdown('stdin-close'))
 process.stdin.resume()
 
 // --- Request Dispatcher ---
-async function dispatchRequest(request) {
+/**
+ * @param request the parsed NDJSON request frame.
+ * @param signal aborted when the host withdraws this request. Reaches the
+ *   `Request` an API route handler receives; the coalesced page renders
+ *   deliberately do not take it, because one abandoned reader must not abort a
+ *   render a second, still-connected request is sharing.
+ */
+async function dispatchRequest(request, signal) {
   switch (request.type) {
     case 'ssr':
       return handleSsrCoalesced(request)
@@ -365,7 +466,7 @@ async function dispatchRequest(request) {
     case 'staticParams':
       return handleStaticParams(request)
     case 'api':
-      return handleApi(request)
+      return handleApi(request, signal)
     case 'action':
       return handleAction(request)
     case 'client':
@@ -400,6 +501,10 @@ async function dispatchRequest(request) {
         ...admission.snapshot(),
         coalesceMapSize: renderCoalesceMap.size,
         workerRequestTimeoutMs: WORKER_REQUEST_TIMEOUT_MS,
+        // The window this worker takes to finish what it holds after its stdin
+        // closes. Reported so the host's ceiling can be compared with the one
+        // actually in force, rather than with the one it assumes.
+        workerShutdownGraceMs: WORKER_SHUTDOWN_GRACE_MS,
         memoryPressureThresholdMb: MEMORY_PRESSURE_THRESHOLD_MB,
         cacheBudget: memoryPressure.snapshot(process.memoryUsage().heapUsed),
         compilerCache: compilerCacheStats(),
@@ -476,8 +581,15 @@ function writeWorkerMessage(message) {
  * is only complete once the render is, and the host needs it to write the data
  * block the browser hydrates from — which belongs at the *end* of the document
  * anyway. The thunk is awaited after the last chunk and merged into `api-end`.
+ *
+ * `signal` is what a client disconnect reaches this loop through. The read
+ * below is bounded by an *idle* timeout, which an SSE route or any other
+ * actively producing stream never reaches, so before cancellation existed an
+ * abandoned response pinned this process in an infinite produce loop. Cancelling
+ * the reader also runs the source's own `cancel()`, which is where a route
+ * releases the timer or subscription driving it.
  */
-async function emitApiStream(id, result) {
+async function emitApiStream(id, result, signal) {
   const { streamResponse, streamTrailer, ...head } = result
   await writeWorkerMessage({
     id,
@@ -500,6 +612,14 @@ async function emitApiStream(id, result) {
     return
   }
 
+  // Cancelling the reader settles a `read()` that is already parked, so an
+  // abort stops the loop on the same turn rather than after one more chunk.
+  const stopReading = () => {
+    reader.cancel(signal?.reason).catch(() => {})
+  }
+  if (signal?.aborted) stopReading()
+  else signal?.addEventListener('abort', stopReading, { once: true })
+
   try {
     while (true) {
       const { done, value } = await withTimeout(
@@ -519,7 +639,23 @@ async function emitApiStream(id, result) {
         })
       }
     }
-    await writeWorkerMessage(await endFrame())
+    // A cancelled stream ended because nobody was reading it, not because the
+    // route finished. The host still needs a terminal frame: it holds this
+    // request's pending entry — and counts it as in-flight work — until one
+    // arrives, so that a worker with an abandoned stream stops attracting new
+    // requests instead of looking idle.
+    if (signal?.aborted) {
+      await writeWorkerMessage({
+        id,
+        frame: 'api-error',
+        ok: false,
+        code: 'RUV1704',
+        message: `API response stream ${id} was cancelled by the host`,
+        retainedModuleUrls: registeredModuleUrls.size,
+      })
+    } else {
+      await writeWorkerMessage(await endFrame())
+    }
   } catch (error) {
     try {
       await reader.cancel(error)
@@ -533,6 +669,7 @@ async function emitApiStream(id, result) {
       retainedModuleUrls: registeredModuleUrls.size,
     })
   } finally {
+    signal?.removeEventListener('abort', stopReading)
     reader.releaseLock()
   }
 }
@@ -1147,7 +1284,7 @@ async function writeStaticParamsCache(file, value) {
 }
 
 // --- API Handler ---
-async function handleApi(request) {
+async function handleApi(request, signal) {
   const {
     projectRoot,
     routeFile,
@@ -1189,6 +1326,11 @@ async function handleApi(request) {
     // headerPairs preserves duplicate values; retain the object fallback for
     // older Rust workers that only send the legacy headers field.
     headers: Array.isArray(headerPairs) ? headerPairs : requestHeaders,
+    // A real signal, aborted when the host withdraws the request. A route that
+    // inspects `request.signal` — to stop a long poll, to cancel its own
+    // outbound `fetch` — now observes the disconnect it was always written to
+    // observe; before this it was handed a `Request` with no signal at all.
+    signal,
   }
   if (upperMethod !== 'GET' && upperMethod !== 'HEAD') {
     if (typeof bodyBase64 === 'string') {
@@ -1299,7 +1441,7 @@ async function handleAction(request) {
     }
   }
 
-  const input = parsePayload(payloadJson, contentType)
+  const input = parseActionPayload(payloadJson, contentType)
   const invalidated = []
   const req = new Request(`http://localhost${requestPath}`, {
     method: 'POST',
@@ -1483,6 +1625,34 @@ function normalizeAbsolutePath(file) {
   return path.resolve(file).replaceAll('\\', '/')
 }
 
+/**
+ * Whether a recorded bundle input is a directory rather than a file.
+ *
+ * A directory input is what `import.meta.glob` records as its watch root and
+ * what a PostCSS `dir-dependency` message reports, and it is the only thing
+ * that can invalidate a bundle when a *new* file appears inside it. The check
+ * used to sit under a bare `catch { return false }`, which swallowed a missing
+ * `statSync` import for the whole life of the feature: every input classified
+ * as a file, and the directory branch of `invalidateBundleCache` never ran.
+ *
+ * So the failure modes are told apart. `throwIfNoEntry: false` answers
+ * `undefined` for a path that is simply gone — the ordinary case, since the
+ * watcher can report a deletion before this runs. Anything else that carries a
+ * `code` is a filesystem error worth tolerating (a locked or unreadable path
+ * must not fail the build), and anything without one is a programming error and
+ * is rethrown rather than silently answering "not a directory".
+ */
+function isDirectoryInput(input) {
+  let stats
+  try {
+    stats = statSync(input, { throwIfNoEntry: false })
+  } catch (error) {
+    if (typeof error?.code !== 'string') throw error
+    return false
+  }
+  return stats?.isDirectory() ?? false
+}
+
 function cacheBundle(cacheKey, outfile, projectRoot, inputs, dependencyHash, contentHash) {
   const evicted = bundleCache.set(cacheKey, outfile)
   if (evicted) {
@@ -1498,18 +1668,7 @@ function cacheBundle(cacheKey, outfile, projectRoot, inputs, dependencyHash, con
     (inputs ?? []).map((input) => normalizeAbsolutePath(path.join(projectRoot, input))),
   )
   bundleInputs.set(cacheKey, normalizedInputs)
-  bundleInputDirectories.set(
-    cacheKey,
-    new Set(
-      [...normalizedInputs].filter((input) => {
-        try {
-          return statSync(input).isDirectory()
-        } catch {
-          return false
-        }
-      }),
-    ),
-  )
+  bundleInputDirectories.set(cacheKey, new Set([...normalizedInputs].filter(isDirectoryInput)))
   bundleInputVersions.set(cacheKey, inputsVersionOf(normalizedInputs))
   if (dependencyHash) bundleFingerprints.set(cacheKey, dependencyHash)
 }
@@ -2834,56 +2993,4 @@ async function bundleSsgModule(
       ...bundleInputMetadata(cacheKey),
     }
   })
-}
-
-function normalizeResponse(result, route = 'this route') {
-  if (result instanceof Response) return result
-  // Returning serialisable data instead of a Response is a supported
-  // convenience. Returning nothing is not: `Response.json(undefined)` throws
-  // "Value is not JSON serializable" from inside undici, and the message that
-  // reached the caller named neither the handler nor the fact that it returned
-  // nothing — the suggested fix was to check the module's imports.
-  if (result === undefined) {
-    throw new Error(
-      `RUV1504 the handler for ${route} returned nothing. A route handler must return a Response, ` +
-        'or data that can be serialised as JSON, which is sent as `Response.json(data)`.',
-    )
-  }
-  try {
-    return Response.json(result)
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error)
-    throw new Error(
-      `RUV1504 the handler for ${route} returned a value that cannot be serialised as JSON ` +
-        `(${detail}). Return a Response, or data built from plain objects, arrays, strings, ` +
-        'numbers, booleans, and null.',
-    )
-  }
-}
-
-function normalizeActionResult(result, invalidated) {
-  if (result instanceof Response) return result
-  return Response.json({ data: result, invalidated })
-}
-
-function parsePayload(payloadJson, contentType) {
-  // `contentType` is additive for compatibility with older Rust workers. New
-  // workers always send it, preventing content-type confusion between JSON
-  // and URL-encoded action inputs.
-  let parsed
-  if (contentType === 'application/json') {
-    parsed = JSON.parse(payloadJson || '{}')
-  } else if (contentType === 'application/x-www-form-urlencoded') {
-    parsed = Object.fromEntries(new URLSearchParams(payloadJson || ''))
-  } else {
-    try {
-      parsed = JSON.parse(payloadJson || '{}')
-    } catch {
-      parsed = Object.fromEntries(new URLSearchParams(payloadJson))
-    }
-  }
-  if (parsed && typeof parsed === 'object' && 'input' in parsed) {
-    return parsed.input
-  }
-  return parsed
 }

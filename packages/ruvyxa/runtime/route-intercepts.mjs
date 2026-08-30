@@ -7,7 +7,7 @@
  * composes is a modal that opens in production and does nothing locally, or
  * the reverse.
  *
- * Mirrors `route_intercepts()` in `crates/ruvyxa_graph/src/lib.rs`, and the two
+ * Mirrors `route_intercepts()` in `crates/ruvyxa_graph/src/parallel.rs`, and the two
  * are held to `tests/fixtures/intercepting-route-conformance.json`.
  *
  * A module of its own rather than a function inside `worker-pool.mjs`, because
@@ -17,7 +17,7 @@
 import { readdirSync } from 'node:fs'
 import path from 'node:path'
 
-import { compareCodeUnits } from './order.mjs'
+import { compareCodePoints } from './order.mjs'
 
 /**
  * Intercepting routes in scope for a route, level order then slot name.
@@ -27,7 +27,7 @@ import { compareCodeUnits } from './order.mjs'
  * marker, and each is resolved to the URL it covers — from the *level's* URL
  * rather than the slot folder's, because a slot contributes no URL segment.
  *
- * Mirrors `route_intercepts()` in `crates/ruvyxa_graph/src/lib.rs`, and the two
+ * Mirrors `route_intercepts()` in `crates/ruvyxa_graph/src/parallel.rs`, and the two
  * are held to `tests/fixtures/intercepting-route-conformance.json`: an
  * interception one host composes and the other does not is a modal that opens
  * under `ruvyxa build` and does nothing under `ruvyxa dev`.
@@ -44,7 +44,7 @@ export function collectIntercepts(appDir, routeDir) {
     intercepts.push(...interceptsAtLevel(appDir, level))
   }
   intercepts.sort((left, right) =>
-    compareCodeUnits(
+    compareCodePoints(
       `${left.levelId}\u0000${left.name}\u0000${left.target}`,
       `${right.levelId}\u0000${right.name}\u0000${right.target}`,
     ),
@@ -63,16 +63,33 @@ function interceptClimb(marker) {
   return null
 }
 
-function interceptsAtLevel(appDir, level) {
-  let names
+/**
+ * The entries of one directory, or the error that says why they are unknown.
+ *
+ * `catch { return [] }` used to stand here and in `interceptPages` below, which
+ * reads "I could not look" as "there is nothing there" — an interception that
+ * silently disappears from the dev entry. The Rust half refuses the same
+ * condition with `RUV1021`, so swallowing it here would make `ruvyxa dev`
+ * quietly drop a modal that `ruvyxa build` refuses to build at all.
+ */
+function readRouteDirectory(directory) {
   try {
-    names = readdirSync(level, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory() && entry.name.startsWith('@') && entry.name.length > 1)
-      .map((entry) => entry.name.slice(1))
-      .sort(compareCodeUnits)
-  } catch {
-    return []
+    return readdirSync(directory, { withFileTypes: true })
+  } catch (error) {
+    throw new Error(
+      `RUV1021: Route directory could not be read: ${directory}: ${error.message}. ` +
+        'A directory the build cannot look inside is not an empty one — an interception below it ' +
+        'would silently disappear from the entry.',
+      { cause: error },
+    )
   }
+}
+
+function interceptsAtLevel(appDir, level) {
+  const names = readRouteDirectory(level)
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith('@') && entry.name.length > 1)
+    .map((entry) => entry.name.slice(1))
+    .sort(compareCodePoints)
   const levelPath = routePathFromDir(path.relative(appDir, level))
   const levelId = directoryId(appDir, level)
   const found = []
@@ -90,13 +107,7 @@ function interceptsAtLevel(appDir, level) {
 function interceptPages(slotDir) {
   const found = []
   const walk = (dir, segments) => {
-    let entries
-    try {
-      entries = readdirSync(dir, { withFileTypes: true })
-    } catch {
-      return
-    }
-    for (const entry of entries) {
+    for (const entry of readRouteDirectory(dir)) {
       if (entry.isDirectory()) {
         walk(path.join(dir, entry.name), [...segments, entry.name])
         continue

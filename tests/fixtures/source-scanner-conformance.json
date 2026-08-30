@@ -119,6 +119,97 @@
       "why": "`\\r\\n` is one line terminator, not two. Consuming only the `\\r` leaves the scan on the newline, so a continuation works on a checkout with Unix endings and fails on the same file with Windows ones."
     },
     {
+      "name": "an at sign in jsx text",
+      "source": "export const el = <p>write to @support</p>;\nexport { el };\n",
+      "code": ["export { el }", "<p>"],
+      "text": ["write to @support"],
+      "why": "JSX children are text, and until both walks knew that they were scanned as code. `@` is not a JavaScript operator, so a code-position one begins a decorator — and here it is in one, with an alphanumeric before it, which is exactly where a decorator on a class member sits. Both decorator strippers believed it and deleted `@support` from the rendered page: the Rust one on the plan path, which every build takes, and `compiler.mjs` on every server render."
+    },
+    {
+      "name": "nested jsx children are text at every depth",
+      "source": "export const el = <div><span>ping @ops</span></div>;\nimport x from 'dep';\n",
+      "code": ["import x from", "<span>"],
+      "text": ["ping @ops"],
+      "why": "A nested element re-enters tag context and its children are text again. Counting depth rather than matching names is what lets one walk cover both."
+    },
+    {
+      "name": "a fragment's children are text",
+      "source": "export const el = <>mail @help</>;\nexport { el };\n",
+      "code": ["export { el }"],
+      "text": ["mail @help"],
+      "why": "`<>…</>` has no tag name, so a walk that required one read the whole fragment as code."
+    },
+    {
+      "name": "an apostrophe in jsx text",
+      "source": "export const el = <p>don't @panic</p>;\nexport { el };\n",
+      "code": ["export { el }"],
+      "text": ["don't @panic"],
+      "why": "The apostrophe used to be handled by the string walk giving up at the end of its line, which left the rest of the children as code. Now the children are text outright and the quote is never a delimiter to begin with."
+    },
+    {
+      "name": "an expression container inside children is code again",
+      "source": "export const el = <p>{import(\"./dep\")} and @prose</p>;\n",
+      "code": ["import("],
+      "text": ["and @prose"],
+      "why": "Getting this backwards is the expensive direction: a `{…}` read as text drops the dependency edge inside it from the module graph, silently. Text spans stop at the brace on both sides of the container."
+    },
+    {
+      "name": "a jsx comment container",
+      "source": "export const el = <p>{/* @todo drop this */}keep @me</p>;\nexport { el };\n",
+      "code": ["export { el }"],
+      "text": ["@todo drop this", "keep @me"],
+      "why": "`{/* … */}` is a container holding a comment, so the container walk hands it to the comment walk and neither half has to know about the other."
+    },
+    {
+      "name": "a closing tag inside an expression container",
+      "source": "const list = <ul>{items.map((i) => <li>{i.label}</li>)}</ul>;\nexport { list };\n",
+      "code": ["export { list }", "items.map", "i.label"],
+      "text": [],
+      "why": "The token before the `/` of `</li>` is a `<`, which is a value-expected position, so the brace matcher read the closing tag as a regular expression opener and ran past the `}` that ends the container. Every list in the framework has this shape."
+    },
+    {
+      "name": "an attribute value is text and an attribute expression is code",
+      "source": "export const el = <a href=\"/@handle\" onClick={() => track(\"go\")}>visit @us</a>;\n",
+      "code": ["onClick={", "track("],
+      "text": ["/@handle", "visit @us"],
+      "why": "JSX reads a quoted attribute value literally — no escapes, and a newline inside it is ordinary text — so the JavaScript string walk, which stops at a newline because a JavaScript string may not span one, is the wrong one to use here."
+    },
+    {
+      "name": "a self-closing tag has no children",
+      "source": "export const el = <br />;\nimport x from 'dep';\nexport { el };\n",
+      "code": ["<br />", "import x from", "export { el }"],
+      "text": [],
+      "why": "A `/>` ends the element without opening a children context. Treating it as an opening tag left the walk hunting a close that never comes, and everything below the element would have become children text."
+    },
+    {
+      "name": "a type argument list is not an element",
+      "source": "const m = new Map<string, number>();\nimport x from 'dep';\nexport { m };\n",
+      "code": ["new Map<string, number>()", "import x from", "export { m }"],
+      "text": [],
+      "why": "`Map<string, number>` looks exactly like an opening tag. It is not one because JSX is a value and this `<` follows an identifier, which is where a value ends — the same test that tells a regular expression from a division."
+    },
+    {
+      "name": "a comparison is not an element",
+      "source": "const smaller = a < b;\nconst note = \"@x\";\nexport { smaller };\n",
+      "code": ["a < b", "export { smaller }"],
+      "text": ["@x"],
+      "why": "`< b` satisfies the `<`-followed-by-a-letter heuristic that decides `has_jsx`. Only the value-expected test separates it from an element."
+    },
+    {
+      "name": "a generic arrow function is not an element",
+      "source": "const identity = <T extends object>(value: T) => value;\nimport x from 'dep';\nexport { identity };\n",
+      "code": ["(value: T) => value", "import x from", "export { identity }"],
+      "text": [],
+      "why": "This one *is* in a value position and does read as `<T>` with two attributes, so the position test alone would take it — and everything after it would become children text, which drops imports. Requiring the element to close is what declines it: nothing ever writes `</T>`, the walk reaches the end of the input, and the caller scans the bytes as it did before."
+    },
+    {
+      "name": "a raw `<` in children is declined, not guessed",
+      "source": "export const el = <p>a < b @here</p>;\n",
+      "code": ["a < b @here"],
+      "text": [],
+      "why": "Deliberately not handled. JSX rejects a raw `<` in children as well — it has to be written `{'<'}` — so a file shaped like this never compiled, and guessing at it would mean guessing at the one construct that separates an element from a comparison. The walk declines the whole element and the children stay code, which is what they were before any of this existed."
+    },
+    {
       "name": "an unmatched apostrophe above a continued line stays bounded",
       "source": "var t = 1; // don't end a line with C:\\\nvar b = 2;\nexport { t, b };\n",
       "code": ["export { t, b }"],
@@ -146,7 +237,14 @@
         "a formatter picks for a short member, and what every minified dependency",
         "has — in the output, where it is a syntax error. The JavaScript compiler",
         "stripped none at all, so a decorated class worked in the browser and threw",
-        "on every server render of the same route."
+        "on every server render of the same route.",
+        "",
+        "The `untouched` list is the other half of that rule, and it is the",
+        "expensive half: stripping deletes bytes, so a false positive removes text",
+        "a page renders and leaves output that still parses. The JSX entries are",
+        "there because both compilers used to fail them — `<p>write to @support</p>`",
+        "shipped as `<p>write to </p>` — and only the `cases` above, where JSX",
+        "children became text spans, keep them passing."
       ],
       "stripped": [
         "class Svc {\n  @log\n  run() { return 1 }\n}\n",
@@ -159,7 +257,10 @@
         "const email = \"a@b.test\"\n",
         "// reach me @someone\n",
         "const pattern = /@handle/\n",
-        "const doc = `mention @user here`\n"
+        "const doc = `mention @user here`\n",
+        "const el = <p>write to @support</p>\n",
+        "const el = <p>don't @panic</p>\n",
+        "const el = <ul>{[1].map((i) => <li>ping @ops {i}</li>)}</ul>\n"
       ]
     },
     "shebang": {

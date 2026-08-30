@@ -3,6 +3,23 @@ import type { RuvyxaPlugin } from '@ruvyxa/core/plugin'
 export interface AuthUser {
   id: string
   email?: string
+  /**
+   * Whether the provider that returned `email` vouched for it.
+   *
+   * OIDC Core §5.7 is explicit that `email` is not a verified identifier unless
+   * `email_verified` is true, and an address nobody verified is an address
+   * anybody can claim. Account identity in this package is keyed on `id`
+   * (`google:${sub}`, `github:${id}`), so a session is safe without reading
+   * this — but an application that *links* an OAuth login to an existing
+   * account by address, or authorizes on the domain part, is deciding who
+   * somebody is from this field and must check it.
+   *
+   * Absent means the provider said nothing, which is not the same as `false`
+   * and is never a reason to treat the address as verified. Present without an
+   * `email` is not produced: there is no claim to make about an address that
+   * was not returned.
+   */
+  emailVerified?: boolean
   name?: string
   image?: string
   roles?: readonly string[]
@@ -98,6 +115,19 @@ export interface AuthOptions {
     secure?: boolean
     sameSite?: 'Lax' | 'Strict'
   }
+  /**
+   * The base ceiling every authentication bucket is derived from: `max`
+   * requests per `windowSeconds` from one client against one scope.
+   *
+   * Two wider ceilings are derived from it and are not separately configurable.
+   * One client may make `max × 5` requests across every scope in the same
+   * window, which is what bounds a sweep across many accounts from one source.
+   * One account may be attempted `max × 20` times — or mailed a magic link
+   * `max × 1` times — by all clients combined, in a window of at most a minute,
+   * which is what bounds a sweep of one account from many sources. A magic-link
+   * send additionally costs a fifth of `max` per client, because sending mail is
+   * not the same cost as checking a password.
+   */
   rateLimit?: { max?: number; windowSeconds?: number }
   /**
    * Resolve the client IP for rate-limit bucketing. Off by default because
@@ -108,6 +138,14 @@ export interface AuthOptions {
    * case, or read a platform header directly, for example
    * `(request) => request.headers.get('cf-connecting-ip')`.
    * A thrown error or empty result falls back to the user-agent-only key.
+   *
+   * What survives the fallback and what does not: the account-wide ceilings
+   * have no client in their key, so rotating the user-agent cannot lift them —
+   * one address stays bounded either way. The per-client ceiling is what a
+   * rotated user-agent escapes, so without a resolver an attacker can still
+   * spread requests thinly across *many different* addresses. Configure this
+   * for any deployment where a `magic-link` provider can be reached from the
+   * internet.
    */
   clientIp?(request: Request): string | null | undefined
   /** Observe full server-side failures without exposing them in HTTP responses. */

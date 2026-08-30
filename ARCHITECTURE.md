@@ -818,8 +818,8 @@ pub enum RuntimeTarget {
 | `[...rest]`   | `/docs/a/b`            | `{ rest: ["a","b"] }`            |
 | `[[...rest]]` | `/shop` or `/shop/a/b` | omitted or `{ rest: ["a","b"] }` |
 
-Validation rule RUV1002: catch-all must be last segment. Parameter names cannot contain brackets or
-start with `.`.
+Validation rule RUV1017: catch-all must be last segment. Parameter names cannot contain brackets or
+start with `.`, which is RUV1002.
 
 ### Route Path Resolution
 
@@ -1869,6 +1869,7 @@ queued request counts.
 | `RUVYXA_WORKER_MAX_CONCURRENCY`  | CPU count (2–8)      | Requests one worker executes at once                                  |
 | `RUVYXA_WORKER_MAX_QUEUE`        | concurrency × 4      | FIFO requests waiting for a worker slot; full queue returns `RUV1705` |
 | `RUVYXA_WORKER_TIMEOUT_MS`       | 30000 / 300000 build | Per-request deadline, shared by Rust and the Node watchdog            |
+| `RUVYXA_WORKER_SHUTDOWN_MS`      | 5000                 | Worker grace after stdin closes; the host waits this plus 1 s         |
 | `RUVYXA_PRERENDER_RECYCLE_AFTER` | 32 (`0` disables)    | Isolated prerenders before a build worker is retired                  |
 | `RUVYXA_CACHE_MAX_ENTRIES`       | 256                  | Bundle and module cache entries per worker                            |
 | `RUVYXA_MEMORY_LIMIT_MB`         | 512                  | Heap threshold that triggers in-worker cache eviction                 |
@@ -2475,15 +2476,16 @@ wedged worker cannot hold up server shutdown.
 
 ### Environment Variables
 
-| Variable                         | Default              | Effect                                                     |
-| -------------------------------- | -------------------- | ---------------------------------------------------------- |
-| `RUVYXA_WORKER_POOL_SIZE`        | CPU count (2–8)      | Worker processes in the dev/prod pool                      |
-| `RUVYXA_WORKER_MAX_CONCURRENCY`  | CPU count (2–8)      | Requests one worker executes at once                       |
-| `RUVYXA_WORKER_MAX_QUEUE`        | concurrency × 4      | Maximum FIFO waiters; excess work fails with `RUV1705`     |
-| `RUVYXA_WORKER_TIMEOUT_MS`       | 30000 / 300000 build | Per-request deadline, shared by Rust and the Node watchdog |
-| `RUVYXA_PRERENDER_RECYCLE_AFTER` | 32 (`0` disables)    | Isolated prerenders before a build worker is retired       |
-| `RUVYXA_CACHE_MAX_ENTRIES`       | 256                  | Bundle and module cache entries per worker                 |
-| `RUVYXA_MEMORY_LIMIT_MB`         | 512                  | Heap threshold that triggers in-worker cache eviction      |
+| Variable                         | Default              | Effect                                                        |
+| -------------------------------- | -------------------- | ------------------------------------------------------------- |
+| `RUVYXA_WORKER_POOL_SIZE`        | CPU count (2–8)      | Worker processes in the dev/prod pool                         |
+| `RUVYXA_WORKER_MAX_CONCURRENCY`  | CPU count (2–8)      | Requests one worker executes at once                          |
+| `RUVYXA_WORKER_MAX_QUEUE`        | concurrency × 4      | Maximum FIFO waiters; excess work fails with `RUV1705`        |
+| `RUVYXA_WORKER_TIMEOUT_MS`       | 30000 / 300000 build | Per-request deadline, shared by Rust and the Node watchdog    |
+| `RUVYXA_WORKER_SHUTDOWN_MS`      | 5000                 | Worker grace after stdin closes; the host waits this plus 1 s |
+| `RUVYXA_PRERENDER_RECYCLE_AFTER` | 32 (`0` disables)    | Isolated prerenders before a build worker is retired          |
+| `RUVYXA_CACHE_MAX_ENTRIES`       | 256                  | Bundle and module cache entries per worker                    |
+| `RUVYXA_MEMORY_LIMIT_MB`         | 512                  | Heap threshold that triggers in-worker cache eviction         |
 
 ---
 
@@ -3508,34 +3510,35 @@ plugin ranges it emits directly; the full catalog with explanations lives in
 [Troubleshooting](docs/en/16-troubleshooting-upgrades.md), not here — this table exists to show the
 code shape and a few of each family, not to enumerate every one.
 
-| Code    | Title                                                           | Crate             |
-| ------- | --------------------------------------------------------------- | ----------------- |
-| RUV1001 | App directory was not found                                     | graph             |
-| RUV1002 | Invalid dynamic route segment / Catch-all must be final segment | graph             |
-| RUV1003 | Conflicting route paths                                         | graph             |
-| RUV1004 | Page is missing a default export                                | graph, dev_server |
-| RUV1007 | Server-only module imported into client graph                   | graph             |
-| RUV1008 | Private environment variable used in client graph               | graph             |
-| RUV1009 | Client-only module imported into server/SSR graph               | graph, bundler    |
-| RUV1010 | Server directory module reached by client graph                 | graph             |
-| RUV1100 | React SSR failed                                                | dev_server        |
-| RUV1102 | SSR renderer was not found                                      | dev_server        |
-| RUV1200 | API route execution failed                                      | dev_server        |
-| RUV1201 | No available server port was found                              | dev_server        |
-| RUV1202 | API renderer was not found                                      | dev_server        |
-| RUV1300 | Client hydration bundling failed / Compile error                | dev_server        |
-| RUV1303 | Client route was not found                                      | dev_server        |
-| RUV1304 | Client bundle requested for a non-page route                    | dev_server        |
-| RUV1400 | Tailwind CSS compilation failed                                 | dev_server        |
-| RUV1401 | Tailwind CSS CLI was not found                                  | dev_server        |
-| RUV1402 | Sass compilation failed                                         | dev_server        |
-| RUV1403 | CSS import / stylesheet could not be resolved                   | dev_server        |
-| RUV1404 | CSS entry must stay inside the project root                     | dev_server        |
-| RUV1500 | SSG render failed                                               | dev_server        |
-| RUV1501 | Route action file was not found                                 | dev_server        |
-| RUV1550 | PPR render failed                                               | dev_server        |
-| RUV1702 | Worker pool script was not found                                | dev_server        |
-| RUV1101 | SSR renderer received missing required arguments                | runtime/SSR       |
+| Code    | Title                                             | Crate             |
+| ------- | ------------------------------------------------- | ----------------- |
+| RUV1001 | App directory was not found                       | graph             |
+| RUV1002 | Invalid dynamic route segment                     | graph             |
+| RUV1017 | Catch-all route must be the final URL segment     | graph             |
+| RUV1003 | Conflicting route paths                           | graph             |
+| RUV1004 | Page is missing a default export                  | graph, dev_server |
+| RUV1007 | Server-only module imported into client graph     | graph             |
+| RUV1008 | Private environment variable used in client graph | graph             |
+| RUV1009 | Client-only module imported into server/SSR graph | graph, bundler    |
+| RUV1010 | Server directory module reached by client graph   | graph             |
+| RUV1100 | React SSR failed                                  | dev_server        |
+| RUV1102 | SSR renderer was not found                        | dev_server        |
+| RUV1200 | API route execution failed                        | dev_server        |
+| RUV1201 | No available server port was found                | dev_server        |
+| RUV1202 | API renderer was not found                        | dev_server        |
+| RUV1300 | Client hydration bundling failed / Compile error  | dev_server        |
+| RUV1303 | Client route was not found                        | dev_server        |
+| RUV1304 | Client bundle requested for a non-page route      | dev_server        |
+| RUV1400 | Tailwind CSS compilation failed                   | dev_server        |
+| RUV1401 | Tailwind CSS CLI was not found                    | dev_server        |
+| RUV1402 | Sass compilation failed                           | dev_server        |
+| RUV1403 | CSS import / stylesheet could not be resolved     | dev_server        |
+| RUV1404 | CSS entry must stay inside the project root       | dev_server        |
+| RUV1500 | SSG render failed                                 | dev_server        |
+| RUV1501 | Route action file was not found                   | dev_server        |
+| RUV1550 | PPR render failed                                 | dev_server        |
+| RUV1702 | Worker pool script was not found                  | dev_server        |
+| RUV1101 | SSR renderer received missing required arguments  | runtime/SSR       |
 
 Codes are string constants (`&'static str`), not enum variants — any crate can emit any code without
 touching the diagnostics crate.
@@ -3812,7 +3815,7 @@ time by `route_path_from_dir`. Validation is therefore about well-formed routes,
   is RUV1002.
 - A parameter name must be non-empty, bracket-free, and must not begin with `.`, which is what keeps
   `[..]` and `[.]` from becoming traversal-shaped segments.
-- A catch-all must be the final segment; a child segment after it is RUV1002.
+- A catch-all must be the final segment; a child segment after it is RUV1017.
 - `(group)` and `@slot` segments are stripped from the URL rather than validated as parameters.
 
 Traversal is prevented separately, at the point where a request path is turned back into a file:

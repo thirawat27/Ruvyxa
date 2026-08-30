@@ -13,7 +13,7 @@ import {
   serverProxyModuleSource,
   serverRegistrationSource,
 } from './client-references.mjs'
-import { compareCodeUnits } from './order.mjs'
+import { compareCodePoints } from './order.mjs'
 import { toImportPath } from './paths.mjs'
 import { createPluginRegistry, dispatchBuildTransform } from './plugin-http.mjs'
 import {
@@ -78,6 +78,25 @@ function isIdentifier(text) {
   return identifierPattern('^%IDENT%$').test(text)
 }
 
+/**
+ * The name run in a `process.env` member access.
+ *
+ * Deliberately **not** `IDENTIFIER_SOURCE`. The name is read out of the same
+ * bytes on both sides of the boundary check, and the Rust half reads it with
+ * `skip_identifier` in `crates/ruvyxa_bundler/src/ast.rs` — a run of ASCII
+ * identifier bytes with no start-character requirement. Matching a Unicode
+ * identifier here would make `process.env["café"]` a private read in this graph
+ * and no read at all in Rust, replacing one divergence with another; requiring
+ * an identifier *start* would miss `process.env["1PASSWORD_TOKEN"]`, which is
+ * legal source and which Rust does read. This used to be an upper-case-only
+ * character class, which made `process.env.databaseUrl` invisible to
+ * `ruvyxa dev` — the name matched nothing — and refused by
+ * `ruvyxa build`, and truncated `MIXED_case` and `NODE_ENVx` — the second of
+ * those into the public exemption. The `extraction` section of
+ * `tests/fixtures/env-policy-conformance.json` holds both graphs to this.
+ */
+const ENV_NAME_PATTERN = /^[A-Za-z0-9_$]+/
+
 export const MDX_COMPONENT_EXTENSIONS = ['.tsx', '.ts', '.jsx', '.js', '.mts', '.mjs']
 const ASSET_EXTENSIONS = new Set(['.css', '.scss', '.sass', '.less'])
 /// Every file extension this compiler knows how to turn into a module. A
@@ -136,6 +155,7 @@ export function invalidateCompilerCache(paths) {
 }
 
 export function clearCompilerCache() {
+  projectRootListings.clear()
   compilerCache.sources.clear()
   compilerCache.transforms.clear()
   compilerCache.rewrites.clear()
@@ -167,37 +187,71 @@ export function compilerCacheStats() {
  * mirrors a rule in `crates/ruvyxa_graph/src/lib.rs`, named on the function.
  */
 
-/** `layout.tsx` files from the app root down to the route, root first. */
+/**
+ * Extensions a route file written as a component may carry, in probe order.
+ *
+ * Mirrors `COMPONENT_EXTENSIONS` in `crates/ruvyxa_graph/src/lib.rs`. The two
+ * halves both used to pass a single literal `layout.tsx` / `template.tsx` down
+ * their nested walk while accepting `page.jsx` as a route, so a project written
+ * in `.jsx` lost every layout and template in both hosts at once — no
+ * diagnostic, a successful build, and a page rendered without its
+ * `<html>`/`<body>` shell. `.tsx` is probed first, so a project holding a stray
+ * `layout.jsx` beside its `layout.tsx` composes the file it always did.
+ */
+const componentExtensions = ['tsx', 'jsx']
+
+/** The file names `stem` may take, in probe order. */
+function routeFileNames(stem, extensions = componentExtensions) {
+  return extensions.map((extension) => `${stem}.${extension}`)
+}
+
+/** `layout` files from the app root down to the route, root first. */
 export function collectLayouts(appDir, routeDir) {
-  return collectNested(appDir, routeDir, 'layout.tsx')
+  return collectNested(appDir, routeDir, routeFileNames('layout'))
 }
 
 /**
- * `template.tsx` files from the app root down to the route, root first.
+ * `template` files from the app root down to the route, root first.
  *
  * Mirrors `template_chain()` in `crates/ruvyxa_graph/src/lib.rs`.
  */
 export function collectTemplates(appDir, routeDir) {
-  return collectNested(appDir, routeDir, 'template.tsx')
+  return collectNested(appDir, routeDir, routeFileNames('template'))
 }
 
-/** Files named `fileName` on the path from the app root to `routeDir`, root first. */
-function collectNested(appDir, routeDir, fileName) {
+/**
+ * Files named by one of `fileNames` on the path from the app root to
+ * `routeDir`, root first.
+ *
+ * One level contributes at most one entry: the names are one module spelled in
+ * several extensions, and the first that exists wins. Mirrors `nested_chain()`
+ * in `crates/ruvyxa_graph/src/lib.rs`, held level with it by
+ * `tests/fixtures/route-chain-conformance.json`.
+ */
+function collectNested(appDir, routeDir, fileNames) {
   const found = []
   let current = appDir
 
-  pushIfExists(found, path.join(current, fileName))
+  pushFirstExisting(found, current, fileNames)
 
   const relative = path.relative(appDir, routeDir)
   if (relative && !relative.startsWith('..')) {
     for (const segment of relative.split(path.sep)) {
       if (!segment) continue
       current = path.join(current, segment)
-      pushIfExists(found, path.join(current, fileName))
+      pushFirstExisting(found, current, fileNames)
     }
   }
 
   return found
+}
+
+/** Push the first of `fileNames` present in `directory`, if any. */
+function pushFirstExisting(collection, directory, fileNames) {
+  const found = fileNames
+    .map((name) => path.join(directory, name))
+    .find((candidate) => existsSync(candidate))
+  if (found) collection.push(found)
 }
 
 /**
@@ -244,11 +298,11 @@ export function collectSlots(appDir, routeDir) {
 /** The file a slot renders for the remaining URL segments, or null. */
 function slotPageFor(slotDir, remaining) {
   const target = path.join(slotDir, ...remaining)
-  for (const name of ['page.tsx', 'page.jsx', 'page.md', 'page.mdx']) {
+  for (const name of [...routeFileNames('page'), ...routeFileNames('page', ['md', 'mdx'])]) {
     const candidate = path.join(target, name)
     if (existsSync(candidate)) return candidate
   }
-  for (const name of ['default.tsx', 'default.jsx']) {
+  for (const name of routeFileNames('default')) {
     const candidate = path.join(slotDir, name)
     if (existsSync(candidate)) return candidate
   }
@@ -454,14 +508,14 @@ export async function compileBundleWithMetadata({
     // modules need their own browser chunk, and the render reads it to build
     // the manifest React serialises references against.
     clientReferences: [...clientReferences.values()].sort((left, right) =>
-      compareCodeUnits(left.id, right.id),
+      compareCodePoints(left.id, right.id),
     ),
     // Every `'use server'` module, in the same stable order and for the same
     // reasons: the host reads it to know which files a server-function call may
     // resolve to, and a call naming a module no graph reported is refused
     // rather than loaded.
     serverReferences: [...serverReferences.values()].sort((left, right) =>
-      compareCodeUnits(left.id, right.id),
+      compareCodePoints(left.id, right.id),
     ),
     // Hash of the emitted bundle, used as the ESM import version token. Two
     // builds that emit identical code must resolve to the same import URL:
@@ -496,7 +550,7 @@ export async function compileBundleWithMetadata({
         ...existingManifestFiles(root).map((name) => path.join(root, name)),
         ...tsconfigPaths.files.map((file) => path.resolve(file)),
       ]),
-    ].sort(compareCodeUnits),
+    ].sort(compareCodePoints),
     // Files that were looked for and not found. A lockfile or a tsconfig
     // appearing changes what a bare specifier resolves to without changing any
     // file that was read, so their absence is part of what was observed.
@@ -506,7 +560,7 @@ export async function compileBundleWithMetadata({
     ]
       .map((name) => path.join(root, name))
       .filter((file) => !existsSync(file))
-      .sort(compareCodeUnits),
+      .sort(compareCodePoints),
   }
 }
 
@@ -713,7 +767,7 @@ function projectInputPaths(root, modules, configurationFiles = []) {
         ...modules.flatMap((module) => [module.filePath, ...(module.assetInputs || [])]),
         ...configurationFiles,
       ]
-        .filter((file) => file && isWithinProject(root, file))
+        .filter((file) => file && isProjectLocal(root, file))
         .map((file) => path.relative(root, file).replaceAll('\\', '/')),
     ),
   ].sort()
@@ -722,12 +776,12 @@ function projectInputPaths(root, modules, configurationFiles = []) {
 async function fingerprintProjectInputs(root, modules, configurationFiles = []) {
   const hash = createHash('sha256')
   const projectModules = modules
-    .filter((module) => module.filePath && isWithinProject(root, module.filePath))
+    .filter((module) => module.filePath && isProjectLocal(root, module.filePath))
     .map((module) => ({
       path: path.relative(root, module.filePath).replaceAll('\\', '/'),
       source: module.source,
     }))
-    .sort((left, right) => compareCodeUnits(left.path, right.path))
+    .sort((left, right) => compareCodePoints(left.path, right.path))
 
   for (const module of projectModules) {
     hash.update(module.path)
@@ -774,7 +828,7 @@ const PROJECT_MANIFEST_FILES = [
 /** Project-relative paths of the modules that feed the dependency fingerprint. */
 function projectModulePaths(root, modules) {
   return modules
-    .filter((module) => module.filePath && isWithinProject(root, module.filePath))
+    .filter((module) => module.filePath && isProjectLocal(root, module.filePath))
     .map((module) => path.relative(root, module.filePath).replaceAll('\\', '/'))
 }
 
@@ -1133,6 +1187,16 @@ async function visitModule(context) {
     if (!externalSet.has(specifier) && specifier.startsWith('.')) {
       throw new Error(`RUV1801 cannot resolve '${specifier}' from ${filePath || sourcefile}`)
     }
+
+    if (!resolved && !externalSet.has(specifier)) {
+      const message = unresolvedBareSpecifierMessage(specifier, {
+        baseDir,
+        root,
+        bundleTarget,
+        importer: filePath || sourcefile,
+      })
+      if (message) throw new Error(message)
+    }
   }
 
   return module
@@ -1487,10 +1551,20 @@ async function classifyModuleSource(
  * answers it.
  *
  * Ordered most specific first: a configured alias wins outright, then a
- * `tsconfig` path mapping, then a relative file, then `node_modules` — and that
- * last step only when the output is actually meant to carry its dependencies.
+ * `tsconfig` mapping (`paths`, then `baseUrl`), then a relative file, then
+ * `node_modules` — and that last step only when the output is actually meant to
+ * carry its dependencies.
+ *
+ * There is deliberately no project-root step for a bare specifier: a bare
+ * specifier names a package, the way Node and `tsc` both read it, and `baseUrl`
+ * is how a project asks for root-relative resolution out loud. `resolver.rs`
+ * used to probe the project root between `tsconfig` and `node_modules` and this
+ * graph never did, so one `import 'utils'` took `<root>/utils/index.ts` into the
+ * client bundle while the dev server and every prerender worker took
+ * `node_modules/utils`. The order both hosts hold is the `resolutionOrder`
+ * section of `tests/fixtures/module-resolution-conformance.json`.
  */
-function resolveSpecifierPath(
+export function resolveSpecifierPath(
   specifier,
   resolvedAlias,
   {
@@ -1513,6 +1587,86 @@ function resolveSpecifierPath(
     return resolvePackage(baseDir, specifier, bundleTarget, root)
   }
   return null
+}
+
+/**
+ * Names directly under the project root, cached against the directory's mtime.
+ *
+ * `unresolvedBareSpecifierMessage` is asked about every bare specifier a build
+ * leaves external — for a server bundle that is every package it imports — and
+ * the file probe behind it costs some thirty `stat` calls. One `readdir`,
+ * revalidated by one `stat`, answers "could the project root hold this at all?"
+ * for all of them, so the probe only runs on the handful that could.
+ */
+const projectRootListings = new Map()
+
+function projectRootNames(root) {
+  try {
+    const mtimeMs = statSync(root).mtimeMs
+    const cached = projectRootListings.get(root)
+    if (cached && cached.mtimeMs === mtimeMs) return cached.names
+    const names = readdirSync(root)
+    projectRootListings.set(root, { mtimeMs, names })
+    return names
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The project file a bare specifier would have named, or null.
+ *
+ * Compared without ASCII case, because `existsSync` answers that way on Windows
+ * and on default macOS: the Rust half probes the filesystem directly and would
+ * find `Utils/index.ts` for `utils` there, and a diagnostic that fires on one
+ * host and not the other is the divergence this whole section exists to close.
+ */
+function projectRootShadow(root, specifier) {
+  const first = specifier.split('/')[0]
+  // A scheme (`node:fs`) or a scope (`@ruvyxa/react`) never names a file at the
+  // project root, and on Windows `node:fs` is not even a legal path.
+  if (!first || first.startsWith('@') || first.includes(':')) return null
+  const names = projectRootNames(root)
+  if (!names) return null
+  const stem = `${first}.`
+  const plausible = names.some(
+    (name) =>
+      equalIgnoringAsciiCase(name, first) ||
+      equalIgnoringAsciiCase(name.slice(0, stem.length), stem),
+  )
+  if (!plausible) return null
+  return probeFileCandidate(path.resolve(root, specifier))
+}
+
+/**
+ * RUV1808: a bare specifier nothing answered, with a project file behind it.
+ *
+ * Removing the project-root probe from `resolver.rs` would otherwise have been
+ * a *silent* change for any project that relied on it — the specifier becomes an
+ * unresolved external, which no host reports and every host fails at run time.
+ * So the drop is loud. The message names the file because the author wrote a
+ * package specifier and meant a project file, and the two ways to say that — a
+ * relative import, or `baseUrl`/`paths` — are both understood by `tsc`, by the
+ * editor, and by both module graphs. The `crates/ruvyxa_bundler/src/resolver.rs`
+ * half is `project_root_shadow_message`.
+ */
+export function unresolvedBareSpecifierMessage(
+  specifier,
+  { baseDir, root, bundleTarget, importer },
+) {
+  if (specifier.startsWith('.') || path.isAbsolute(specifier)) return null
+  const shadow = projectRootShadow(root, specifier)
+  if (!shadow) return null
+  // Only when `node_modules` has nothing either. A server bundle never walks
+  // packages, so an installed dependency reaches here unresolved and must not
+  // be mistaken for a project file the author spelled as a package.
+  if (resolvePackage(baseDir, specifier, bundleTarget, root)) return null
+  return (
+    `RUV1808 import '${specifier}' from ${importer} names no package, but ${shadow} exists. ` +
+    'A bare specifier names a package here, the way Node and TypeScript both read it. Import the ' +
+    'project file relatively, or declare `compilerOptions.baseUrl` (or a `paths` entry) in ' +
+    'tsconfig.json so the type checker and the bundler answer it the same way.'
+  )
 }
 
 /**
@@ -1685,14 +1839,29 @@ function linkModules(
       push(`  const __exports = ${module.id};`)
     }
     const ownsModule = writeModuleScope(push, rewritten.code, nodeEnv)
+    // The body is indented because it sits inside the wrapper, but a line that
+    // *begins* inside a template literal or a `\`-continued string is text the
+    // module means to keep: two spaces in front of it land in the string, not
+    // in the source. Harmless for CSS-in-JS; wrong for YAML, a `<pre>` block,
+    // a Markdown fence, or anything else indentation-significant. Both linkers
+    // corrupted it identically, so the two halves agreed with each other and
+    // disagreed with plain ESM — nothing ever surfaced as a mismatch.
+    //
+    // Asked of the one JavaScript scanner, per line start, which is the mirror
+    // of `ModuleAst::is_code_offset` gating the same two spaces in
+    // `crates/ruvyxa_bundler/src/linker.rs`.
+    const codeIndex = createCodeIndex(rewritten.code)
     const codeLines = rewritten.code.split('\n')
+    let lineStart = 0
     for (let index = 0; index < codeLines.length; index++) {
       const line = codeLines[index]
       const originalLine = rewritten.lineMap[index]
+      const indent = line !== '' && codeIndex.isCode(lineStart)
       push(
-        line ? `  ${line}` : '',
+        indent ? `  ${line}` : line,
         sourceIndex !== null && originalLine !== null ? { sourceIndex, originalLine } : null,
       )
+      lineStart += line.length + 1
     }
     // `module.exports` unless the module declared its own `module`, in which
     // case that name means something else entirely and only `__exports` holds
@@ -2087,27 +2256,45 @@ function writeRewrittenImport(statements, sourceLine) {
 /**
  * Rewrite `export default <expression>` into an assignment.
  *
- * The expression is collected until it balances, because a default export is
- * routinely an object or a call that spans lines, and half of one assigned to
- * `__exports.default` does not parse.
+ * The expression is collected until it is complete, because a default export is
+ * routinely an object, a call, or a template that spans lines, and half of one
+ * assigned to `__exports.default` either does not parse or — the expensive case
+ * — parses and means something else.
+ *
+ * The collected lines are joined *raw*, exactly as written. They used to be
+ * trimmed, which is invisible for an object literal and destructive for a
+ * template: the indentation of a continuation line inside a template literal is
+ * part of the string the module exports, and trimming rewrote it. For the same
+ * reason the statement is emitted across its own lines with the `;` after the
+ * real end of the expression, rather than folded onto the first one.
  */
 function writeRewrittenDefaultExport(statements, sourceLine) {
-  const { module, sourceLines, codeLines, lines, lineMap } = statements
-  const collectedRaw = [sourceLines[sourceLine].trim()]
-  const collectedCode = [(codeLines[sourceLine] ?? '').trim()]
+  const { module, sourceLines, lines, lineMap } = statements
+  const collected = [sourceLines[sourceLine]]
   let endLine = sourceLine
-  while (!isBalancedDefaultExpression(collectedCode) && endLine + 1 < sourceLines.length) {
+  while (!isCompleteDefaultExpression(collected) && endLine + 1 < sourceLines.length) {
     endLine += 1
-    collectedRaw.push(sourceLines[endLine].trim())
-    collectedCode.push((codeLines[endLine] ?? '').trim())
+    collected.push(sourceLines[endLine])
   }
 
-  const expression = collectedRaw
+  // Only the keyword and a trailing `;` are removed. Everything between them is
+  // the author's text, and inside a template literal every byte of it is a byte
+  // of the exported string.
+  const expression = collected
     .join('\n')
-    .replace(/^export\s+default\s+/, '')
-    .replace(/;$/, '')
-  lines.push(`__exports.default = ${rewriteDynamicImports(expression, module)};`)
-  lineMap.push(module.transformLineMap?.[sourceLine] ?? sourceLine)
+    .replace(/^\s*export\s+default\s+/, '')
+    .replace(/;\s*$/, '')
+  const statement = `__exports.default = ${rewriteDynamicImports(expression, module)};`
+  // Pushed one physical line at a time so `lineMap` keeps one entry per emitted
+  // line. A multi-line statement pushed as a single entry shifts the origin of
+  // every line after it in the module, which is how a stack trace comes to name
+  // the wrong source line.
+  const statementLines = statement.split('\n')
+  for (let index = 0; index < statementLines.length; index += 1) {
+    const origin = Math.min(sourceLine + index, endLine)
+    lines.push(statementLines[index])
+    lineMap.push(module.transformLineMap?.[origin] ?? origin)
+  }
   return endLine
 }
 
@@ -2315,12 +2502,43 @@ function isCompleteClauseStatement(text, codeLines, endLine) {
   return true
 }
 
-function isBalancedDefaultExpression(lines) {
-  const expression = lines.join('\n').replace(/^export\s+default\s+/, '')
+/**
+ * An identifier appended after collected text to ask the mask where it ends.
+ *
+ * `maskNonCode` blanks a literal's delimiters along with its text, so a closed
+ * template and an open one both end in blanks and the mask alone cannot be
+ * asked which it was. A probe past the end can: it survives as code when every
+ * literal, template, and block comment the text opened has been closed, and is
+ * blanked when one is still open. The name is deliberately unlikely so that a
+ * source ending mid-token cannot join with it into something meaningful.
+ */
+const LITERAL_PROBE = '\n__ruvyxaLiteralProbe'
+
+/**
+ * Whether a collected `export default` expression needs no further line.
+ *
+ * Completeness used to be bracket depth alone, which a template literal does
+ * not contribute to: an open template read as balanced, the collector stopped
+ * on the statement's first line, and the `;` this rewriter appends landed
+ * *inside the exported string*. The module still parsed — the lines that
+ * followed were swallowed by the unterminated backtick — so a default-exported
+ * prompt, SQL statement, or CSS block shipped a character its author never
+ * wrote, with no diagnostic.
+ *
+ * So the question is asked of the mask, which is this file's only answer to
+ * where a literal ends: brackets are counted over masked text, where a brace
+ * inside a string cannot close anything, and a literal left open keeps the
+ * statement incomplete. One mask serves both halves.
+ */
+function isCompleteDefaultExpression(rawLines) {
+  const text = rawLines.join('\n')
+  const masked = maskNonCode(text + LITERAL_PROBE)
+  if (!masked.endsWith(LITERAL_PROBE)) return false
   let depth = 0
-  for (const char of expression) {
-    if (char === '(' || char === '{' || char === '[') depth += 1
-    else if (char === ')' || char === '}' || char === ']') depth -= 1
+  for (let index = 0; index < text.length; index += 1) {
+    const character = masked[index]
+    if (character === '(' || character === '{' || character === '[') depth += 1
+    else if (character === ')' || character === '}' || character === ']') depth -= 1
   }
   return depth <= 0
 }
@@ -2823,10 +3041,54 @@ function nodeModulesCandidates(importerDir, projectRoot) {
   return candidates
 }
 
+/**
+ * Whether `resolved` really lives inside `pkgDir`, symlinks included.
+ *
+ * `isSafePackageRelativePath` rules out every *lexical* escape -- `..`, an
+ * absolute path, a backslash -- and that is where both resolvers stopped. A
+ * symlink is not lexical: `./dist/x.js` inside the package can point anywhere on
+ * the disk, and `path.join` plus `existsSync` accept it. The Rust mirrors take
+ * the canonicalization they need for the existence probe anyway and reuse it for
+ * containment (`candidate.starts_with(package_root)`), so the two module graphs
+ * answered the same import differently -- which is the failure this repository's
+ * resolution rules exist to prevent.
+ *
+ * The returned path is deliberately *not* changed to the real one. Rust returns
+ * the canonical path and this graph the lexical one, so under pnpm the same
+ * module is named by its symlink path here and its store path there; correcting
+ * that moves `module.filePath`, and with it `isProjectLocal`, `projectInputPaths`,
+ * `readFiles`, and every client-reference id measured from a package file. The
+ * containment check is the half that closes the hole, and it goes first.
+ *
+ * A path that cannot be realpath'd falls back to the lexical comparison rather
+ * than being refused, matching `realImporterDir` above: the file's existence has
+ * already been established by the probe, so a failure here is a filesystem
+ * fault, not an escape.
+ */
+function containedInPackage(pkgDir, resolved) {
+  if (resolved === null) return null
+  const real = (value) => {
+    try {
+      return realpathSync(value)
+    } catch {
+      return path.resolve(value)
+    }
+  }
+  const root = real(pkgDir)
+  const candidate = real(resolved)
+  // `path.relative` rather than a string prefix: `pkg-extra` must not count as
+  // inside `pkg`, which a `startsWith` on the directory name would accept.
+  const inside = path.relative(root, candidate)
+  if (inside === '' || inside.startsWith('..') || path.isAbsolute(inside)) return null
+  return resolved
+}
+
 /** Probe a package-relative path, refusing anything that escapes the package. */
-function resolvePackageRelative(pkgDir, relative) {
+// Exported for `tests/packages/ruvyxa/package-containment.test.mjs`, which
+// replays the symlink-escape case against this resolver and its Rust mirror.
+export function resolvePackageRelative(pkgDir, relative) {
   if (!isSafePackageRelativePath(relative)) return null
-  return probeFileCandidate(path.join(pkgDir, relative))
+  return containedInPackage(pkgDir, probeFileCandidate(path.join(pkgDir, relative)))
 }
 
 /** An `exports` target names an exact file: no extension probing applies. */
@@ -2835,7 +3097,8 @@ function resolveExportTarget(pkgDir, target) {
   const relative = target.slice('./'.length)
   if (!isSafePackageRelativePath(relative)) return null
   const candidate = path.join(pkgDir, relative)
-  return existsSync(candidate) && !isDirectory(candidate) ? path.resolve(candidate) : null
+  const resolved = existsSync(candidate) && !isDirectory(candidate) ? path.resolve(candidate) : null
+  return containedInPackage(pkgDir, resolved)
 }
 
 /**
@@ -2956,14 +3219,57 @@ function isDirectory(file) {
   }
 }
 
+/**
+ * Whether a file is project *source*, the question `is_project_local` in
+ * `crates/ruvyxa_bundler/src/resolver.rs` answers: under the root, and not
+ * under `node_modules`.
+ *
+ * The exclusion is the half this graph was missing. It decides two things at
+ * once — which modules a bundle walks, and which files count as application
+ * inputs — and without it a browser bundle, which inlines its packages because
+ * a browser has no resolver, reported every file of every dependency as project
+ * input: thousands of `node_modules` paths handed to the dev-server watcher,
+ * and megabytes of dependency source re-hashed into `dependencyHash` on every
+ * rebuild. Nothing that must invalidate rests on it: `PROJECT_MANIFEST_FILES`
+ * still feeds the fingerprint, and bundle reuse is keyed on `readFiles`, which
+ * is deliberately wider and still carries the dependency.
+ */
 function isProjectLocal(root, file) {
   const relative = path.relative(root, file)
-  return relative && !relative.startsWith('..') && !path.isAbsolute(relative)
+  return Boolean(
+    relative &&
+    !relative.startsWith('..') &&
+    !path.isAbsolute(relative) &&
+    !startsWithNodeModules(relative),
+  )
 }
 
+/**
+ * Whether a path is under the project root at all, `node_modules` included.
+ *
+ * Not the same question as [`isProjectLocal`], and the two must stay apart:
+ * this one bounds the upward walk in `findMdxComponentsFile`, whose Rust half
+ * `resolve_mdx_components_file_with_root` bounds it with a plain
+ * `starts_with(root)` and no exclusion. It also has to answer true for the root
+ * itself, which is a directory rather than source and so is not project-local.
+ */
 function isWithinProject(root, file) {
   const relative = path.relative(root, file)
   return !relative.startsWith('..') && !path.isAbsolute(relative)
+}
+
+/**
+ * Whether a project-relative path's first segment is `node_modules`.
+ *
+ * `Path::starts_with` in Rust compares whole components, so only the first
+ * segment counts — `app/node_modules_notes.ts` is project source and so is
+ * `app/node_modules/x` under a project that keeps a directory by that name
+ * below the root. `path.relative` returns `\`-separated paths on Windows, so
+ * the split has to accept both separators; testing for a `node_modules/`
+ * prefix would have excluded nothing on the host where most of this is written.
+ */
+function startsWithNodeModules(relative) {
+  return relative.split(/[\\/]/)[0] === 'node_modules'
 }
 
 function isAssetSpecifier(specifier) {
@@ -3744,92 +4050,101 @@ function contentExport(compiled, name, value) {
   return hasNamedExport(compiled, name) ? '' : `export const ${name} = ${value};`
 }
 
-function hasNamedExport(source, name) {
-  const tokens = javascriptTokens(source)
-  for (let index = 0; index < tokens.length; index += 1) {
-    if (tokens[index] !== 'export') continue
-    let cursor = index + 1
-    if (tokens[cursor] === 'async') cursor += 1
-    if (['const', 'let', 'var'].includes(tokens[cursor]) && tokens[cursor + 1] === name) return true
-    if (['function', 'class'].includes(tokens[cursor])) {
-      cursor += 1
-      if (tokens[cursor] === '*') cursor += 1
-      if (tokens[cursor] === name) return true
-    }
-    if (tokens[cursor] === '{' && exportListBinds(tokens, cursor + 1, name)) return true
-  }
-  return false
-}
+/**
+ * A declaration export, read from just past the `export` keyword.
+ *
+ * `export function * gen` puts the star between the keyword and the name, so it
+ * cannot be folded into the keyword alternatives. Mirrors the prefix list in
+ * `ast::has_named_runtime_export`.
+ */
+const DECLARED_EXPORT_NAME =
+  /^\s+(?:async\s+)?(?:function\s*\*\s*|function\s+|class\s+|const\s+|let\s+|var\s+)([\p{ID_Start}$_][\p{ID_Continue}$]*)/u
 
 /**
- * Whether an `export { ... }` list publishes `name`.
+ * An `export { … }` clause, read from just past the `export` keyword.
  *
- * `a as b` publishes `b`, so the name after `as` is the one that counts. A bare
- * `type` token is dropped rather than treated as an identifier: `export { type
- * Foo, bar }` publishes only `bar`, and counting `type` would shift every
- * specifier in the list by one.
+ * `export type { … }` is erased at compile time and leaves no runtime binding,
+ * so the `type` keyword deliberately fails this match. `}` inside a specifier's
+ * string name is blanked by the mask, so the body cannot end early.
  */
-function exportListBinds(tokens, start, name) {
-  let specifier = []
-  for (let cursor = start; cursor < tokens.length; cursor += 1) {
-    const token = tokens[cursor]
-    if (token !== ',' && token !== '}') {
-      if (token !== 'type') specifier.push(token)
-      continue
-    }
-    const asIndex = specifier.indexOf('as')
-    const exported = asIndex >= 0 ? specifier[asIndex + 1] : specifier[0]
-    if (exported === name) return true
-    specifier = []
-    if (token === '}') return false
+const EXPORT_CLAUSE = /^\s*\{([^}]*)\}/u
+
+/** Identifier runs inside an export clause. */
+const CLAUSE_WORDS = /[\p{ID_Start}$_][\p{ID_Continue}$]*/gu
+
+/**
+ * Whether `source` already publishes a runtime export named `name`.
+ *
+ * The content compiler appends `frontmatter`, `meta`, `headings` and
+ * `contentFormat` only when the page did not export them itself, so this
+ * decides whether a generated declaration would collide with the author's.
+ *
+ * It runs over `findInCode`, which is the shared scanner. The private tokenizer
+ * this replaced — and its character-for-character twin in
+ * `crates/ruvyxa_bundler/src/content.rs` — knew line comments, block comments
+ * and the three quote characters but had no regular-expression branch, so a
+ * page whose export block wrote `/['"]/` above its own `export const
+ * frontmatter` opened a string skip that ran to the next quote anywhere in the
+ * file. Everything past the regex stopped being seen as code, the generated
+ * export was appended beside the author's, and the module failed to parse with
+ * a declaration nobody wrote. The reverse was reachable too: a desync that made
+ * an unrelated `export` visible dropped the real frontmatter and headings
+ * silently.
+ *
+ * Both the declaration form and the clause form count. `ast::
+ * has_named_runtime_export` ignores re-export forms on purpose, because a route
+ * capability must not be advertised across an unproven graph edge; that is not
+ * this question. An appended `export const NAME` collides with
+ * `export { x as NAME } from './y'` exactly as hard as with a local one, which
+ * is why `ast::has_named_clause_export` sits beside it on the Rust side.
+ *
+ * The shared cases are in `tests/fixtures/content-conformance.json`.
+ */
+function hasNamedExport(source, name) {
+  const masked = maskNonCode(source)
+  for (const offset of findInCode(source, 'export')) {
+    if (!isIdentifierBoundary(source, offset, 'export'.length)) continue
+    const after = offset + 'export'.length
+    // The declaration form reads the raw source, because its Rust counterpart
+    // reads the text after the keyword with `trim_start` — whitespace only, so
+    // a comment between the keyword and the declaration is not skipped there
+    // and must not be skipped here. The clause form reads the mask, because
+    // `named_clause_exports` skips comments and string specifier names the same
+    // way the mask blanks them.
+    if (DECLARED_EXPORT_NAME.exec(source.slice(after))?.[1] === name) return true
+    const clause = EXPORT_CLAUSE.exec(masked.slice(after))
+    if (clause && exportClauseBinds(clause[1], name)) return true
   }
   return false
 }
 
-function javascriptTokens(source) {
-  const tokens = []
-  let index = 0
-  while (index < source.length) {
-    const character = source[index]
-    if (/\s/u.test(character)) {
-      index += 1
-      continue
-    }
-    if (character === '/' && source[index + 1] === '/') {
-      index += 2
-      while (index < source.length && source[index] !== '\n') index += 1
-      continue
-    }
-    if (character === '/' && source[index + 1] === '*') {
-      index += 2
-      while (index + 1 < source.length && !(source[index] === '*' && source[index + 1] === '/'))
-        index += 1
-      index = Math.min(index + 2, source.length)
-      continue
-    }
-    if (character === "'" || character === '"' || character === '`') {
-      const quote = character
-      index += 1
-      while (index < source.length) {
-        if (source[index] === '\\') index += 2
-        else if (source[index] === quote) {
-          index += 1
-          break
-        } else index += 1
-      }
-      continue
-    }
-    if (/[\p{Letter}\p{Number}_$]/u.test(character)) {
-      const start = index
-      index += 1
-      while (index < source.length && /[\p{Letter}\p{Number}_$]/u.test(source[index])) index += 1
-      tokens.push(source.slice(start, index))
-      continue
-    }
-    tokens.push(character)
-    index += 1
+/** Whether neither neighbour of `source[start, start + length)` continues an identifier. */
+function isIdentifierBoundary(source, start, length) {
+  return !(
+    (start > 0 && IDENTIFIER_CHARACTER.test(source[start - 1])) ||
+    (start + length < source.length && IDENTIFIER_CHARACTER.test(source[start + length]))
+  )
+}
+
+const IDENTIFIER_CHARACTER = /[\p{ID_Continue}$]/u
+
+/**
+ * Whether an `export { ... }` clause publishes `name`.
+ *
+ * `a as b` publishes `b`, so the name after `as` is the one that counts. A
+ * leading `type` is dropped rather than treated as an identifier: `export {
+ * type Foo, bar }` publishes `Foo` and `bar`, and counting `type` would shift
+ * every specifier in the list by one. Mirrors `named_clause_exports` in
+ * `crates/ruvyxa_bundler/src/ast.rs`.
+ */
+function exportClauseBinds(clause, name) {
+  for (const specifier of clause.split(',')) {
+    const words = specifier.match(CLAUSE_WORDS) ?? []
+    const named = words[0] === 'type' && words.length > 1 ? words.slice(1) : words
+    const asIndex = named.indexOf('as')
+    if ((asIndex === -1 ? named[0] : named[asIndex + 1]) === name) return true
   }
-  return tokens
+  return false
 }
 
 function splitContentFrontmatter(source) {
@@ -4257,7 +4572,7 @@ function transformModuleSource(module) {
   // refuses the same output in `compiler::reject_runtime_helpers`.
   const helpers = runtimeHelperImports(result.code)
   if (helpers.length > 0) {
-    const named = [...new Set(helpers)].sort(compareCodeUnits).join(', ')
+    const named = [...new Set(helpers)].sort(compareCodePoints).join(', ')
     throw new Error(
       `RUV1802 build.target \`${esTarget}\` needs the runtime helpers ${named} for ${filename}, and Ruvyxa ships no helper runtime — raise build.target (ordinary application code compiles helper-free at es2022 and above) or remove the syntax that needs downlevelling`,
     )
@@ -4304,7 +4619,7 @@ function substitutePublicEnv(code) {
 /** Every `RUVYXA_PUBLIC_*` value this process can see, in name order. */
 function publicEnvValues() {
   const values = {}
-  for (const name of Object.keys(process.env).sort(compareCodeUnits)) {
+  for (const name of Object.keys(process.env).sort(compareCodePoints)) {
     if (name.startsWith('RUVYXA_PUBLIC_')) values[name] = process.env[name] ?? ''
   }
   return values
@@ -4449,8 +4764,17 @@ function isServerOnlySpecifier(specifier) {
  * a name is a value, and masking blanks values. A read inside a template
  * interpolation still counts — the mask treats interpolations as code — while
  * one inside a string, comment, or regex literal does not.
+ *
+ * Exported for the `extraction` section of
+ * `tests/fixtures/env-policy-conformance.json`, which the Rust half replays
+ * through `private_env_reads`. Classification alone was fixture-held and
+ * extraction was not, and extraction is where the two graphs had drifted.
+ *
+ * @param {string} source Module source, before transformation.
+ * @returns {string[]} Private names, in source order.
+ * @public
  */
-function privateEnvReads(source) {
+export function privateEnvReads(source) {
   const names = []
   for (const offset of findInCode(source, 'process.env')) {
     if (!isEnvReadBoundary(source, offset)) continue
@@ -4470,7 +4794,7 @@ function parsePrivateEnvName(source, start) {
   while (/\s/.test(source[index] ?? '')) index += 1
   if (source[index] === '.') {
     index += 1
-    const match = /^[A-Z_][A-Z0-9_]*/.exec(source.slice(index))
+    const match = ENV_NAME_PATTERN.exec(source.slice(index))
     if (!match) return null
     return { name: match[0], end: index + match[0].length }
   }
@@ -4480,17 +4804,13 @@ function parsePrivateEnvName(source, start) {
   const quote = source[index]
   if (quote !== '"' && quote !== "'") return null
   index += 1
-  const match = /^[A-Z_][A-Z0-9_]*/.exec(source.slice(index))
+  const match = ENV_NAME_PATTERN.exec(source.slice(index))
   if (!match) return null
   index += match[0].length
   if (source[index] !== quote) return null
   index += 1
   while (/\s/.test(source[index] ?? '')) index += 1
   return source[index] === ']' ? { name: match[0], end: index + 1 } : null
-}
-
-function pushIfExists(collection, file) {
-  if (existsSync(file)) collection.push(file)
 }
 
 function preferExisting(...files) {

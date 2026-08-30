@@ -21,6 +21,7 @@ use crate::layout::{
     RULE_END_COLUMN, current_timestamp, format_duration, path_text, print_field, rule_line,
 };
 use crate::mascot::{MASCOT, badge, glyphs, wordmark};
+use crate::stream::{print_blank_line, print_line};
 use crate::theme::{brand, capabilities, dim};
 
 /// The rule under a header runs from the text indent to the column every other
@@ -35,11 +36,11 @@ const HEADER_RULE_WIDTH: usize = RULE_END_COLUMN - 2;
 /// differently.
 pub fn print_header(title: impl AsRef<str>) {
     let title = title.as_ref();
-    println!();
-    println!("  {MASCOT} {}", BRAND.paint(wordmark(title)));
-    println!("  {}", rule_line(HEADER_RULE_WIDTH));
-    println!("{}", badge_line(title));
-    println!();
+    print_blank_line();
+    print_line(&format!("  {MASCOT} {}", BRAND.paint(wordmark(title))));
+    print_line(&format!("  {}", rule_line(HEADER_RULE_WIDTH)));
+    print_line(&badge_line(title));
+    print_blank_line();
     print_field("time", dim(current_timestamp()));
 }
 
@@ -74,8 +75,12 @@ pub fn print_success_banner_at(message: impl AsRef<str>, path: Option<&Path>, du
         Some(path) => format!(" {}", path_text(path)),
         None => String::new(),
     };
-    println!(
-        "\n  {} {} {}{} {}\n",
+    // The blank lines above and below are printed rather than written into the
+    // format string: a line handed to `print_line` is one line, and the filter
+    // it runs replaces a control character wherever it finds one.
+    print_blank_line();
+    print_line(&format!(
+        "  {} {} {}{} {}",
         // The mascot is product identity, which is what the `brand` role is
         // for. Painting it with the wordmark ramp instead would spend a
         // gradient on a glyph that renders in its own colours anyway.
@@ -87,5 +92,6 @@ pub fn print_success_banner_at(message: impl AsRef<str>, path: Option<&Path>, du
         // twenty seconds succeeded, and colouring its total as a warning would
         // make every honest result look like a complaint.
         dim(format!("· {}", format_duration(duration)))
-    );
+    ));
+    print_blank_line();
 }

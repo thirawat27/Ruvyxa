@@ -56,6 +56,19 @@ const DEPLOY_MANIFEST_KEY = 'deploy'
  */
 const NOT_FOUND_DOCUMENT_FILE = '404.html'
 
+/**
+ * The client build report, at the build root rather than inside `client/`.
+ *
+ * `client/` is public by contract, and this file is a build report: absolute
+ * source paths from the build machine, the module graph of every shared chunk
+ * and route, the bundler cache location, the plugin list, and per-route byte
+ * counts. It sat beside the lean `route-manifest.json` that exists so none of
+ * that has to ship, and was published at `/__ruvyxa/client/manifest.json` by
+ * every host. Named `CLIENT_BUILD_REPORT_FILE` in `crates/ruvyxa_cli/src/build.rs`,
+ * which writes it.
+ */
+const CLIENT_BUILD_REPORT_FILE = 'client-report.json'
+
 /** The deployment-output contract version this runtime understands. */
 const DEPLOY_MANIFEST_VERSION = 1
 
@@ -785,9 +798,16 @@ function artifactDestination(buildDir, artifactPath) {
   }
   const topLevel = path.relative(buildDir, destination).split(path.sep)[0]
   if (
-    ['assets', 'build.json', 'cache', 'client', 'manifest.json', 'prerender', 'server'].includes(
-      topLevel,
-    )
+    [
+      'assets',
+      'build.json',
+      'cache',
+      'client',
+      CLIENT_BUILD_REPORT_FILE,
+      'manifest.json',
+      'prerender',
+      'server',
+    ].includes(topLevel)
   ) {
     throw new Error(
       `RUV2200 adapter artifact path overlaps protected build output: ${artifactPath}. Use a directory such as deploy/<platform> or static.`,
@@ -971,15 +991,45 @@ async function documentHeadDefaults(buildDir) {
   }
 }
 
+/**
+ * Each route's browser assets, read from the client build report.
+ *
+ * The report lives at the build root as `client-report.json`, not inside
+ * `client/`. That directory is public by contract — the whole of it is copied
+ * to the CDN by `materializeStaticSite` below, and the native server maps every
+ * flat `/__ruvyxa/client/<name>` request into it — while this file carries the
+ * build machine's absolute source paths, the module graph of every chunk and
+ * route, the bundler cache location, and per-route byte counts. It is read
+ * here, frozen into the emitted registry, and never shipped.
+ *
+ * A missing report is an empty map, and only a missing one: a `--server-only`
+ * artifact and a project whose routes ship no browser bundle both legitimately
+ * leave none. Every other failure throws, because an empty map makes the
+ * registry emit markup and nothing else — no bootstrap block, no module
+ * preloads, no `<script type="module">` — so a deployment built from a damaged
+ * report renders every page correctly and hydrates none of them, on a build
+ * that reported success. `load_prerender_client_assets` in
+ * `crates/ruvyxa_cli/src/prerender.rs` is the same rule for the pre-rendered
+ * half of the same build.
+ */
 async function loadClientAssets(buildDir) {
+  const reportPath = path.join(buildDir, CLIENT_BUILD_REPORT_FILE)
   let manifest
   try {
-    manifest = JSON.parse(await readFile(path.join(buildDir, 'client', 'manifest.json'), 'utf8'))
-  } catch {
-    return new Map()
+    manifest = JSON.parse(await readFile(reportPath, 'utf8'))
+  } catch (error) {
+    if (error?.code === 'ENOENT') return new Map()
+    throw new Error(
+      `${reportPath} is present but is not a readable client build report (${error?.message ?? error}); delete it and rebuild rather than emitting a registry with no client script.`,
+    )
+  }
+  if (!Array.isArray(manifest?.routes)) {
+    throw new Error(
+      `${reportPath} is present but names no routes table; delete it and rebuild rather than emitting a registry with no client script.`,
+    )
   }
   const assets = new Map()
-  for (const route of Array.isArray(manifest?.routes) ? manifest.routes : []) {
+  for (const route of manifest.routes) {
     if (typeof route?.path !== 'string' || typeof route?.src !== 'string') continue
     assets.set(route.path, {
       src: route.src,

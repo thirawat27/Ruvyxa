@@ -56,7 +56,49 @@
     "package entry. A dot inside a basename is ordinary, and Node appends.",
     "",
     "`files` are created empty under a temporary directory, `specifier` is",
-    "resolved against it, and `expect` is the file that must answer or null."
+    "resolved against it, and `expect` is the file that must answer or null.",
+    "",
+    "`resolutionOrder` is the step before either of those: which *source* a",
+    "non-relative specifier is looked up in, and in what order. Every other",
+    "section here describes a rule that applies once a package has been chosen;",
+    "nothing described the walk that chooses it, and the two hosts had drifted",
+    "apart exactly there. resolver.rs probed the project root with the bare",
+    "specifier between `tsconfig` and `node_modules`, so `import 'utils'` took",
+    "<root>/utils/index.ts for the client bundle while compiler.mjs — which has",
+    "no such step — took node_modules/utils for the dev server and every",
+    "prerender worker. One import, two files, no diagnostic from either host.",
+    "",
+    "The order both hosts now hold is the one Node and `tsc` already agree on:",
+    "`tsconfig` `paths`, then `tsconfig` `baseUrl`, then `node_modules`. There",
+    "is no project-root step. A bare specifier names a package; a project file",
+    "is reached with a relative import, or by declaring `baseUrl` — which is",
+    "root-relative resolution asked for out loud, and which both hosts honour.",
+    "",
+    "Deleting the step could have broken a project that relied on it silently:",
+    "the specifier would become an unresolved external, which no host reports",
+    "and every host fails at run time. So the drop is loud instead. When a bare",
+    "specifier resolves to nothing anywhere and a file at the project root",
+    "would have answered it, both hosts refuse the build with RUV1808 naming",
+    "that file. Note that `tsc` was already refusing these imports; the probe",
+    "made the bundler disagree with the type checker, not just with itself.",
+    "",
+    "A case with `absolute: true` has the temporary project root prefixed onto",
+    "its specifier, with forward slashes — the form a generated entry emits.",
+    "That case is here because on Windows such a path carries a drive prefix",
+    "and no leading slash, so resolver.rs did not recognise it as absolute and",
+    "only the project-root probe was answering it. Removing the probe with no",
+    "case for this shape broke every generated entry on Windows at once. It",
+    "sits in a project with no tsconfig deliberately: a `baseUrl` joined with",
+    "an absolute path yields that path, so a project that has one answers this",
+    "specifier whether or not the branch above recognises it.",
+    "",
+    "That case states the rule; it is not by itself a gate for the Windows bug.",
+    "With the drive-prefix branch removed it still passes, because the package",
+    "walk splits `C:/x/app/page.ts` into a package named `C:` and joins the",
+    "rest onto it, and Windows reads `C:` plus a relative path as drive-",
+    "relative — which lands back on the same file whenever the project is on",
+    "drive C. `cargo run -p ruvyxa_cli -- build --root examples/demo` is what",
+    "actually fails, immediately and on the first route."
   ],
   "exports": [
     {
@@ -548,6 +590,104 @@
       "files": ["other.ts"],
       "specifier": "./missing",
       "expect": null
+    }
+  ],
+  "resolutionOrder": [
+    {
+      "name": "a bare specifier names a package, never a project directory",
+      "importer": "app",
+      "files": {
+        "tsconfig.json": "{\"compilerOptions\":{\"paths\":{\"shadowed\":[\"./src/alias-target.ts\"]}}}",
+        "app/page.ts": "export default function Page() {}\n",
+        "src/alias-target.ts": "export const source = 'alias'\n",
+        "utils/index.ts": "export const source = 'project'\n",
+        "helpers.ts": "export const source = 'project'\n",
+        "components/Button.tsx": "export const Button = null\n",
+        "shadowed/index.ts": "export const source = 'project'\n",
+        "node_modules/utils/package.json": "{\"name\":\"utils\",\"version\":\"1.0.0\",\"main\":\"./index.js\"}",
+        "node_modules/utils/index.js": "export const source = 'package'\n",
+        "node_modules/shadowed/package.json": "{\"name\":\"shadowed\",\"version\":\"1.0.0\",\"main\":\"./index.js\"}",
+        "node_modules/shadowed/index.js": "export const source = 'package'\n",
+        "node_modules/installed/package.json": "{\"name\":\"installed\",\"version\":\"1.0.0\",\"main\":\"./index.js\"}",
+        "node_modules/installed/index.js": "export const source = 'package'\n"
+      },
+      "cases": [
+        {
+          "name": "an installed package wins over a project directory of the same name",
+          "specifier": "utils",
+          "expect": { "kind": "resolved", "path": "node_modules/utils/index.js" }
+        },
+        {
+          "name": "an installed package with no project directory beside it resolves",
+          "specifier": "installed",
+          "expect": { "kind": "resolved", "path": "node_modules/installed/index.js" }
+        },
+        {
+          "name": "a tsconfig paths alias wins over both the package and the directory",
+          "specifier": "shadowed",
+          "expect": { "kind": "resolved", "path": "src/alias-target.ts" }
+        },
+        {
+          "name": "a project directory no package answers is refused, not dropped",
+          "specifier": "components/Button",
+          "expect": { "kind": "diagnostic", "code": "RUV1808", "names": "Button.tsx" }
+        },
+        {
+          "name": "a project file at the root is refused the same way",
+          "specifier": "helpers",
+          "expect": { "kind": "diagnostic", "code": "RUV1808", "names": "helpers.ts" }
+        },
+        {
+          "name": "a bare specifier nothing anywhere answers stays external",
+          "specifier": "absent-everywhere",
+          "expect": { "kind": "external" }
+        }
+      ]
+    },
+    {
+      "name": "baseUrl is how a project asks for root-relative resolution",
+      "importer": "app",
+      "files": {
+        "tsconfig.json": "{\"compilerOptions\":{\"baseUrl\":\".\"}}",
+        "app/page.ts": "export default function Page() {}\n",
+        "utils/index.ts": "export const source = 'project'\n",
+        "components/Button.tsx": "export const Button = null\n",
+        "node_modules/utils/package.json": "{\"name\":\"utils\",\"version\":\"1.0.0\",\"main\":\"./index.js\"}",
+        "node_modules/utils/index.js": "export const source = 'package'\n"
+      },
+      "cases": [
+        {
+          "name": "baseUrl answers before node_modules, exactly as tsc resolves it",
+          "specifier": "utils",
+          "expect": { "kind": "resolved", "path": "utils/index.ts" }
+        },
+        {
+          "name": "baseUrl reaches a nested project file a bare specifier cannot",
+          "specifier": "components/Button",
+          "expect": { "kind": "resolved", "path": "components/Button.tsx" }
+        }
+      ]
+    },
+    {
+      "name": "a generated entry names an absolute path, with no tsconfig in the project",
+      "importer": "app",
+      "files": {
+        "app/page.ts": "export default function Page() {}\n",
+        "utils/index.ts": "export const source = 'project'\n"
+      },
+      "cases": [
+        {
+          "name": "an absolute path is answered as a path, not as a package",
+          "specifier": "app/page.ts",
+          "absolute": true,
+          "expect": { "kind": "resolved", "path": "app/page.ts" }
+        },
+        {
+          "name": "a bare specifier a project directory shadows is still refused",
+          "specifier": "utils",
+          "expect": { "kind": "diagnostic", "code": "RUV1808", "names": "index.ts" }
+        }
+      ]
     }
   ]
 }

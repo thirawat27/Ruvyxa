@@ -306,9 +306,23 @@ pub(crate) fn has_esm_statement_sharing_a_line(source: &str) -> bool {
 /// loose inside the module IIFE. Nothing said `export`, so `reject_surviving_esm`
 /// passed it, and the browser got a bundle that does not parse.
 ///
-/// Only the clause form counts. `export default {` and `export const x = {` also
-/// open a brace they do not close, and the linker handles both deliberately —
-/// re-printing those would rewrite working output for nothing.
+/// The brace does not have to be the *first* thing after the keyword. Asking
+/// that question is what let this ship broken: for `import React, {` the text
+/// after the keyword is `" React, {"`, so "is the brace first?" answered no, no
+/// re-print happened, and the build failed with `RUV1612` blaming a specifier
+/// that had resolved perfectly well. `import Default, {` is precisely what
+/// Prettier produces for a React import that outgrows the print width, so it is
+/// the most common shape of all. The question is instead whether the line opens
+/// a **clause** brace it does not close on the same line.
+///
+/// Only the clause form counts. `export default {`, `export const x = {`,
+/// `export function f() {` and `export class C {` all open a brace they do not
+/// close, and the linker spans every one of them deliberately — re-printing
+/// those would rewrite working output for nothing, and for the declaration
+/// forms it would rewrite the bytes of nearly every `.js` module in the graph.
+/// They are excluded by asking what sits between the keyword and the brace: an
+/// ESM clause allows nothing there, a default binding (`React,`), or a
+/// namespace binding (`* as ns,`), and never an `=`.
 pub(crate) fn has_esm_clause_spanning_lines(source: &str) -> bool {
     if !source.contains("import") && !source.contains("export") {
         return false;
@@ -325,11 +339,67 @@ pub(crate) fn has_esm_clause_spanning_lines(source: &str) -> bool {
         if rest.starts_with(is_identifier_char) {
             return false;
         }
-        // The clause brace is the first thing after the keyword. Anything else
-        // — `default`, `const`, `* from`, a bare specifier — is a form the
-        // linker already spans correctly.
-        rest.trim_start().starts_with('{') && !rest.contains('}')
+        // An ESM clause carries no initialiser, so an `=` on the line says this
+        // is `export const x = {` — a declaration whose body the linker spans.
+        if rest.contains('=') {
+            return false;
+        }
+        // The line has to open a brace it does not close. A clause that fits on
+        // one line balances, and the linker reads it as it always has.
+        if brace_balance(rest) <= 0 {
+            return false;
+        }
+        opens_an_esm_clause(rest)
     })
+}
+
+/// `{` minus `}` over one already-masked line.
+fn brace_balance(line: &str) -> isize {
+    line.bytes().fold(0isize, |balance, byte| match byte {
+        b'{' => balance + 1,
+        b'}' => balance - 1,
+        _ => balance,
+    })
+}
+
+/// Whether the masked text following an `import`/`export` keyword opens an ESM
+/// **clause** rather than a declaration body.
+///
+/// Everything between the keyword and the first `{` must be one of the three
+/// things the grammar allows there: nothing, a default binding followed by a
+/// comma, or a namespace binding followed by a comma. `default`, `const x =`,
+/// `function f()` and `class C` are none of those.
+fn opens_an_esm_clause(rest: &str) -> bool {
+    let Some(brace) = rest.find('{') else {
+        return false;
+    };
+    let prefix = rest[..brace].trim();
+    if prefix.is_empty() {
+        return true;
+    }
+    // A clause brace is only ever reached past a binding and its comma, which
+    // is also what keeps `export default {` and `export class C {` out.
+    let Some(binding) = prefix.strip_suffix(',') else {
+        return false;
+    };
+    let binding = binding.trim();
+    if let Some(namespace) = binding.strip_prefix('*') {
+        let Some(name) = namespace.trim_start().strip_prefix("as") else {
+            return false;
+        };
+        return name.starts_with(char::is_whitespace) && is_binding_name(name.trim());
+    }
+    is_binding_name(binding)
+}
+
+/// A single identifier, by the same alphabet the rest of this module uses —
+/// plus every non-ASCII character, so a Unicode binding name is a binding name.
+fn is_binding_name(text: &str) -> bool {
+    !text.is_empty()
+        && !text.starts_with(|character: char| character.is_ascii_digit())
+        && text
+            .chars()
+            .all(|character| !character.is_ascii() || is_identifier_char(character))
 }
 
 fn is_identifier_char(character: char) -> bool {
@@ -441,6 +511,22 @@ fn compile_module(
         // statement sharing a line, so the overwhelmingly common well-formed
         // dependency costs one scan and no parse.
         let source = expand_multi_statement_esm(&source).unwrap_or(source);
+        // Substituting the public environment is a step of *producing a
+        // compiled module*, not a step of the TypeScript transform — which is
+        // where it used to live, on the other side of this return. Everything
+        // written in plain JavaScript therefore kept `import.meta.env` verbatim:
+        // an app authored in `.js`, and every client-bundled dependency
+        // authored for Vite, because for the Client target `node_modules` is
+        // not external. `import.meta` has no `env` in a browser, so such a
+        // module threw `TypeError` as it was evaluated and killed the whole
+        // bundle. The Node graph runs every module through
+        // `transformModuleSource`, which always ends in `substitutePublicEnv`,
+        // so `ruvyxa dev` rendered the same page perfectly.
+        //
+        // A `ruvyxa:` virtual entry takes this same return, and the Node graph
+        // substitutes those too, so it is deliberately included rather than
+        // special-cased.
+        let source = substitute_public_env(&source);
         return Ok(CompiledModuleOutput {
             module: CompiledModule::new(
                 module.path.clone(),
@@ -792,18 +878,6 @@ fn reject_runtime_helpers(code: &str, es_target: EsTarget) -> std::result::Resul
 /// Specifier prefix oxc emits for every helper import it adds.
 const HELPER_RUNTIME_PREFIX: &str = "@oxc-project/runtime/helpers/";
 
-/// True when some line's first non-blank character is `@`.
-///
-/// A decorator is always the first thing on its line, so a file without such a
-/// line has nothing to strip. Answering that with a plain line scan lets the
-/// overwhelming majority of modules skip the tokenizer below entirely — they
-/// are returned byte-for-byte, and no tokenizer limitation can reach them.
-fn has_decorator_candidate(source: &str) -> bool {
-    source
-        .lines()
-        .any(|line| line.trim_start().starts_with('@'))
-}
-
 /// Strip legacy decorators while preserving source line positions.
 ///
 /// Oxc rejects legacy decorators, so they are removed before it parses. Finding
@@ -825,10 +899,18 @@ fn has_decorator_candidate(source: &str) -> bool {
 /// A removed decorator leaves behind exactly the newlines it spanned, so every
 /// later line keeps its original number.
 fn strip_decorators(source: &str) -> String {
-    // Only for callers with no plan of their own. A plain line scan settles the
-    // overwhelming majority of modules without parsing anything: a decorator is
-    // always the first thing on its line.
-    if !has_decorator_candidate(source) {
+    // Only for callers with no plan of their own, and deliberately not a
+    // placement rule. This used to ask whether some line's first non-blank
+    // character was `@` — a third statement of "where can a decorator be",
+    // written before [`ast::decorator_can_start`] widened to member positions
+    // and never levelled with it. The two paths through
+    // `strip_decorators_with_plan` then disagreed: given
+    // `class S { @log run() {} }` a caller with a plan stripped the decorator
+    // and a caller without one got the source back, so `@log` reached the
+    // emitted JavaScript through [`transform`]. A module with no `@` at all has
+    // nothing to strip whatever the rule is, which is the only thing this line
+    // now claims; everything else is the scanner's answer.
+    if !source.contains('@') {
         return source.to_string();
     }
 
@@ -847,7 +929,11 @@ fn strip_decorators_with_plan(source: &str, ast: &ModuleAst) -> String {
     let mut i = 0;
 
     while i < len {
-        if bytes[i] == b'@' && begins_decorator(bytes, i) && ast.is_code_offset(i) {
+        // The same placement rule `ast` used to decide `has_decorators`, asked
+        // of `ast` rather than restated here. A restated copy is a rule with
+        // two halves, and widening either one alone leaves the decorator in the
+        // emitted bundle — see `ast::decorator_can_start`.
+        if bytes[i] == b'@' && ast::decorator_can_start(bytes, i) && ast.is_code_offset(i) {
             let end = skip_decorator(bytes, i, ast);
             // Emit the newlines the decorator spanned and nothing else. A
             // decorator on its own line leaves the line blank; a multi-line
@@ -889,31 +975,6 @@ fn strip_shebang(source: &str) -> String {
         Some(offset) => format!("{}{}", &source[..start], &source[start + offset..]),
         None => source[..start].to_string(),
     }
-}
-
-/// Whether an `@` in a code position begins a decorator.
-///
-/// `@` is not an operator in JavaScript, so a code-position one is a decorator
-/// either way — what matters is only that it is not part of a larger token.
-/// Requiring it to start its own line was the earlier rule, and it left
-/// `class Svc { @log run() {} }` untouched: the shape a formatter picks for a
-/// short member, and the shape every minified dependency has. That decorator
-/// then reached the emitted bundle, which is plain JavaScript and has no such
-/// syntax.
-fn begins_decorator(bytes: &[u8], at: usize) -> bool {
-    let Some(previous) = bytes[..at]
-        .iter()
-        .rev()
-        .find(|byte| !matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
-    else {
-        // Nothing before it in the file: a decorator on the first declaration.
-        return true;
-    };
-    // A decorator follows the start of a class body, the end of a previous
-    // member, another decorator, or the keyword before an exported class.
-    matches!(previous, b'{' | b'}' | b';' | b')' | b']')
-        || previous.is_ascii_alphanumeric()
-        || matches!(previous, b'_' | b'$')
 }
 
 /// Return the index just past a decorator that begins at `at`.
@@ -1221,6 +1282,19 @@ mod tests {
             "class S {\n  css = `\n@media (x) {}\n`;\n}\n",
             "const email = 'user@example.com';\n",
             "// ค่าเริ่มต้น\n@Injectable()\nclass บริการ {}\n",
+            // Member-position decorators, with nothing line-leading above them.
+            // These are the shapes the two paths disagreed about while the
+            // plan-less one had a placement rule of its own — a line scan for
+            // a leading `@`, written before `decorator_can_start` widened to
+            // member positions, so `strip_decorators` returned the source
+            // untouched and `@log` reached the emitted JavaScript.
+            "class S { @log run() {} }\n",
+            "class S {\n  run() {}\n  @log stop() {}\n}\n",
+            "@Service()\nclass S { @log run() {} }\n",
+            // The `@` a page renders. The pre-filter used to hide this from the
+            // stripper on the plan-less path while the plan path deleted it;
+            // now one rule answers both, and it is the scanner's.
+            "export const el = <p>write to @support</p>\n",
         ] {
             assert_eq!(
                 strip_decorators_with_plan(source, &ast::parse_module(source)),
@@ -1292,10 +1366,12 @@ mod tests {
         ] {
             assert_eq!(strip_decorators(source), source, "source: {source}");
         }
-        assert!(!has_decorator_candidate("const pkg = '@scope/name';\n"));
-        assert!(has_decorator_candidate(
-            "class S {\n  @observable x = 1;\n}\n"
-        ));
+        // One rule decides placement, and it is the scanner's. The line scan
+        // that used to answer this here was a third copy of it, and it was
+        // already stale — see `strip_decorators`.
+        assert!(!ast::parse_module("const pkg = '@scope/name';\n").has_decorators);
+        assert!(ast::parse_module("class S {\n  @observable x = 1;\n}\n").has_decorators);
+        assert!(ast::parse_module("class S { @log run() {} }\n").has_decorators);
     }
 
     /// An unclosed quote is prose, not a string. It must not carry the scan
@@ -1544,6 +1620,137 @@ mod tests {
         reject_unsupported_module_kind("", Path::new("bin/cli")).unwrap();
     }
 
+    /// One compiled module body, from the same function a bundle uses.
+    ///
+    /// The compile cache is constructed disabled, so nothing here touches a
+    /// filesystem and the path may be synthetic.
+    fn compiled_module_body(extension: &str, source: &str) -> String {
+        let root = PathBuf::from("/p");
+        let path = if extension.is_empty() {
+            PathBuf::from("ruvyxa:entry.tsx")
+        } else {
+            root.join(format!("dep{extension}"))
+        };
+        let module = crate::resolver::ResolvedModule {
+            path: path.clone(),
+            source: source.to_string(),
+            compiled_content: None,
+            load_source_map: None,
+            deps: Vec::new(),
+            dependency_aliases: BTreeMap::new(),
+            watch_paths: Vec::new(),
+            glob_matches: Vec::new(),
+            is_external: false,
+        };
+        let input = BundleInput {
+            entry: path.clone(),
+            project_root: root.clone(),
+            app_dir: root.join("app"),
+            layouts: Vec::new(),
+            templates: Vec::new(),
+            slots: Vec::new(),
+            intercepts: Vec::new(),
+            request_path: "/".to_string(),
+            target: crate::BundleTarget::Client,
+            options: crate::BundleOptions::default(),
+            specials: crate::RouteSpecials::default(),
+        };
+        let cache = crate::cache::CompileCache::new(&root, false);
+        compile_module(&module, &input, &cache, &BuildHookPipeline::empty())
+            .unwrap_or_else(|error| panic!("compiling {} failed: {error}", path.display()))
+            .module
+            .js
+            .to_string()
+    }
+
+    /// `import.meta.env` becomes a literal in every module kind, not just the
+    /// ones that happen to be re-printed.
+    ///
+    /// The substitution was written as a step of the oxc transform, and
+    /// `compile_module` returns before that transform for `.js`, `.mjs`, `.cjs`
+    /// and for a `ruvyxa:` virtual entry. So plain JavaScript kept the
+    /// expression verbatim — an app written in `.js`, and every client-bundled
+    /// dependency authored for Vite, because for the Client target
+    /// `node_modules` is not external. In a browser `import.meta` has no `env`,
+    /// so the module threw `TypeError` while it was being evaluated and took
+    /// the whole bundle with it rather than one expression.
+    ///
+    /// `tests/packages/ruvyxa/import-meta-env.test.mjs` replays this same table
+    /// through the Node graph, which has always run every module through
+    /// `transformModuleSource` and so has always substituted.
+    #[test]
+    fn import_meta_env_is_substituted_for_every_module_kind() {
+        // `PUBLIC_ENV` is a `OnceLock`, so this is the one environment this
+        // test binary compiles against; nothing else in the crate reads it.
+        set_public_env(BTreeMap::from([(
+            "RUVYXA_PUBLIC_API_URL".to_string(),
+            "https://api.example.test".to_string(),
+        )]));
+
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/env-policy-conformance.json"
+        ))
+        .unwrap();
+        let section = &fixture["importMetaEnv"];
+        let marker = section["marker"].as_str().expect("marker");
+        let literal_prefix = section["literalPrefix"]
+            .as_str()
+            .expect("the substituted literal's prefix");
+        let extensions = section["extensions"].as_array().expect("extensions");
+        let cases = section["cases"].as_array().expect("cases");
+        assert!(!extensions.is_empty() && !cases.is_empty());
+
+        // The virtual entry takes the same early return as plain JavaScript and
+        // the Node graph substitutes it, so it is held to the same rule.
+        let spellings = extensions
+            .iter()
+            .map(|entry| {
+                (
+                    entry["extension"].as_str().expect("extension").to_string(),
+                    entry["why"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .chain(std::iter::once((
+                String::new(),
+                "a `ruvyxa:` virtual entry, which the Node graph substitutes".to_string(),
+            )))
+            .collect::<Vec<_>>();
+
+        for (extension, extension_why) in &spellings {
+            for case in cases {
+                let name = case["name"].as_str().expect("case name");
+                let source = case["source"].as_str().expect("case source");
+                let substituted = case["substituted"].as_bool().expect("case verdict");
+                let why = case["why"].as_str().unwrap_or_default();
+                let emitted = compiled_module_body(extension, source);
+                let where_ = format!("{name} in a `{extension}` module ({extension_why}): {why}");
+
+                if substituted {
+                    assert!(
+                        !emitted.contains(marker),
+                        "{where_}\n{marker} survived into the emitted module:\n{emitted}"
+                    );
+                    assert!(
+                        emitted.contains(literal_prefix)
+                            && emitted.contains("https://api.example.test"),
+                        "{where_}\nthe public environment was not written in:\n{emitted}"
+                    );
+                } else {
+                    assert!(
+                        !emitted.contains(literal_prefix),
+                        "{where_}\ntext was read as code:\n{emitted}"
+                    );
+                    if case["markerSurvives"].as_bool() == Some(true) {
+                        assert!(
+                            emitted.contains(marker),
+                            "{where_}\nthe text itself was rewritten:\n{emitted}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// Sources whose `@` is not a decorator, and decorators that are hard to
     /// measure.
     ///
@@ -1670,6 +1877,11 @@ mod tests {
             // Prettier-wrapped: one statement across several lines.
             "const a = 1\nconst b = 2\nexport {\n  a,\n  b as second,\n}\n",
             "import {\n  join,\n} from \"node:path\"\nexport const value = join\n",
+            // The brace is not the first token after the keyword. This is what
+            // Prettier emits for a React import that outgrows the print width,
+            // and it used to reach the linker verbatim and fail with RUV1612.
+            "import path, {\n  join,\n} from \"node:path\"\nexport const value = join(path.sep)\n",
+            "import {\n  join,\n}\nfrom \"node:path\"\nexport const value = join\n",
             // Already one statement per line: expansion must not be needed.
             "export const a = 1\nexport function b() {}\n",
             // Shapes the linker spans deliberately; re-printing them would
@@ -1815,6 +2027,48 @@ mod decorator_placement_tests {
                 stripped.lines().count(),
                 source.lines().count(),
                 "line numbers must survive so diagnostics and source maps still line up:\n{stripped}"
+            );
+        }
+    }
+
+    /// JSX children are text, and an `@` in them is prose.
+    ///
+    /// Asserted on the plan path, which is the one every build takes:
+    /// `transform_with_plan` is handed the `ModuleAst` the compile pass already
+    /// produced, so `has_decorator_candidate` — the plan-less pre-filter — never
+    /// runs and cannot stand in for the scanner's answer. When `ast` recorded no
+    /// JSX text spans, `<p>write to @support</p>` put the `@` in a code position
+    /// with an alphanumeric before it, `has_decorators` was true, and the
+    /// stripper deleted `@support` from the rendered page.
+    #[test]
+    fn an_at_sign_in_jsx_text_survives_the_plan_path() {
+        for source in [
+            "export const el = <p>write to @support</p>\n",
+            "export const el = <p>reach @support or @sales today</p>\n",
+            "export const el = <div><span>ping @ops</span></div>\n",
+            "export const el = <>mail @help</>\n",
+        ] {
+            let plan = ast::parse_module(source);
+            assert!(
+                !plan.has_decorators,
+                "JSX text reported a decorator:\n{source}"
+            );
+            assert_eq!(
+                strip_decorators_with_plan(source, &plan),
+                source,
+                "JSX text was rewritten:\n{source}"
+            );
+            let emitted = transform_with_plan(
+                source,
+                true,
+                JsxRuntime::Automatic,
+                EsTarget::EsNext,
+                Some(&plan),
+            )
+            .unwrap_or_else(|error| panic!("{source:?} did not compile: {error}"));
+            assert!(
+                emitted.contains('@'),
+                "the compile path deleted rendered text:\n{emitted}"
             );
         }
     }

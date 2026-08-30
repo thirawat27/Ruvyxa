@@ -8,10 +8,15 @@ const workspaceRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta
 const handlerModule = path.join(workspaceRoot, 'packages/ruvyxa/runtime/serverless-handler.mjs')
 const coreServerModule = path.join(workspaceRoot, 'packages/@ruvyxa/core/dist/server.js')
 
-const { createHandler, prerenderRelativePath } = await import(
-  `file://${handlerModule.replaceAll('\\', '/')}`
-)
-const { revalidatePath } = await import(`file://${coreServerModule.replaceAll('\\', '/')}`)
+const {
+  MAX_TRACKED_RATE_LIMIT_KEYS,
+  boundedKey,
+  consumeFixedWindow,
+  createHandler,
+  prerenderRelativePath,
+  rateLimitKey,
+} = await import(`file://${handlerModule.replaceAll('\\', '/')}`)
+const { cookies, revalidatePath } = await import(`file://${coreServerModule.replaceAll('\\', '/')}`)
 const { actionReferenceId, runAction } = await import(
   `file://${path.join(workspaceRoot, 'packages/ruvyxa/runtime/action-runtime.mjs').replaceAll('\\', '/')}`
 )
@@ -718,7 +723,7 @@ describe('serverless i18n and dynamic image parity', () => {
       }),
     )
     assert.equal(redirected.status, 307)
-    assert.equal(redirected.headers.get('location'), 'https://example.com/fr-FR/about')
+    assert.equal(redirected.headers.get('location'), '/fr-FR/about')
 
     const localized = await handler(new Request('https://example.com/th/about'))
     const html = await localized.text()
@@ -748,16 +753,49 @@ describe('serverless i18n and dynamic image parity', () => {
         importPage: async () => ({ render: async () => '<html></html>' }),
         importApi: async () => ({}),
       })
+      // `query` is absent on a case that sends none, and an empty string is a
+      // case in its own right: `/about?` must redirect without the `?`.
+      const search = testCase.query === undefined ? '' : `?${testCase.query}`
       const response = await handler(
-        new Request(`https://example.com${testCase.path}`, {
+        new Request(`https://example.com${testCase.path}${search}`, {
           method: testCase.method,
           headers: testCase.headers,
         }),
       )
-      const location =
-        response.status === 307 ? new URL(response.headers.get('location')).pathname : null
+      // The header is read as-is rather than through `new URL()`: the value is
+      // a root-relative path on both hosts now, and resolving it against a base
+      // would hide an absolute one built from the request's `Host`.
+      const location = response.status === 307 ? response.headers.get('location') : null
       assert.equal(location, testCase.redirect, `${testCase.path} ${testCase.$why}`)
     }
+  })
+
+  it('builds the locale redirect without consulting the client Host header', async () => {
+    // RTMS-04. `Response.redirect()` demands an absolute URL, so this host
+    // reached for `new URL(redirect, request.url)` and inherited whatever origin
+    // the transport derived from the raw `Host` header -- which on the
+    // standalone server is the client's. The native host
+    // (`render_pipeline.rs`'s locale redirect) sends the path alone, and RFC
+    // 9110 has allowed a relative `Location` since 2014. The realistic harm is
+    // cache poisoning: the response carries no `Vary: Host`, so a shared cache
+    // keyed on path alone can store the forged target and serve it to real
+    // visitors.
+    const handler = createHandler({
+      routes: [pageRoute('localized-home', '/[lang]')],
+      i18n,
+      importPage: async () => ({ render: async () => '<html></html>' }),
+      importApi: async () => ({}),
+    })
+
+    const response = await handler(
+      new Request('https://example.com/', { headers: { host: 'evil.example' } }),
+    )
+    assert.equal(response.status, 307)
+    assert.equal(response.headers.get('location'), '/en')
+    assert.ok(
+      !response.headers.get('location').includes('://'),
+      'the redirect target must carry no origin at all',
+    )
   })
 
   it('validates image requests before invoking a platform optimizer', async () => {
@@ -1205,10 +1243,26 @@ describe('server functions on a deployed server-components route', () => {
     })
   }
 
+  /**
+   * The request a browser makes, `Origin` included.
+   *
+   * This endpoint's origin check is fail-closed when neither `Origin` nor
+   * `Sec-Fetch-Site` is present, which is what `/__ruvyxa/action` has always
+   * done and what `/__ruvyxa/rsc` now does on both hosts. A probe that sends
+   * neither is not the request any real caller makes: both browser halves of
+   * this endpoint — `rsc-client-runtime.mjs` and `@ruvyxa/react`'s router — run
+   * in a browser, and a browser always sends one of the two.
+   */
   function actionRequest(body = 'ARGS', headers = {}) {
     return new Request('http://localhost/__ruvyxa/rsc?path=/rsc', {
       method: 'POST',
-      headers: { 'x-ruvyxa-rsc': '1', 'x-ruvyxa-action': 'ruv:s_abc#run', ...headers },
+      headers: {
+        host: 'localhost',
+        origin: 'http://localhost',
+        'x-ruvyxa-rsc': '1',
+        'x-ruvyxa-action': 'ruv:s_abc#run',
+        ...headers,
+      },
       body,
     })
   }
@@ -1249,6 +1303,46 @@ describe('server functions on a deployed server-components route', () => {
       body: 'ARGS',
     })
     assert.equal((await handler(request)).status, 400)
+  })
+
+  it('refuses a call whose Origin names another site', async () => {
+    // RUV-H5. The navigation header used to be the whole cross-origin defence
+    // here, on the premise that no preflight answers it — but the built-in CORS
+    // layer wraps this handler and answers preflights before dispatch, so a
+    // project that enabled CORS for its own API silently made the header
+    // settable and handed any page the visitor's server functions.
+    const handler = handlerWith({ render: async () => '', rscAction: async () => '' })
+    const response = await handler(actionRequest('ARGS', { origin: 'https://evil.test' }))
+    assert.equal(response.status, 403)
+  })
+
+  it('refuses a call Sec-Fetch-Site reports as cross-site', async () => {
+    const handler = handlerWith({ render: async () => '', rscAction: async () => '' })
+    const response = await handler(actionRequest('ARGS', { 'sec-fetch-site': 'cross-site' }))
+    assert.equal(response.status, 403)
+  })
+
+  it('refuses the same call once past its ceiling, and keeps the budget per function', async () => {
+    // Keyed `rsc:{client}:{canonical path}:{reference}`, the shape
+    // `rsc_action_rate_limit_key` uses: a page issuing several server-function
+    // calls in one interaction spends a budget per function rather than one
+    // between them.
+    const handler = createHandler({
+      routes: [rscRoute()],
+      importPage: async () => ({ render: async () => '', rscAction: async () => '0:"ok"\n' }),
+      importApi: async () => ({}),
+      security: { actionRateLimit: { max: 2, window: 60 } },
+    })
+
+    const statuses = []
+    for (let attempt = 0; attempt < 3; attempt++) {
+      statuses.push((await handler(actionRequest())).status)
+    }
+    assert.deepEqual(statuses, [200, 200, 429])
+
+    // A second reference on the same route has its own bucket.
+    const other = await handler(actionRequest('ARGS', { 'x-ruvyxa-action': 'ruv:s_abc#save' }))
+    assert.equal(other.status, 200)
   })
 
   it('reports a route with no server functions as 501 rather than 404', async () => {
@@ -1516,6 +1610,89 @@ describe('deployed document validators', () => {
 })
 
 /**
+ * A document rendered for one visitor is never offered to a shared cache.
+ *
+ * `requestScoped` was computed correctly and read only by the two *store*
+ * decisions — the ISR write and the forced-render write. Nothing consulted it
+ * when the `cache-control` was set, so an `isr` page that called `cookies()`
+ * left with `public, max-age=0, s-maxage=…, stale-while-revalidate=…` and one
+ * visitor's personalised HTML in the body. A CDN given that stores it and
+ * answers every later request for the URL from it. `draftMode()` is the
+ * sharpest case: it exists to show unpublished content to an authorised
+ * previewer, and its own docstring promises such a request is never served from
+ * a cache.
+ *
+ * Both halves are pinned in one test on purpose. The store guarantee already
+ * held; it has to keep holding, and a fix that traded one for the other would
+ * still pass a test that measured only the header.
+ */
+describe('request-scoped documents are never shared-cacheable', () => {
+  /**
+   * A handler whose render reads request state, with nothing stored for the URL.
+   *
+   * `readPrerendered` answers `null` so every strategy reaches the render: a
+   * stored document is not request-scoped, and serving one would measure
+   * nothing. The accessor is the framework's own `cookies()` rather than a
+   * stand-in, because what makes a render request-scoped is precisely that it
+   * called it.
+   */
+  function scopedHandler(strategy, read = () => null) {
+    const writes = []
+    const handler = createHandler({
+      routes: [pageRoute('page', '/', strategy)],
+      importPage: async () => ({
+        render: async () => {
+          cookies().get('session')
+          return '<html><body>one visitor</body></html>'
+        },
+      }),
+      importApi: async () => ({}),
+      readPrerendered: read,
+      writePrerendered: async (pathname, html) => {
+        writes.push({ pathname, html })
+      },
+    })
+    return { handler, writes }
+  }
+
+  const get = (handler) =>
+    handler(
+      new Request('http://localhost/', { headers: { host: 'localhost', cookie: 'session=a' } }),
+    )
+
+  for (const strategy of ['ssg', 'csr', 'isr']) {
+    it(`answers a request-scoped ${strategy} render with no-store and stores nothing`, async () => {
+      const { handler, writes } = scopedHandler(strategy)
+      const response = await get(handler)
+
+      assert.equal(response.status, 200)
+      const cacheControl = response.headers.get('cache-control')
+      assert.equal(cacheControl, 'no-store', `${strategy} rendered for one visitor`)
+      // Stated separately from the equality above: `s-maxage` is the directive
+      // that hands the document to a shared cache, and it is the one that must
+      // not survive any later rewording of the header.
+      assert.doesNotMatch(cacheControl, /s-maxage/, 'no shared-cache lifetime')
+      assert.doesNotMatch(cacheControl, /\bpublic\b/, 'not offered to a shared cache')
+      assert.deepEqual(writes, [], 'a per-visitor document is never stored')
+    })
+  }
+
+  it('still caches a render that read nothing', async () => {
+    // The guard is about this response, not about the route: a page that never
+    // touched request state keeps the lifetime its strategy names.
+    const handler = createHandler({
+      routes: [pageRoute('page', '/', 'isr')],
+      importPage: async () => ({ render: async () => '<html><body>everyone</body></html>' }),
+      importApi: async () => ({}),
+      readPrerendered: () => null,
+      writePrerendered: async () => {},
+    })
+    const response = await get(handler)
+    assert.match(response.headers.get('cache-control'), /s-maxage=60/)
+  })
+})
+
+/**
  * A log line is a record, and a caller must not be able to write one.
  *
  * `?name=` on the action endpoint is percent-decoded by `searchParams.get`, so
@@ -1623,4 +1800,118 @@ describe('log records', () => {
       logs.join(' | '),
     )
   })
+})
+
+describe('rate limiter conformance with the native middleware', () => {
+  // The deployed half of `tests/fixtures/rate-limit-conformance.json`. The
+  // native half is `the_shared_rate_limit_conformance_table_is_answered_the_same_way`
+  // in `crates/ruvyxa_middleware/src/builtin.rs`.
+  //
+  // Both hosts enforce one `middleware.builtin.rate` block and nothing held
+  // them to one answer, so the same defect was fixed in the native limiter
+  // while every deployed build still carried it: at capacity the sweep freed
+  // only buckets whose whole window had elapsed, and the limiter then refused
+  // every key it had not already seen.
+  const contract = JSON.parse(
+    readFileSync(path.join(workspaceRoot, 'tests/fixtures/rate-limit-conformance.json'), 'utf8'),
+  )
+
+  /** Expand a fixture value, which is a string or a { repeat, times, suffix }. */
+  function valueOf(spec) {
+    if (spec === null || spec === undefined) return spec
+    if (typeof spec === 'string') return spec
+    return spec.repeat.repeat(spec.times) + (spec.suffix ?? '')
+  }
+
+  function countOf(spec) {
+    return spec === 'capacity' ? MAX_TRACKED_RATE_LIMIT_KEYS : spec
+  }
+
+  function floodKey(index) {
+    return `flood-${String(index).padStart(5, '0')}`
+  }
+
+  /**
+   * The request one key case describes.
+   *
+   * How the client is attributed is host-local: the native host reads a
+   * transport peer, and a deployed function has none, so it reads the
+   * forwarded chain. With no trusted proxies configured the rightmost hop is
+   * the client, which is the address the case names.
+   */
+  function requestFor(testCase) {
+    const headers = new Headers()
+    const configured = valueOf(testCase.keyHeader)
+    if (configured !== null && testCase.keyBy.startsWith('header:')) {
+      headers.set(testCase.keyBy.slice('header:'.length), configured)
+    }
+    if (testCase.client !== null) headers.set('x-forwarded-for', testCase.client)
+    return new Request('https://worker.example/api', { headers })
+  }
+
+  for (const testCase of contract.keyCases) {
+    it(`keys: ${testCase.name}`, () => {
+      const key = rateLimitKey(requestFor(testCase), testCase.keyBy, [], [])
+      assert.ok(
+        key.length <= contract.maxKeyLength,
+        `a tracked key of ${key.length} exceeds the ${contract.maxKeyLength} bound`,
+      )
+      assert.equal(key, boundedKey(valueOf(testCase.identity)))
+      if (testCase.distinctFrom !== undefined) {
+        // Two clients that share a bucket can each limit the other, so an
+        // identity the limiter must tell apart may never collapse into one key.
+        assert.notEqual(key, boundedKey(valueOf(testCase.distinctFrom)))
+      }
+    })
+  }
+
+  for (const testCase of contract.admissionCases) {
+    it(`admits: ${testCase.name}`, () => {
+      const now = Date.now()
+      const buckets = new Map()
+      if (testCase.prefill) {
+        const count = countOf(testCase.prefill.count)
+        for (let index = 0; index < count; index += 1) {
+          buckets.set(floodKey(index), {
+            remaining: 0,
+            // Staggered start times inside the window, oldest first, so
+            // "the least recently started bucket" names exactly one of them.
+            startedAt:
+              testCase.prefill.state === 'expired'
+                ? now - testCase.windowSeconds * 1000 - 1000
+                : now - (count - index),
+          })
+        }
+      }
+
+      for (const [index, request] of testCase.requests.entries()) {
+        const refusal = consumeFixedWindow(
+          buckets,
+          request.identity,
+          testCase.max,
+          testCase.windowSeconds,
+        )
+        assert.equal(
+          refusal === null,
+          request.allowed,
+          `request ${index} for ${request.identity} was ${refusal === null ? 'admitted' : 'refused'}`,
+        )
+        if (refusal !== null) assert.equal(refusal.status, 429)
+      }
+
+      assert.equal(buckets.size, countOf(testCase.expectTracked))
+      for (const request of testCase.requests) {
+        assert.ok(buckets.has(request.identity), `${request.identity} was not tracked`)
+      }
+      if (testCase.expectEvicted === 'oldest') {
+        assert.ok(!buckets.has(floodKey(0)), 'the evicted bucket must be the oldest one')
+      }
+      if (testCase.expectRetained === 'newest') {
+        assert.ok(
+          buckets.has(floodKey(countOf(testCase.prefill.count) - 1)),
+          'the most recently active client must not be the one evicted',
+        )
+      }
+    })
+  }
 })

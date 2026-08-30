@@ -3,9 +3,12 @@ import { spawn, spawnSync } from 'node:child_process'
 import {
   createReadStream,
   cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs'
 import { connect as netConnect, createServer } from 'node:net'
@@ -34,6 +37,27 @@ type MutableGlobal = typeof globalThis & Record<string, unknown>
 /** One request against a running standalone server, however it is being run. */
 type Client = (pathname: string, init?: RequestInit) => Promise<Response>
 
+/** The same, from a peer of the caller's choosing. Fetch transports only. */
+type PeerClient = (pathname: string, peer: string, init?: RequestInit) => Promise<Response>
+
+/**
+ * The connection object Bun and Deno hand their fetch handler.
+ *
+ * One object satisfies both shapes: Bun asks its `Server` for the peer by
+ * request, Deno carries it on the second argument. The emitted program reads
+ * whichever its own runtime supplies, and this is what it reads it from.
+ */
+function connectionFrom(peer: string) {
+  return {
+    requestIP: () => ({
+      address: peer,
+      family: peer.includes(':') ? 'IPv6' : 'IPv4',
+      port: 51_000,
+    }),
+    remoteAddr: { transport: 'tcp', hostname: peer, port: 51_000 },
+  }
+}
+
 /**
  * Stage the directory an adapter's `function` artifact produces.
  *
@@ -46,7 +70,11 @@ type Client = (pathname: string, init?: RequestInit) => Promise<Response>
 function stageDeployment(
   runtime: 'node' | 'bun' | 'deno',
   securityHeaders = true,
-  { hangingRoute = false }: { hangingRoute?: boolean } = {},
+  {
+    apiLimit,
+    hangingRoute = false,
+    trustedProxyIps,
+  }: { apiLimit?: number; hangingRoute?: boolean; trustedProxyIps?: string[] } = {},
 ): string {
   const root = mkdtempSync(path.join(tmpdir(), `ruvyxa-standalone-${runtime}-`))
   const server = path.join(root, 'server')
@@ -58,11 +86,15 @@ function stageDeployment(
     cpSync(repoPath('packages/ruvyxa/runtime', file), path.join(server, file))
   }
 
+  const security: Record<string, unknown> = {}
+  if (!securityHeaders) security.headers = false
+  if (trustedProxyIps) security.trustedProxyIps = trustedProxyIps
+  if (apiLimit !== undefined) security.apiLimit = apiLimit
   writeFileSync(
     path.join(server, 'index.mjs'),
     standaloneServerSource({
       runtime,
-      runtimePolicy: securityHeaders ? {} : { security: { headers: false } },
+      runtimePolicy: Object.keys(security).length > 0 ? { security } : {},
     }),
     'utf8',
   )
@@ -72,6 +104,17 @@ function stageDeployment(
       JSON.stringify({
         routes: [
           { id: 'home', path: '/', kind: 'page', file: 'home.tsx', render: { strategy: 'ssr' } },
+          // What the handler was actually handed. A forwarded identity the
+          // transport declined to believe has to be gone before this, and no
+          // status code or body can show that — only the header list can.
+          { id: 'whoami', path: '/whoami', kind: 'api', file: 'whoami.ts' },
+          // A stream that stays open, which is what an application's own
+          // server-sent-event route is. Nothing in this repository serves one,
+          // so this is the only place the decision not to encode it is
+          // observable.
+          { id: 'events', path: '/events', kind: 'api', file: 'events.ts' },
+          // A compressible payload whose route asked not to be re-encoded.
+          { id: 'plain', path: '/plain', kind: 'api', file: 'plain.ts' },
         ],
       }) +
       '\n',
@@ -81,6 +124,42 @@ function stageDeployment(
     path.join(server, 'route-modules.mjs'),
     [
       'export async function loadRouteModule(routeId) {',
+      '  if (routeId === "whoami") {',
+      '    return {',
+      '      GET: ({ request }) =>',
+      '        new Response(JSON.stringify([...request.headers]), {',
+      "          headers: { 'content-type': 'application/json' },",
+      '        }),',
+      '    }',
+      '  }',
+      '  if (routeId === "events") {',
+      '    return {',
+      '      GET: () =>',
+      '        new Response(',
+      '          new ReadableStream({',
+      '            start(controller) {',
+      // One small write and then nothing: far under the ~16 KB an encoder
+      // holds before it flushes, which is the whole failure.
+      '              controller.enqueue(new TextEncoder().encode("data: first\\n\\n"))',
+      '            },',
+      '          }),',
+      "          { headers: { 'content-type': 'text/event-stream' } },",
+      '        ),',
+      '    }',
+      '  }',
+      '  if (routeId === "plain") {',
+      '    return {',
+      '      GET: () =>',
+      // Well past COMPRESSION_MIN_BYTES and plainly compressible, so only the
+      // `no-transform` directive can be what keeps it uncompressed.
+      '        new Response("x".repeat(4096), {',
+      '          headers: {',
+      "            'content-type': 'text/plain; charset=utf-8',",
+      "            'cache-control': 'public, max-age=60, no-transform',",
+      '          },',
+      '        }),',
+      '    }',
+      '  }',
       // A render that never settles: an await on something that never
       // resolves is what a hung upstream call looks like from here.
       hangingRoute
@@ -101,6 +180,15 @@ function stageDeployment(
   // Published as WebP only, which is what `image.keepOriginal: false` leaves
   // behind while the markup still asks for the original extension.
   writeFileSync(path.join(publicDir, 'photo.webp'), 'not-really-a-webp')
+  // The other direction: `image.optimize: false` publishes the source untouched
+  // with no `.webp` beside it, while `<Image>` rewrites every src to its
+  // `.webp` URL unconditionally.
+  writeFileSync(path.join(publicDir, 'source.png'), 'not-really-a-png')
+  // Two sources one `.webp` URL could name. The build-time collision guard
+  // refuses this and so does `resolve_public_asset`; a first-hit loop would
+  // answer it by array order.
+  writeFileSync(path.join(publicDir, 'ambiguous.png'), 'not-really-a-png')
+  writeFileSync(path.join(publicDir, 'ambiguous.jpg'), 'not-really-a-jpeg')
   writeFileSync(path.join(publicDir, 'clip.mp4'), CLIP_BYTES)
   writeFileSync(path.join(publicDir, 'fallback.html'), '<!doctype html><title>fallback</title>')
   writeFileSync(path.join(root, 'secret.txt'), 'must never be served')
@@ -250,24 +338,41 @@ async function startProcessServer(
  * the program Ruvyxa emits for them, which is the part this repository owns.
  */
 let registeredHandler: ((request: Request) => Promise<Response>) | undefined
+/**
+ * The runtime's own last-resort handler, taken the same way.
+ *
+ * Bun spells it `error` and Deno spells it `onError`, and neither is reachable
+ * through a socket from here: it fires only when the fetch handler throws,
+ * which the emitted program has no external way to be made to do. Captured so
+ * the response it produces can be asserted at all.
+ */
+let registeredErrorHook: ((error: unknown) => Response | Promise<Response>) | undefined
 const globals = globalThis as MutableGlobal
 globals.Bun = {
   // Synchronous like the real one, and a Blob like the real one: a `Bun.file`
   // is accepted by `new Response` and answers `.slice`.
   file: (file: string) => new Blob([readFileSync(file)]),
-  serve: (options: { fetch: (request: Request) => Promise<Response> }) => {
+  serve: (options: {
+    fetch: (request: Request) => Promise<Response>
+    error?: (error: unknown) => Response | Promise<Response>
+  }) => {
     registeredHandler = options.fetch
+    registeredErrorHook = options.error
     return { stop: () => {} }
   },
 }
 globals.Deno = {
   open: async (file: string) => ({ readable: Readable.toWeb(createReadStream(file)) }),
   serve: (
-    options: { onListen?: (address: { hostname: string; port: number }) => void },
+    options: {
+      onListen?: (address: { hostname: string; port: number }) => void
+      onError?: (error: unknown) => Response | Promise<Response>
+    },
     fetchHandler: (request: Request) => Promise<Response>,
   ) => {
     options.onListen?.({ hostname: '127.0.0.1', port: 0 })
     registeredHandler = fetchHandler
+    registeredErrorHook = options.onError
     return { shutdown: async () => {} }
   },
 }
@@ -282,7 +387,12 @@ let loading: Promise<unknown> = Promise.resolve()
 function startFetchServer(
   server: string,
   extraEnv: Record<string, string> = {},
-): Promise<{ client: Client; stop: () => void }> {
+): Promise<{
+  client: Client
+  peerClient: PeerClient
+  stop: () => void
+  errorHook: ((error: unknown) => Response | Promise<Response>) | undefined
+}> {
   const next = loading.then(async () => {
     // The emitted program reads its deadlines from the environment at load, and
     // this stand-in loads it in-process — so the variables have to be here
@@ -301,6 +411,7 @@ function startFetchServer(
     const events = ['uncaughtException', 'unhandledRejection', 'SIGTERM', 'SIGINT']
     const owned = new Map(events.map((event) => [event, new Set(emitter.listeners(event))]))
     registeredHandler = undefined
+    registeredErrorHook = undefined
     try {
       await import(pathToFileURL(path.join(server, 'index.mjs')).href)
     } finally {
@@ -320,7 +431,8 @@ function startFetchServer(
     // Read through an explicit type: the assignment above is the last one the
     // compiler can see, so it would otherwise narrow this to `undefined` and
     // the assertion below to `never`.
-    const handler = registeredHandler as ((request: Request) => Promise<Response>) | undefined
+    const handler = registeredHandler as
+      ((request: Request, connection?: unknown) => Promise<Response>) | undefined
     assert.ok(handler, `${server} never registered a fetch handler`)
     return {
       // The handler these runtimes register takes a `Request`, which is the
@@ -328,7 +440,14 @@ function startFetchServer(
       // it.
       client: (pathname: string, init?: RequestInit) =>
         handler(new Request(`http://127.0.0.1${pathname}`, init)),
+      // The second argument is the only place the peer exists on these two
+      // runtimes, which is exactly why the file used to make no trust decision
+      // at all. A stubbed peer is the only way to reach a non-loopback one: a
+      // real socket in a test comes from 127.0.0.1, and loopback is trusted.
+      peerClient: (pathname: string, peer: string, init?: RequestInit) =>
+        handler(new Request(`http://127.0.0.1${pathname}`, init), connectionFrom(peer)),
       stop: () => {},
+      errorHook: registeredErrorHook,
     }
   })
   loading = next.catch(() => {})
@@ -402,6 +521,33 @@ for (const runtime of runtimes) {
       assert.equal(response.headers.get('content-type'), 'image/webp')
     })
 
+    /**
+     * The reverse of the case above, and the one `resolve_public_asset`
+     * documents as load-bearing. `<Image>` rewrites every src to `webpUrl(src)`
+     * unconditionally — it has no access to `image.optimize` — and
+     * `image.optimize: false` publishes the source untouched with no `.webp`
+     * beside it. Without this every `<Image>` on the page renders broken on
+     * every self-hosted deployment of such a project, while `ruvyxa dev` and
+     * `ruvyxa start` both resolve it.
+     */
+    it('answers a WebP URL with the source the build left untouched', async () => {
+      await ready
+      const response = await request('/source.webp')
+      assert.equal(response.status, 200)
+      assert.equal(response.headers.get('content-type'), 'image/png')
+      assert.equal(await response.text(), 'not-really-a-png')
+    })
+
+    /**
+     * Exactly one candidate, which is the Rust guard's rule. A first-hit loop
+     * would answer this by array order and the two hosts would disagree about
+     * the same publish directory.
+     */
+    it('refuses a WebP URL that two published sources could answer', async () => {
+      await ready
+      assert.equal((await request('/ambiguous.webp')).status, 404)
+    })
+
     it('answers a byte range with exactly the requested bytes', async () => {
       await ready
       const response = await request('/clip.mp4', { headers: { range: 'bytes=2-5' } })
@@ -409,6 +555,43 @@ for (const runtime of runtimes) {
       assert.equal(response.headers.get('content-range'), `bytes 2-5/${CLIP_BYTES.length}`)
       assert.equal(response.headers.get('content-length'), '4')
       assert.equal(await response.text(), '2345')
+    })
+
+    /**
+     * `if-range` decides whether a resumed download may continue. This server
+     * sends both an entity tag and a `last-modified`, so clients do send it,
+     * and honouring the range unconditionally assembled bytes from two
+     * different versions of a file into one corrupt result. Both validator
+     * forms are answered, as `requested_range` answers them on the native host
+     * serving the same `public/` directory.
+     */
+    it('continues a resumed download only while the file is the one it started', async () => {
+      await ready
+      const first = await request('/clip.mp4')
+      const etag = first.headers.get('etag')
+      const lastModified = first.headers.get('last-modified')
+      assert.ok(etag, 'the response has to carry the validator a resume sends back')
+      assert.ok(lastModified, 'and the date form of it')
+
+      for (const validator of [etag, lastModified]) {
+        const resumed = await request('/clip.mp4', {
+          headers: { range: 'bytes=2-5', 'if-range': validator },
+        })
+        assert.equal(resumed.status, 206, `if-range: ${validator} must resume`)
+        assert.equal(await resumed.text(), '2345')
+      }
+
+      for (const stale of ['"0000000000000000"', 'Thu, 01 Jan 1970 00:00:00 GMT']) {
+        const restarted = await request('/clip.mp4', {
+          headers: { range: 'bytes=2-5', 'if-range': stale },
+        })
+        assert.equal(
+          restarted.status,
+          200,
+          `if-range: ${stale} names another version, so the whole file is the answer`,
+        )
+        assert.equal(await restarted.text(), CLIP_BYTES.toString())
+      }
     })
 
     it('refuses a range past the end of the file', async () => {
@@ -475,9 +658,18 @@ for (const runtime of runtimes) {
       }
     })
 
+    /**
+     * `/__ruvyxa/health` is in this list because it is the response the two
+     * fetch transports answered before routing and therefore outside the two
+     * places they added the defaults — while the Node transport sets them on
+     * `res` at the top of every request and the Axum host applies them as the
+     * outermost layer over its whole router. Probing only `/logo.png` and `/`
+     * is what let one file serve two different header policies depending on
+     * which runtime picked it up.
+     */
     it('applies the security defaults to both static files and rendered pages', async () => {
       await ready
-      for (const pathname of ['/logo.png', '/']) {
+      for (const pathname of ['/logo.png', '/', '/__ruvyxa/health']) {
         const response = await request(pathname)
         assert.equal(
           response.headers.get('x-content-type-options'),
@@ -579,6 +771,76 @@ for (const runtime of runtimes) {
       await ready
       const response = await request('/__ruvyxa/client/app.abc123.js')
       assert.match(String(response.headers.get('etag') ?? ''), /^W\//)
+    })
+
+    /**
+     * A server-sent-event stream reaches the client as it is produced.
+     *
+     * `COMPRESSIBLE_TYPE` begins `^(?:text\/`, which matches
+     * `text/event-stream`, and the size floor is explicitly waived for a body
+     * with no declared length — which is exactly what an SSE response is. Node
+     * then inserts a default-flush gzip and Bun/Deno a `CompressionStream`, and
+     * neither flushes per chunk, so `EventSource` received nothing until
+     * roughly 16 KB had accumulated. The Axum host reaches the opposite
+     * decision through tower-http's `DefaultPredicate`, so this is a silent
+     * dev/prod divergence reachable from any application API route.
+     *
+     * The deadline is the assertion: a first chunk that arrives at all proves
+     * nothing was buffering it.
+     */
+    it('never compresses a server-sent-event stream', async () => {
+      await ready
+      const response = await request('/events', { headers: { 'accept-encoding': 'gzip' } })
+      assert.equal(response.status, 200)
+      assert.equal(response.headers.get('content-type'), 'text/event-stream')
+      assert.equal(response.headers.get('content-encoding'), null)
+      assert.doesNotMatch(
+        String(response.headers.get('vary') ?? ''),
+        /accept-encoding/i,
+        'a response that cannot be encoded must not advertise a variance it does not have',
+      )
+
+      const reader = response.body?.getReader()
+      assert.ok(reader, 'a server-sent-event response must carry a body')
+      const tooSlow = Symbol('the first event never arrived')
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        const first = await Promise.race([
+          reader.read(),
+          new Promise<typeof tooSlow>((resolve) => {
+            timer = setTimeout(() => resolve(tooSlow), 4_000)
+          }),
+        ])
+        assert.notEqual(
+          first,
+          tooSlow,
+          'the first event must reach the client as it is produced, not once an encoder has filled',
+        )
+        const chunk = first as ReadableStreamReadResult<Uint8Array>
+        assert.match(new TextDecoder().decode(chunk.value), /data: first/)
+      } finally {
+        clearTimeout(timer)
+        await reader.cancel()
+      }
+    })
+
+    /**
+     * `Cache-Control: no-transform` is the header an application has to say
+     * "do not re-encode this" with today, and neither host read it. The payload
+     * is plainly compressible and well past the size floor, so the directive is
+     * the only thing that can be keeping it as it was written.
+     */
+    it('honours no-transform on a compressible payload', async () => {
+      await ready
+      const response = await request('/plain', { headers: { 'accept-encoding': 'gzip' } })
+      assert.equal(response.status, 200)
+      assert.equal(response.headers.get('content-encoding'), null)
+      assert.doesNotMatch(
+        String(response.headers.get('vary') ?? ''),
+        /accept-encoding/i,
+        'a payload that will never be encoded does not vary by Accept-Encoding',
+      )
+      assert.equal((await response.text()).length, 4096)
     })
   })
 }
@@ -967,9 +1229,215 @@ describe('generated standalone server metrics endpoint', () => {
         assert.match(body, new RegExp(`^ruvyxa_build_info\\{runtime="${runtime}"\\} 1$`, 'm'), body)
         // Prometheus needs the type line to read a counter as one.
         assert.match(body, /^# TYPE ruvyxa_renders_rejected_total counter$/m, body)
+
+        // Answered before routing, which is also before the only two places
+        // the fetch transports added the defaults. A scrape endpoint that a
+        // browser can frame or content-type-sniff is not a different class of
+        // response from the pages beside it.
+        assert.equal(response.headers.get('x-content-type-options'), 'nosniff')
+        assert.equal(response.headers.get('x-frame-options'), 'DENY')
       } finally {
         started.stop()
       }
+    })
+
+    /**
+     * The path exists and this verb does not, which is what `/__ruvyxa/health`
+     * already answers 405 to say. Falling through to routing answered 404 —
+     * "no such endpoint" — to an operator who had pointed a scraper at it with
+     * the wrong method, and a 404 is the one answer that sends them looking at
+     * their deployment rather than at their scrape config.
+     */
+    it(`answers a non-read verb on a configured scrape path with 405 (${runtime})`, async () => {
+      const started = await start({ RUVYXA_METRICS_TOKEN: TOKEN })
+      try {
+        const response = await started.client('/__ruvyxa/metrics', {
+          method: 'POST',
+          headers: { authorization: `Bearer ${TOKEN}` },
+        })
+        assert.equal(response.status, 405)
+        assert.equal(response.headers.get('allow'), 'GET, HEAD')
+        assert.equal(response.headers.get('x-content-type-options'), 'nosniff')
+      } finally {
+        started.stop()
+      }
+    })
+
+    /**
+     * ...and only when it is configured. An unset token means the path does not
+     * exist as far as anyone asking can tell, and a 405 would say it does.
+     */
+    it(`still hides an unconfigured scrape path from a non-read verb (${runtime})`, async () => {
+      const started = await start({})
+      try {
+        const response = await started.client('/__ruvyxa/metrics', { method: 'POST' })
+        assert.equal(response.status, 404)
+      } finally {
+        started.stop()
+      }
+    })
+  }
+})
+
+/**
+ * The response a runtime produces when the fetch handler itself throws.
+ *
+ * Bun's `error` and Deno's `onError` sit outside `handleRequest` entirely, so
+ * neither of the two places those transports add the security defaults can
+ * reach them — and the Node transport's equivalent is a `catch` inside a
+ * request whose `res` already carries them. Driven through the stand-in servers
+ * in this file rather than through an installed runtime, because the hook is
+ * reached only by a throw the emitted program has no way to stage from outside.
+ */
+/**
+ * `isrCache: 'tmp'` and what the directory it picks is allowed to be shared
+ * with.
+ *
+ * The compute bundle an immutable host deploys cannot be written to, so ISR
+ * refreshes go to the host's temporary directory instead — read *before* the
+ * bundled prerender output, which is what makes a stale entry there win. A
+ * fixed name under `os.tmpdir()` is the same directory for every Ruvyxa
+ * deployment on the host and for every build of the same deployment.
+ *
+ * Run on the Node transport, because the cache directory is decided in the
+ * shared half of the program that all three transports run unchanged — the
+ * three differ in how a request reaches it and how a file becomes a body, and
+ * this is neither.
+ */
+describe('generated standalone server temporary ISR cache', () => {
+  /** The directory every build of every deployment used to share. */
+  const cacheRoot = path.join(tmpdir(), 'ruvyxa-isr-cache')
+
+  function stageTmpIsrDeployment(server: string, buildId: string): void {
+    mkdirSync(server, { recursive: true })
+    mkdirSync(path.resolve(server, '..', 'public'), { recursive: true })
+    for (const file of HANDLER_RUNTIME_FILES) {
+      cpSync(repoPath('packages/ruvyxa/runtime', file), path.join(server, file))
+    }
+    writeFileSync(
+      path.join(server, 'index.mjs'),
+      standaloneServerSource({ runtime: 'node', isrCache: 'tmp', buildId, runtimePolicy: {} }),
+      'utf8',
+    )
+    writeFileSync(
+      path.join(server, 'manifest.mjs'),
+      'export default ' +
+        JSON.stringify({
+          routes: [
+            {
+              id: 'isr',
+              path: '/isr',
+              kind: 'page',
+              file: 'isr.tsx',
+              // Long enough that nothing under test is ever answered by the
+              // staleness clock instead of by the cache.
+              render: { strategy: 'isr', revalidate: 3600 },
+            },
+          ],
+        }) +
+        '\n',
+      'utf8',
+    )
+    writeFileSync(
+      path.join(server, 'route-modules.mjs'),
+      [
+        // Which build rendered it, and how many times this process has. The
+        // first says whether a document came from the other deployment; the
+        // second says whether it came from a cache at all.
+        'let renders = 0',
+        'export async function loadRouteModule() {',
+        '  return {',
+        '    render: async () => {',
+        '      renders += 1',
+        '      return `<!doctype html><title>isr</title><p>${process.env.RUVYXA_TEST_MARK}-${renders}</p>`',
+        '    },',
+        '  }',
+        '}',
+        'export async function loadActionModule() { return {} }',
+        'export const applyPluginHttp = undefined',
+        '',
+      ].join('\n'),
+      'utf8',
+    )
+  }
+
+  it('does not let one build read the documents another build wrote', async () => {
+    const before = new Set(existsSync(cacheRoot) ? readdirSync(cacheRoot) : [])
+    const root = mkdtempSync(path.join(tmpdir(), 'ruvyxa-isr-tmp-'))
+    const server = path.join(root, 'server')
+
+    // The first build, deployed and warmed.
+    stageTmpIsrDeployment(server, 'buildidaaaaaaaaaaaaaaaaaaaaaaaaa')
+    let started = await startProcessServer(process.execPath, [], server, {
+      RUVYXA_TEST_MARK: 'first',
+    })
+    try {
+      const cold = await started.client('/isr')
+      assert.equal(cold.status, 200)
+      assert.match(await cold.text(), /first-1/)
+
+      // The positive control, and the only thing that makes the assertion
+      // below mean anything: the refresh really was written to the temporary
+      // directory and really is read back from it. Without a store this would
+      // be `first-2`.
+      const warm = await started.client('/isr')
+      assert.equal(warm.headers.get('x-ruvyxa-isr'), 'HIT')
+      assert.match(await warm.text(), /first-1/)
+    } finally {
+      started.stop()
+    }
+    // The process has to be gone before its directory is redeployed over.
+    await new Promise((resolve) => setTimeout(resolve, 300))
+
+    // The second build, deployed *over the first* — same path, same host, same
+    // temporary directory. This is the redeploy of an Amplify compute bundle,
+    // which is the deployment shape `isrCache: 'tmp'` exists for.
+    stageTmpIsrDeployment(server, 'buildidbbbbbbbbbbbbbbbbbbbbbbbbb')
+    started = await startProcessServer(process.execPath, [], server, {
+      RUVYXA_TEST_MARK: 'second',
+    })
+    try {
+      const response = await started.client('/isr')
+      const body = await response.text()
+      assert.match(
+        body,
+        /second-1/,
+        'a redeploy must render its own page, not serve the previous build from a shared directory',
+      )
+      // Said twice on purpose: the stale document is what a visitor would have
+      // been served, and its `<script src>` names client chunks this build no
+      // longer publishes.
+      assert.doesNotMatch(body, /first/, body)
+    } finally {
+      started.stop()
+    }
+
+    const created = (existsSync(cacheRoot) ? readdirSync(cacheRoot) : []).filter(
+      (entry) => !before.has(entry),
+    )
+    assert.equal(
+      created.length,
+      2,
+      `two builds must not share one cache directory (created: ${created.join(', ')})`,
+    )
+    for (const entry of created) {
+      rmSync(path.join(cacheRoot, entry), { recursive: true, force: true })
+    }
+    rmSync(root, { recursive: true, force: true })
+  })
+})
+
+describe('generated standalone server transport error hook', () => {
+  for (const runtime of ['bun', 'deno'] as const) {
+    it(`carries the security defaults on the ${runtime} transport's own 500`, async () => {
+      const started = await startFetchServer(stageDeployment(runtime))
+      const hook = started.errorHook
+      assert.ok(hook, `the ${runtime} transport registered no error hook`)
+      const response = await hook(new Error('render exploded'))
+      assert.equal(response.status, 500)
+      assert.equal(response.headers.get('content-type'), 'text/plain; charset=utf-8')
+      assert.equal(response.headers.get('x-content-type-options'), 'nosniff')
+      assert.equal(response.headers.get('x-frame-options'), 'DENY')
     })
   }
 })
@@ -1032,6 +1500,169 @@ describe('generated standalone server admission control', () => {
 })
 
 /**
+ * A request body is read with a render slot in hand, never before one.
+ *
+ * `requestInit.body = await readRequestBody(req)` ran before `handleAdmitted`,
+ * so `MAX_CONCURRENT_RENDERS`/`MAX_QUEUED_RENDERS` — added specifically to stop
+ * a burst larger than the machine becoming a heap holding every in-flight
+ * render at once — did not bound it. Bun and Deno never buffer, so the Node
+ * deployment of one artifact could be pushed to an out-of-memory kill by
+ * concurrent uploads the other two refuse.
+ *
+ * Node only, because it is the only transport that buffers at all: the other
+ * two hand `createHandler` the `Request` the runtime gave them.
+ *
+ * The two statuses are what makes this measurable. A server that reads first
+ * hits the transport cap and answers 413; a server that admits first has
+ * nowhere to put the request and answers 503 without having read a byte.
+ */
+describe('generated standalone server request bodies', () => {
+  const UPLOAD = Buffer.alloc(256 * 1024, 'a')
+  const API_LIMIT = 64 * 1024
+
+  it('refuses an upload it has no capacity for before reading it (node)', async () => {
+    const server = stageDeployment('node', true, { apiLimit: API_LIMIT, hangingRoute: true })
+    const started = await startProcessServer(process.execPath, [], server, {
+      RUVYXA_MAX_CONCURRENCY: '1',
+      RUVYXA_MAX_QUEUE: '1',
+      // Long enough that the deadline cannot be what answers here.
+      RUVYXA_RENDER_TIMEOUT: '30000',
+    })
+    try {
+      // One fills the slot and one fills the queue; neither will ever settle.
+      const parked = Array.from({ length: 2 }, () =>
+        started.client('/', { signal: AbortSignal.timeout(20_000) }).catch(() => null),
+      )
+      await new Promise((resolve) => setTimeout(resolve, 500))
+
+      const response = await started.client('/whoami', {
+        method: 'POST',
+        body: UPLOAD,
+        headers: { 'content-type': 'application/octet-stream' },
+        signal: AbortSignal.timeout(10_000),
+      })
+      assert.equal(
+        response.status,
+        503,
+        'a 413 here means the transport buffered the whole upload before asking whether it had anywhere to put it',
+      )
+      assert.equal(response.headers.get('retry-after'), '1')
+
+      void parked
+    } finally {
+      started.stop()
+    }
+  })
+
+  /**
+   * And an upload past the project's own limit is still refused. Admission
+   * comes first now, so a server with capacity has to reach the same 413 it
+   * always did — the slot is taken, the request is refused against
+   * `security.apiLimit`, and the slot is given back.
+   *
+   * Which half answers is deliberately not asserted: the transport bounds what
+   * one request may allocate and the handler bounds what each endpoint may
+   * accept, and a caller can only see that an oversized upload to an API route
+   * is refused either way.
+   */
+  it('still refuses an upload past the API limit when it has capacity (node)', async () => {
+    const server = stageDeployment('node', true, { apiLimit: API_LIMIT })
+    const started = await startProcessServer(process.execPath, [], server)
+    try {
+      const response = await started.client('/whoami', {
+        method: 'POST',
+        body: UPLOAD,
+        headers: { 'content-type': 'application/octet-stream' },
+        signal: AbortSignal.timeout(10_000),
+      })
+      assert.equal(response.status, 413)
+
+      // And the slot came back: a server that leaked one per oversized upload
+      // would stop answering after its concurrency was spent.
+      const after = await started.client('/', { signal: AbortSignal.timeout(10_000) })
+      assert.equal(after.status, 200)
+    } finally {
+      started.stop()
+    }
+  })
+
+  /**
+   * A server-function call larger than `security.apiLimit` still reaches the
+   * endpoint that is allowed to accept it.
+   *
+   * The transport cap was `security.apiLimit` alone, but that is the bound on a
+   * project's *own* API routes — the framework's policy is per endpoint, and
+   * `/__ruvyxa/rsc` is bounded by `RSC_ACTION_BODY_LIMIT` instead. A project
+   * that lowered `apiLimit` therefore shrank the transport below an endpoint
+   * limit the handler enforces itself, and a legitimate call sized between the
+   * two was answered 413 by the transport before the endpoint ever ran. The
+   * same deployed artifact accepted that call under Bun and Deno, which never
+   * buffer, and refused it under Node.
+   *
+   * 501 is the answer this staged app owes a well-formed call: the route
+   * renders, but declares no `'use server'` function. Reaching it at all is the
+   * proof — the body was read, the endpoint ran, and nothing along the way
+   * measured it against `apiLimit`.
+   */
+  it('lets a server-function call between the API and RSC limits through (node)', async () => {
+    const server = stageDeployment('node', true, { apiLimit: API_LIMIT })
+    const started = await startProcessServer(process.execPath, [], server)
+    try {
+      const response = await started.client('/__ruvyxa/rsc?path=%2F', {
+        method: 'POST',
+        // Above `apiLimit`, below `RSC_ACTION_BODY_LIMIT`.
+        body: Buffer.alloc(2 * 1024 * 1024, 'a'),
+        headers: {
+          'content-type': 'text/plain;charset=UTF-8',
+          'x-ruvyxa-rsc': '1',
+          'x-ruvyxa-action': 'home#submit',
+          // What the browser sends on a server-function call, and what the
+          // endpoint's own origin gate requires: without it the call is
+          // refused 403 for being unprovably same-origin, which is a different
+          // refusal than the one under test.
+          origin: `http://127.0.0.1:${started.port}`,
+        },
+        signal: AbortSignal.timeout(20_000),
+      })
+      assert.notEqual(
+        response.status,
+        413,
+        'the transport cap must come from the largest limit any endpoint may allow, not from `apiLimit`',
+      )
+      assert.equal(response.status, 501)
+    } finally {
+      started.stop()
+    }
+  })
+
+  /**
+   * The cap is still a cap. It exists to bound what one buffered request can
+   * allocate, so a body past every endpoint limit must be refused during the
+   * read rather than after it — deriving the number from the endpoint policy
+   * must not become removing it.
+   */
+  it('refuses an upload past every endpoint limit (node)', async () => {
+    const server = stageDeployment('node', true, { apiLimit: API_LIMIT })
+    const started = await startProcessServer(process.execPath, [], server)
+    try {
+      const response = await started.client('/whoami', {
+        method: 'POST',
+        // Past `RSC_ACTION_BODY_LIMIT`, which is the largest of them.
+        body: Buffer.alloc(5 * 1024 * 1024, 'a'),
+        headers: { 'content-type': 'application/octet-stream' },
+        signal: AbortSignal.timeout(20_000),
+      })
+      assert.equal(response.status, 413)
+
+      const after = await started.client('/', { signal: AbortSignal.timeout(10_000) })
+      assert.equal(after.status, 200)
+    } finally {
+      started.stop()
+    }
+  })
+})
+
+/**
  * `security.headers: false` is a project's decision and every runtime has to
  * honour it, or the same build answers differently depending on which server
  * picked it up.
@@ -1050,4 +1681,143 @@ describe('generated standalone server security policy', () => {
       started.stop()
     })
   }
+})
+
+/**
+ * Who a request belongs to, decided where the peer actually is.
+ *
+ * `createHandler` scans `X-Forwarded-For` from the right and has no peer to
+ * weigh it against — a deployed function does not have one, which is why an
+ * adapter for a platform with an ingress declares `clientIpHeaders` instead.
+ * This program is the third case: it *is* a socket server, all three transports
+ * have the peer available, and none of them read it. So every self-hosted
+ * deployment reachable without a header-overwriting proxy in front of it —
+ * the README's Docker/PM2/systemd case, any container with a published port —
+ * believed whatever the caller typed, and one client rotating the header
+ * collected a fresh bucket per request from the built-in `rate` middleware, the
+ * server-action rate limiter, and the replay quota at once. `ruvyxa start` has
+ * always gated this on the transport peer; this is the alignment.
+ *
+ * The Rust twin is `forwarded_identity_is_ignored_when_the_peer_is_not_trusted`
+ * in `crates/ruvyxa_middleware/src/client_ip.rs`.
+ */
+describe('generated standalone server forwarded identity', () => {
+  /** The forwarded headers the handler was actually handed. */
+  async function forwardedHeadersSeen(response: Response): Promise<[string, string][]> {
+    // Read once: a body is consumed by whichever of `text()` and `json()` gets
+    // to it first, so an assertion that reports the body cannot also parse it.
+    const body = await response.text()
+    assert.equal(response.status, 200, body)
+    const pairs = JSON.parse(body) as [string, string][]
+    return pairs.filter(([name]) => name === 'x-forwarded-for' || name === 'x-real-ip')
+  }
+
+  const forwarded = {
+    'x-forwarded-for': '203.0.113.7',
+    'x-real-ip': '203.0.113.7',
+  }
+
+  // Bun and Deno only: a peer is the second argument to their fetch handler, so
+  // a stub is the only way to reach a non-loopback one. A real socket in a test
+  // comes from 127.0.0.1, and loopback is trusted without configuration — which
+  // is exactly why a naive test of this cannot fail.
+  for (const runtime of ['bun', 'deno'] as const) {
+    it(`drops a forwarded identity from an untrusted peer (${runtime})`, async () => {
+      const server = stageDeployment(runtime, true, { trustedProxyIps: ['10.0.0.0/8'] })
+      const started = await startFetchServer(server)
+      const seen = await forwardedHeadersSeen(
+        await started.peerClient('/whoami', '198.51.100.4', { headers: forwarded }),
+      )
+      assert.deepEqual(
+        seen,
+        [],
+        'a peer that is not a configured proxy must not be able to rename itself',
+      )
+      started.stop()
+    })
+
+    it(`believes a peer inside the configured prefix (${runtime})`, async () => {
+      const server = stageDeployment(runtime, true, { trustedProxyIps: ['10.0.0.0/8'] })
+      const started = await startFetchServer(server)
+      const seen = await forwardedHeadersSeen(
+        await started.peerClient('/whoami', '10.0.0.9', { headers: forwarded }),
+      )
+      assert.deepEqual(seen, [
+        ['x-forwarded-for', '203.0.113.7'],
+        ['x-real-ip', '203.0.113.7'],
+      ])
+      started.stop()
+    })
+
+    it(`believes a loopback peer without configuration (${runtime})`, async () => {
+      // A proxy terminating on the same host is the ordinary deployment, and
+      // the native host trusts it unconfigured. Diverging here would break
+      // every Docker Compose and systemd deployment that has one.
+      const server = stageDeployment(runtime, true)
+      const started = await startFetchServer(server)
+      const seen = await forwardedHeadersSeen(
+        await started.peerClient('/whoami', '127.0.0.1', { headers: forwarded }),
+      )
+      assert.deepEqual(seen, [
+        ['x-forwarded-for', '203.0.113.7'],
+        ['x-real-ip', '203.0.113.7'],
+      ])
+      started.stop()
+    })
+
+    it(`drops a forwarded identity when the runtime reports no peer (${runtime})`, async () => {
+      // A closed socket, or a transport with no address at all. Nothing that is
+      // not an address can be loopback or inside a configured prefix, so the
+      // answer has to be the same one an unknown peer gets — the failure that
+      // reads as "trusted" is the one worth writing a case for.
+      const server = stageDeployment(runtime, true, { trustedProxyIps: ['10.0.0.0/8'] })
+      const started = await startFetchServer(server)
+      const response = await started.client('/whoami', { headers: forwarded })
+      assert.deepEqual(await forwardedHeadersSeen(response), [])
+      started.stop()
+    })
+  }
+
+  it('keeps a loopback peer trusted on the node transport', async () => {
+    // The Node transport is only reachable as a real process, and a real socket
+    // in a test comes from 127.0.0.1 — so what this can prove is the half that
+    // has to keep working: the peer is read, and a same-host proxy is still
+    // believed. The strip itself is covered above, and the source assertion
+    // below is what holds all three transports to reading a peer at all.
+    const server = stageDeployment('node', true, { trustedProxyIps: ['10.0.0.0/8'] })
+    const started = await startProcessServer(process.execPath, [], server)
+    try {
+      const response = await started.client('/whoami', { headers: forwarded })
+      assert.equal(response.status, 200)
+      const pairs = (await response.json()) as [string, string][]
+      assert.ok(
+        pairs.some(([name, value]) => name === 'x-forwarded-for' && value === '203.0.113.7'),
+        'a proxy terminating on the same host must still be believed',
+      )
+    } finally {
+      started.stop()
+    }
+  })
+
+  it('makes the trust decision in every transport, where the peer is', () => {
+    // Behaviour above cannot see a transport that stopped asking, because the
+    // one runtime that can be driven as a real process only ever has a trusted
+    // peer. This is what fails when a fourth transport is added and forgets.
+    const peerExpressions = {
+      node: 'req.socket?.remoteAddress',
+      bun: 'server?.requestIP?.(request)?.address',
+      deno: 'info?.remoteAddr?.hostname',
+    } as const
+    for (const runtime of runtimes) {
+      const source = standaloneServerSource({ runtime, runtimePolicy: {} })
+      assert.ok(
+        source.includes(peerExpressions[runtime]),
+        `the ${runtime} transport no longer reads the peer the socket arrived on`,
+      )
+      assert.ok(
+        source.includes('peerMayStateClientIdentity('),
+        `the ${runtime} transport no longer weighs the peer before the handler sees a forwarded header`,
+      )
+    }
+  })
 })

@@ -15,6 +15,8 @@ use oxc::parser::Parser;
 use oxc::span::SourceType;
 use serde_json::{Value, json};
 
+use crate::ast;
+
 const CONTENT_CACHE_LIMIT: usize = 512;
 pub const MDX_COMPONENT_EXTENSIONS: &[&str] = &["tsx", "ts", "jsx", "js", "mts", "mjs"];
 
@@ -330,117 +332,30 @@ fn content_export(esm: &str, name: &str, value: &str) -> String {
     }
 }
 
+/// Whether the page's own ESM block already publishes `name`.
+///
+/// This asks the one Rust byte scanner rather than a private tokenizer. The
+/// tokenizer it replaced — and its character-for-character twin in
+/// `packages/ruvyxa/runtime/compiler.mjs` — knew line comments, block comments
+/// and the three quote characters but had no regular-expression branch, so an
+/// `.mdx` page whose export block wrote `/['"]/` above its own
+/// `export const frontmatter` opened a string skip that ran to the next quote
+/// anywhere in the file. Everything past the regex stopped being seen as code,
+/// the generated export was appended beside the author's, and the module failed
+/// to parse with a declaration the author never wrote. It also classified
+/// identifier characters with `char::is_alphanumeric`, which is false for the
+/// combining marks Thai, Devanagari, Arabic, Hebrew and Vietnamese are written
+/// with.
+///
+/// Both the declaration form and the clause form count here. Unlike a route's
+/// runtime capability, an appended `export const NAME` collides with
+/// `export { x as NAME } from './y'` just as hard as with a local declaration.
+///
+/// The shared cases are in `tests/fixtures/content-conformance.json`.
 fn has_named_export(source: &str, name: &str) -> bool {
-    let tokens = javascript_tokens(source);
-    for (index, token) in tokens.iter().enumerate() {
-        if token != "export" {
-            continue;
-        }
-        let mut cursor = index + 1;
-        if tokens.get(cursor).is_some_and(|token| token == "async") {
-            cursor += 1;
-        }
-        match tokens.get(cursor).map(String::as_str) {
-            Some("const" | "let" | "var") => {
-                if tokens.get(cursor + 1).is_some_and(|token| token == name) {
-                    return true;
-                }
-            }
-            Some("function" | "class") => {
-                cursor += 1;
-                if tokens.get(cursor).is_some_and(|token| token == "*") {
-                    cursor += 1;
-                }
-                if tokens.get(cursor).is_some_and(|token| token == name) {
-                    return true;
-                }
-            }
-            Some("{") => {
-                cursor += 1;
-                let mut specifier = Vec::new();
-                while let Some(token) = tokens.get(cursor) {
-                    if token == "," || token == "}" {
-                        let exported = specifier
-                            .iter()
-                            .position(|token| *token == "as")
-                            .and_then(|as_index| specifier.get(as_index + 1))
-                            .or_else(|| specifier.first());
-                        if exported.is_some_and(|token| *token == name) {
-                            return true;
-                        }
-                        specifier.clear();
-                        if token == "}" {
-                            break;
-                        }
-                    } else if token != "type" {
-                        specifier.push(token);
-                    }
-                    cursor += 1;
-                }
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
-fn javascript_tokens(source: &str) -> Vec<String> {
-    let characters = source.chars().collect::<Vec<_>>();
-    let mut tokens = Vec::new();
-    let mut index = 0;
-    while index < characters.len() {
-        let character = characters[index];
-        if character.is_whitespace() {
-            index += 1;
-            continue;
-        }
-        if character == '/' && characters.get(index + 1) == Some(&'/') {
-            index += 2;
-            while index < characters.len() && characters[index] != '\n' {
-                index += 1;
-            }
-            continue;
-        }
-        if character == '/' && characters.get(index + 1) == Some(&'*') {
-            index += 2;
-            while index + 1 < characters.len()
-                && !(characters[index] == '*' && characters[index + 1] == '/')
-            {
-                index += 1;
-            }
-            index = (index + 2).min(characters.len());
-            continue;
-        }
-        if matches!(character, '\'' | '"' | '`') {
-            let quote = character;
-            index += 1;
-            while index < characters.len() {
-                if characters[index] == '\\' {
-                    index = (index + 2).min(characters.len());
-                } else if characters[index] == quote {
-                    index += 1;
-                    break;
-                } else {
-                    index += 1;
-                }
-            }
-            continue;
-        }
-        if character.is_alphanumeric() || matches!(character, '_' | '$') {
-            let start = index;
-            index += 1;
-            while index < characters.len()
-                && (characters[index].is_alphanumeric() || matches!(characters[index], '_' | '$'))
-            {
-                index += 1;
-            }
-            tokens.push(characters[start..index].iter().collect());
-            continue;
-        }
-        tokens.push(character.to_string());
-        index += 1;
-    }
-    tokens
+    let module = ast::parse_module(source);
+    ast::has_named_runtime_export(source, &module, name)
+        || ast::has_named_clause_export(source, &module, name)
 }
 
 fn split_frontmatter(source: &str) -> Result<(Option<String>, String), String> {
@@ -1208,6 +1123,60 @@ mod tests {
             "// export const headings = []\nconst text = 'export class meta {}'",
             "headings"
         ));
+        assert!(has_named_export(
+            "export function* headings() {}",
+            "headings"
+        ));
+        assert!(!has_named_export(
+            "export { headings as archive } from './y'",
+            "headings"
+        ));
+        assert!(has_named_export(
+            "export { archive as headings } from './y'",
+            "headings"
+        ));
+        assert!(!has_named_export("export type { meta }", "meta"));
+    }
+
+    /// The `.mdx` shapes both content compilers have to read as code.
+    ///
+    /// Replays `tests/fixtures/content-conformance.json`, whose JavaScript half
+    /// is `tests/packages/ruvyxa/content-conformance.test.mjs`. That half also
+    /// *runs* each module, which is where a duplicate top-level declaration
+    /// actually shows itself; this half proves the two compilers reach the same
+    /// decision about which exports the author already wrote.
+    #[test]
+    fn compiles_the_shared_content_conformance_cases() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/content-conformance.json");
+        let value: Value = serde_json::from_str(&fs::read_to_string(fixture).unwrap()).unwrap();
+        let cases = value["cases"].as_array().unwrap();
+        assert!(!cases.is_empty(), "the fixture must carry cases");
+
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            let why = case["why"].as_str().unwrap();
+            let file = case["file"].as_str().unwrap();
+            let module = compile_content_module(case["source"].as_str().unwrap(), Path::new(file))
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+
+            for (export, expected) in case["declarations"].as_object().unwrap() {
+                let found = module.matches(&format!("export const {export}")).count() as u64;
+                assert_eq!(
+                    found,
+                    expected.as_u64().unwrap(),
+                    "{name}: {export} declarations — {why}\n{module}"
+                );
+            }
+
+            let allocator = Allocator::default();
+            let parsed = Parser::new(&allocator, &module, SourceType::mjs()).parse();
+            assert!(
+                parsed.diagnostics.is_empty(),
+                "{name}: compiled module does not parse — {:?}\n{module}",
+                parsed.diagnostics
+            );
+        }
     }
 
     #[test]

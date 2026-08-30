@@ -28,6 +28,7 @@
 //! to one without, and skipping it is a third of the escape bytes on a line
 //! that is repainted ten times a second.
 
+use crate::sanitize::sanitize_plain;
 use crate::theme::{ColorDepth, HEADING_CODE, color_depth, paint_when};
 
 /// A 24-bit colour. Kept as a plain tuple struct so a ramp can be written as a
@@ -154,7 +155,10 @@ impl Gradient {
     /// composing its own row of cells and knows where each one sits.
     pub fn cell(&self, depth: ColorDepth, text: &str, position: f64) -> String {
         match self.code(depth, position) {
-            Some(code) => format!("\x1b[{code}m{text}\x1b[0m"),
+            // Filtered for the same reason `paint_when` filters, and it has to
+            // be spelled again because this branch writes its own escape rather
+            // than going through the role.
+            Some(code) => format!("\x1b[{code}m{}\x1b[0m", sanitize_plain(text)),
             None => paint_when(depth != ColorDepth::None, text, self.fallback),
         }
     }
@@ -167,10 +171,15 @@ impl Gradient {
     fn render(&self, depth: ColorDepth, text: &str, phase: Option<f64>) -> String {
         if depth < ColorDepth::Ansi256 {
             // Ansi16 and None both resolve through the role, which already
-            // knows how to emit nothing when colour is off.
+            // knows how to emit nothing when colour is off — and sanitizes.
             return paint_when(depth != ColorDepth::None, text, self.fallback);
         }
 
+        // A ramp walks the text one character at a time and gives each one a
+        // colour, so an escape sequence smuggled in would be coloured character
+        // by character and emitted in pieces. There is no shape of styled input
+        // this can render, which is why the filter here is the plain one.
+        let text = &sanitize_plain(text);
         let total = text.chars().count();
         if total == 0 {
             return String::new();

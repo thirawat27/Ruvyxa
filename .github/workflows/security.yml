@@ -54,3 +54,12 @@ jobs:
           node-version: 24.19.0
       - name: Audit production dependencies
         run: pnpm audit --prod --audit-level low
+      # `--prod` excludes devDependencies, and the root manifest declares *only*
+      # devDependencies — knip, oxlint, prettier, typescript, react, @types/node,
+      # postcss. So the lane above audits none of the JavaScript tooling that
+      # runs inside CI, including inside the release job that holds NPM_TOKEN.
+      # A second pass covers them, at `high` rather than `low` because a
+      # development-only advisory at every severity is noise that would train
+      # people to ignore this job.
+      - name: Audit development dependencies
+        run: pnpm audit --audit-level high

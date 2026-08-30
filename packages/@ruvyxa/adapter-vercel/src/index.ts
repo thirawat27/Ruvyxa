@@ -10,6 +10,7 @@ import {
   staticAssetPattern,
   validateBuildContext,
 } from '@ruvyxa/core'
+import { createCanonicalRouteMatcher, normalizeMatchPath } from '@ruvyxa/core/route-match'
 
 /**
  * Options for Vercel deployment.
@@ -443,28 +444,29 @@ function prerenderPaths(ctx: BuildContext): Array<{ path: string; revalidate: nu
     // it becomes the shortest window the platform accepts.
     paths.push({ path: routePath, revalidate: Math.max(1, revalidate ?? 60) })
   }
-  const revalidateOf = new Map(
-    (manifest.routes ?? []).map((route) => [route.path, route.revalidate]),
+  // Only an ISR page can have produced an expansion, so only those are
+  // candidates. A dynamic API route or a PPR page can match the same path and
+  // never rendered it.
+  const isrPages = (manifest.routes ?? []).filter(
+    (route) => route.kind === 'page' && route.strategy === 'isr',
   )
-  for (const route of manifest.routes ?? []) {
-    if (route.kind !== 'page' || route.strategy !== 'isr') continue
+  for (const route of isrPages) {
     add(route.path, route.revalidate)
   }
+  // The router's own matcher, compiled once for the whole list: it applies
+  // static-before-dynamic-before-catch-all precedence, which raw manifest order
+  // does not. Two patterns can fill one path — `[...slug]` and `[[...slug]]`
+  // both do — so "the first pattern that fits" answers by file order, not by
+  // which route the visitor's request would actually reach.
+  const parentOf = createCanonicalRouteMatcher(isrPages)
   for (const entry of manifest.prerendered ?? []) {
     if (entry.strategy !== 'isr') continue
-    // An expansion has no revalidate of its own; it inherits the route's, and
-    // the only route it can have come from is the one whose pattern it fills.
-    const parent = [...revalidateOf.keys()]
-      .filter((candidate) => candidate.includes('['))
-      .find((candidate) => matchesPattern(candidate, entry.path))
-    add(entry.path, parent === undefined ? 60 : revalidateOf.get(parent))
+    // An expansion has no revalidate of its own; it inherits its route's. A
+    // path no ISR page claims takes the default rather than a longer window
+    // borrowed from a route that did not render it.
+    add(entry.path, parentOf(normalizeMatchPath(entry.path))?.route.revalidate)
   }
   return paths
-}
-
-/** Whether a concrete path is one the dynamic route pattern produces. */
-function matchesPattern(pattern: string, candidate: string): boolean {
-  return new RegExp(routeSourcePattern(pattern)).test(candidate)
 }
 
 /** The Build Output `src` pattern that matches one route path. */

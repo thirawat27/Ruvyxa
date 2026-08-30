@@ -30,10 +30,29 @@ const contract = JSON.parse(
   readFileSync(path.join(workspaceRoot, 'tests/fixtures/client-ip-conformance.json'), 'utf8'),
 )
 
+/**
+ * The headers one fixture case describes.
+ *
+ * A case carries either `headers` — a JSON object, which cannot express one
+ * field name arriving twice — or `headerLines`, which can. `append` rather than
+ * `set` is the whole point of the second form: a proxy that adds its own field
+ * line instead of extending the caller's is the ordinary deployment (HAProxy's
+ * `option forwardfor` does exactly that), and the caller's line is the first
+ * one. This host is accidentally right about it, because `Headers.get()` joins
+ * every instance with `", "`; the native host read only the first until
+ * `forwarded_client_ip` started using `get_all`.
+ */
+function headersFor(testCase) {
+  if (!testCase.headerLines) return new Headers(testCase.headers)
+  const headers = new Headers()
+  for (const [name, value] of testCase.headerLines) headers.append(name, value)
+  return headers
+}
+
 describe('serverless handler client identity', () => {
   for (const testCase of contract.cases) {
     it(testCase.name, () => {
-      const headers = new Headers(testCase.headers)
+      const headers = headersFor(testCase)
       const trusted = parseTrustedProxies(testCase.trustedProxyIps)
       // The shared table records "nothing could be attributed" as null. This
       // host spells that `unknown`, which buckets more aggressively than the

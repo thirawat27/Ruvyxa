@@ -161,7 +161,31 @@ export interface FontsOptions {
    * families it costs more than it saves. @default true
    */
   preload?: boolean
+  /**
+   * Milliseconds any single stylesheet or font-file request may take before it
+   * is aborted.
+   *
+   * The abort is reported as the same `RUV2103` warning any other failure
+   * produces, so the build degrades to the fallback stylesheet instead of
+   * hanging until CI's own timeout kills it. Deliberately generous: a
+   * slow-but-working connection should finish, not silently lose its fonts.
+   * @default 30000
+   */
+  timeoutMs?: number
+  /**
+   * Ceiling, in bytes, on any single downloaded stylesheet or font file.
+   *
+   * A `.woff2` is tens of kilobytes; the default leaves several orders of
+   * magnitude of headroom while keeping a mis-resolved host from buffering an
+   * unbounded body into memory. @default 8388608
+   */
+  maxBytes?: number
 }
+
+/** @see FontsOptions.timeoutMs */
+const FONTS_DEFAULT_TIMEOUT_MS = 30_000
+/** @see FontsOptions.maxBytes */
+const FONTS_DEFAULT_MAX_BYTES = 8 * 1024 * 1024
 
 /**
  * Self-hosts Google Fonts at build time.
@@ -202,6 +226,15 @@ export function fonts(options: FontsOptions): RuvyxaPlugin {
   const publicPath = normalizeFontPublicPath(options.publicPath ?? '/fonts')
   const preload = options.preload !== false
   const stylesheetPath = `${publicPath}/fonts.css`
+  const timeoutMs = options.timeoutMs ?? FONTS_DEFAULT_TIMEOUT_MS
+  if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new TypeError('fonts: timeoutMs must be a positive integer of milliseconds')
+  }
+  const maxBytes = options.maxBytes ?? FONTS_DEFAULT_MAX_BYTES
+  if (!Number.isInteger(maxBytes) || maxBytes <= 0) {
+    throw new TypeError('fonts: maxBytes must be a positive integer of bytes')
+  }
+  const limits: FontFetchLimits = { timeoutMs, maxBytes }
 
   // Preload hints must be declared before the build runs, so they are derived
   // from the requested families rather than from the downloaded file list. A
@@ -227,16 +260,13 @@ export function fonts(options: FontsOptions): RuvyxaPlugin {
           for (const url of urls) {
             // The browser user-agent decides which format Google serves; asking
             // as a modern browser gets woff2, which every supported target reads.
-            const response = await fetch(url, {
-              headers: {
-                'user-agent':
-                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
-              },
+            const sheet = await fetchFontResource(url, limits, {
+              'user-agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
             })
-            if (!response.ok) {
-              throw new Error(`${url} responded ${response.status}`)
-            }
-            sheets.push(await downloadFontFiles(await response.text(), context, publicPath))
+            sheets.push(
+              await downloadFontFiles(sheet.toString('utf8'), context, publicPath, limits),
+            )
           }
           writePublicAsset(context, stylesheetPath.slice(1), sheets.join('\n'))
         } catch (error) {
@@ -268,19 +298,91 @@ export function fonts(options: FontsOptions): RuvyxaPlugin {
 const FONTS_FALLBACK_STYLESHEET =
   '/* ruvyxa:fonts — Google Fonts could not be downloaded during this build. */\n'
 
+/** Bounds applied to every request this plugin makes. */
+interface FontFetchLimits {
+  timeoutMs: number
+  maxBytes: number
+}
+
+/**
+ * Fetch one font resource under a wall-clock timeout and a byte ceiling.
+ *
+ * Both bounds exist so a stalled or hostile origin becomes the plugin's
+ * ordinary failure — a `RUV2103` warning and the fallback stylesheet — rather
+ * than a build that never returns. A fetch that neither succeeds nor fails is
+ * otherwise invisible to a `catch`.
+ */
+async function fetchFontResource(
+  url: string,
+  limits: FontFetchLimits,
+  headers?: Record<string, string>,
+): Promise<Buffer> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), limits.timeoutMs)
+  try {
+    const response = await fetch(url, {
+      ...(headers ? { headers } : {}),
+      signal: controller.signal,
+    })
+    if (!response.ok) throw new Error(`${url} responded ${response.status}`)
+    return await readBoundedBody(response, url, limits.maxBytes)
+  } catch (error) {
+    // The timeout is named here rather than left as a bare `AbortError`, so the
+    // warning says why the build degraded and what to raise if the connection
+    // is merely slow.
+    if (controller.signal.aborted) {
+      throw new Error(`${url} did not respond within ${limits.timeoutMs} ms`)
+    }
+    throw error
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * Read a response body, refusing anything past `maxBytes`.
+ *
+ * `content-length` is checked first so an oversized body is rejected before a
+ * byte is read; a chunked response with no declared length is stopped mid-read
+ * instead, because the alternative is buffering it whole to discover its size.
+ */
+async function readBoundedBody(response: Response, url: string, maxBytes: number): Promise<Buffer> {
+  const declared = Number(response.headers.get('content-length'))
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw new Error(`${url} declared ${declared} bytes, over the ${maxBytes} byte ceiling`)
+  }
+  const body = response.body
+  if (!body) return Buffer.from(await response.arrayBuffer())
+
+  const reader = body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (!value) continue
+    total += value.byteLength
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {})
+      throw new Error(`${url} exceeded the ${maxBytes} byte ceiling`)
+    }
+    chunks.push(value)
+  }
+  return Buffer.concat(chunks)
+}
+
 /** Download every font file a stylesheet references and rewrite its URLs. */
 async function downloadFontFiles(
   css: string,
   context: PluginBuildContext,
   publicPath: string,
+  limits: FontFetchLimits,
 ): Promise<string> {
   const remote = [...css.matchAll(/url\((https:\/\/fonts\.gstatic\.com\/[^)]+)\)/g)]
   let rewritten = css
   for (const [, url] of remote) {
     const fileName = fontFileName(url)
-    const response = await fetch(url)
-    if (!response.ok) throw new Error(`${url} responded ${response.status}`)
-    const bytes = Buffer.from(await response.arrayBuffer())
+    const bytes = await fetchFontResource(url, limits)
     const destination = `${publicPath}/${fileName}`
     writePublicBinaryAsset(context, destination.slice(1), bytes)
     // Replacer function: `replaceAll` reads `$&` and friends out of a

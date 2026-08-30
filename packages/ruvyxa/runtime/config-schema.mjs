@@ -72,6 +72,7 @@ export const CONFIG_KEY_SCHEMA = Object.freeze({
     'lossless',
     'keepOriginal',
     'variantWidths',
+    'maxWidth',
     'workers',
     'effort',
     'onDemand',

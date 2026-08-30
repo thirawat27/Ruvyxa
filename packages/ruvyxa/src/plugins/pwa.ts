@@ -6,6 +6,7 @@ import type { PluginBuildContext, RuvyxaPlugin } from '@ruvyxa/core/plugin'
 
 import { matchSource } from './http.js'
 import {
+  compareStable,
   escapeHtmlAttribute,
   normalizePublicFilePath,
   normalizePublicPath,
@@ -54,11 +55,29 @@ export interface PwaOptions {
   precache?: string[]
   /** Same-origin document returned when a navigation fails offline. */
   offlineFallback?: string
-  /** Change this value to invalidate the plugin-owned cache. @default "v1" */
+  /**
+   * Pins the plugin-owned cache name instead of deriving it from the build.
+   *
+   * The derived default names a new cache per build, so a change to an
+   * unfingerprinted asset reaches a returning visitor. Setting this takes that
+   * over: the cache is invalidated only when this value changes, and
+   * forgetting to change it serves the previous bytes indefinitely. Use it
+   * only when a deliberately stable cache is worth that.
+   */
   version?: string
 }
 
-/** Generates a web manifest and service worker, serves them in dev, and wires HTML automatically. */
+/**
+ * Generates a web manifest and service worker, serves them in dev, and wires HTML automatically.
+ *
+ * The worker's cache name derives from the scope, the precache list, the
+ * offline fallback, and the build manifest, so each build claims a fresh cache
+ * and `activate` deletes the previous one. The trade is one cold fetch per
+ * runtime-cached asset after a deploy — and a visitor who goes offline between
+ * the deploy and that fetch has an empty runtime cache — against the
+ * alternative, which is a cache-first worker serving an unfingerprinted asset
+ * from the install-time copy forever.
+ */
 export function pwa(options: PwaOptions): RuvyxaPlugin {
   if (!options || typeof options.name !== 'string' || options.name.trim() === '') {
     throw new TypeError('pwa: name must be a non-empty string')
@@ -73,6 +92,7 @@ export function pwa(options: PwaOptions): RuvyxaPlugin {
     throw new TypeError('pwa: manifestPath, serviceWorkerPath, and registerPath must be distinct')
   }
   const scope = normalizePublicPath(options.scope ?? '/', 'pwa')
+  assertScopeIsWithinTheWorkersDirectory(serviceWorkerPath, scope)
   const startUrl = normalizePublicPath(options.startUrl ?? '/', 'pwa')
   const htmlRoutes = normalizeRoutes(options.routes ?? ['*'], 'pwa') as string[]
   const offlineFallback = options.offlineFallback
@@ -112,13 +132,34 @@ export function pwa(options: PwaOptions): RuvyxaPlugin {
   }
   const manifestBody = `${JSON.stringify(manifest, null, 2)}\n`
   const registerBody = createPwaRegistration(serviceWorkerPath, scope)
+  // The prefix stays derived from the scope alone, and therefore stable across
+  // builds, because `activate` deletes exactly the caches that start with it. A
+  // prefix that moved with the build would stop recognising the previous
+  // build's cache as one of ours and would never drop it. Only the suffix
+  // carries build identity.
   const cachePrefix = `ruvyxa-pwa-${createHash('sha256').update(scope).digest('hex').slice(0, 12)}-`
-  const serviceWorkerBody = createServiceWorker(
-    `${cachePrefix}${options.version ?? 'v1'}`,
-    cachePrefix,
-    precache,
-    offlineFallback,
-  )
+  /**
+   * The cache name for one build.
+   *
+   * Derived, never stamped: a fixed suffix is only correct while somebody
+   * remembers to bump it, and this worker is cache-first with no revalidation,
+   * so forgetting is silent and permanent. `buildIdentity` is the serialized
+   * build manifest at `build.onComplete` and the empty string before a build
+   * has run — in development, where nothing is deployed and the worker is
+   * served `no-cache`.
+   */
+  const cacheName = (buildIdentity: string): string => {
+    if (options.version !== undefined) return `${cachePrefix}${options.version}`
+    const digest = createHash('sha256')
+      .update(stableJson([scope, precache, offlineFallback ?? null, buildIdentity]))
+      .digest('hex')
+      .slice(0, 12)
+    return `${cachePrefix}${digest}`
+  }
+  // Reassigned at `build.onComplete`. The `http.onRequest` path below serves
+  // `/sw.js` from this binding, so the worker a host serves and the worker the
+  // build writes claim the same cache rather than fighting over two.
+  let serviceWorkerBody = createServiceWorker(cacheName(''), cachePrefix, precache, offlineFallback)
   const middlewareRoutes = uniqueStrings([
     ...htmlRoutes,
     manifestPath,
@@ -179,6 +220,12 @@ export function pwa(options: PwaOptions): RuvyxaPlugin {
         },
       })
       build.onComplete((context) => {
+        serviceWorkerBody = createServiceWorker(
+          cacheName(stableJson(context.manifest)),
+          cachePrefix,
+          precache,
+          offlineFallback,
+        )
         writePublicAsset(context, manifestPath, manifestBody)
         writePublicAsset(context, serviceWorkerPath, serviceWorkerBody)
         writePublicAsset(context, registerPath, registerBody)
@@ -186,6 +233,57 @@ export function pwa(options: PwaOptions): RuvyxaPlugin {
       })
     },
   })
+}
+
+/**
+ * A worker may claim its own directory and no more.
+ *
+ * `Service-Worker-Allowed` is the one header that widens that, and this plugin's
+ * request handler is the only thing in the repository that writes it: no
+ * adapter, no platform config, and no static handler reproduces it, while
+ * `build.onComplete` writes the worker as a plain public asset. So a broad
+ * scope registers wherever the plugin answers the request and fails with
+ * `SecurityError: The path of the provided scope … is not under the max scope
+ * allowed` wherever a CDN or a static host serves the file instead — production
+ * only, on the deployments that are hardest to reach.
+ *
+ * The comparison is a prefix test against a directory that always ends in `/`,
+ * which is what keeps `/assets-2/` from reading as inside `/assets/`. A scope
+ * written without its trailing slash is rejected for the same reason the
+ * browser rejects it: service worker scope matching is a prefix test over the
+ * serialized URL, so `/assets` covers `/assets-2` and is genuinely wider than
+ * the directory the script sits in.
+ */
+function assertScopeIsWithinTheWorkersDirectory(serviceWorkerPath: string, scope: string): void {
+  const directory = serviceWorkerPath.slice(0, serviceWorkerPath.lastIndexOf('/') + 1)
+  if (scope.startsWith(directory)) return
+  throw new TypeError(
+    `pwa: scope "${scope}" is outside "${directory}", the widest scope a worker at ` +
+      `"${serviceWorkerPath}" can claim once a CDN or static host serves it. ` +
+      `Move serviceWorkerPath to the directory the scope needs, or narrow scope to "${directory}".`,
+  )
+}
+
+/**
+ * Serializes a value for hashing with object keys in a fixed order.
+ *
+ * `JSON.stringify` emits keys in insertion order, so two structurally equal
+ * manifests that were assembled differently would hash differently and name two
+ * caches for one build. Keys sort with `compareStable` — `localeCompare` orders
+ * by the host's ICU locale and would make the cache name machine-dependent.
+ */
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    const entries = Object.keys(record)
+      .sort(compareStable)
+      .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+    return `{${entries.join(',')}}`
+  }
+  // `undefined`, a function, or a symbol stringifies to `undefined`, which is
+  // not JSON; name it so the digest stays a total function of the input.
+  return JSON.stringify(value) ?? 'null'
 }
 
 function createPwaRegistration(serviceWorkerPath: string, scope: string): string {

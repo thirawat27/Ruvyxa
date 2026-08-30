@@ -257,6 +257,10 @@ function imageValue(image) {
     lossless: booleanValue(image?.lossless),
     keepOriginal: booleanValue(image?.keepOriginal),
     variantWidths: numberArrayValue(image?.variantWidths),
+    // `0` is the documented "publish the source's own resolution" value, so
+    // this has to survive the projection as the number it is: `numberValue`
+    // keeps a zero and drops only `undefined`.
+    maxWidth: numberValue(image?.maxWidth),
     workers: numberValue(image?.workers),
     effort: numberValue(image?.effort),
     onDemand: imageOnDemandValue(image?.onDemand),
@@ -374,6 +378,7 @@ function assertConfigValueShape(config) {
       lossless: 'boolean',
       keepOriginal: 'boolean',
       variantWidths: 'number[]',
+      maxWidth: 'number',
       workers: 'number',
       effort: 'number',
     },

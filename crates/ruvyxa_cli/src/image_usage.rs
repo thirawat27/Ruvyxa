@@ -119,12 +119,28 @@ fn public_url(source: &str) -> String {
 /// from an expression has no string literal to read and is skipped rather than
 /// guessed at.
 fn raw_image_urls(source: &str) -> Vec<(u32, String)> {
+    // Which bytes are code is decided by the workspace's scanner, not by a
+    // third hand-rolled walk. This loop had no awareness of comments, string
+    // literals, template literals or escapes, so a commented-out `<img>` or one
+    // inside a string was reported as a real one. That is a small cost while the
+    // consequence is a build advisory -- which is why it stayed -- but it is the
+    // fifth-plus instance of a pattern this repository has a written rule
+    // against, and the next edit to give this scan a harder consequence would
+    // have inherited the blindness silently.
+    //
+    // The mask locates, the source reads. `masked_code` blanks a JSX attribute's
+    // quoted value along with everything else that is data rather than code, so
+    // the value this function exists to extract is not in it. Both strings have
+    // identical byte offsets and identical line boundaries -- the masker blanks
+    // to the same length and keeps every newline -- so a position found in one
+    // indexes the other.
+    let masked = ruvyxa_bundler::ast::masked_code(source);
     let mut found = Vec::new();
-    for (index, line) in source.lines().enumerate() {
+    for (index, (line, masked_line)) in source.lines().zip(masked.lines()).enumerate() {
         let mut cursor = 0;
-        while let Some(offset) = line[cursor..].find("<img") {
+        while let Some(offset) = masked_line[cursor..].find("<img") {
             let start = cursor + offset;
-            let after = line[start + 4..].chars().next();
+            let after = masked_line[start + 4..].chars().next();
             // `<img` must be the whole tag name: `<imgur>` is not an image.
             if after.is_some_and(|char| char.is_alphanumeric() || char == '-') {
                 cursor = start + 4;
@@ -133,6 +149,8 @@ fn raw_image_urls(source: &str) -> Vec<(u32, String)> {
             // The tag may wrap across lines; attributes on later lines are not
             // read. A `src` written on the same line as the tag is the common
             // shape and the only one worth reporting without a real parser.
+            // Read from the source: the tag was located in the mask, but the
+            // attribute value lives only in the original.
             let tag = &line[start..];
             if let Some(url) = attribute_value(tag, "src").filter(|url| url.starts_with('/')) {
                 found.push((index as u32 + 1, url));
@@ -184,6 +202,38 @@ mod tests {
             cache_hit: false,
             variants: Vec::new(),
         }
+    }
+
+    /// An `<img>` that is not code is not a bypassed image.
+    ///
+    /// The scan used to walk raw lines, so a commented-out tag and one inside a
+    /// string literal were both reported. The advisory then told a developer to
+    /// optimise an image that no page renders.
+    #[test]
+    fn an_img_outside_code_is_not_reported() {
+        let source = concat!(
+            "// <img src=\"/commented.png\" />\n",
+            "/* <img src=\"/blocked.png\" /> */\n",
+            "const sample = '<img src=\"/single.png\" />'\n",
+            "const template = `<img src=\"/template.png\" />`\n",
+            "export const real = <img src=\"/real.png\" />\n",
+        );
+        let found = raw_image_urls(source);
+        assert_eq!(
+            found,
+            vec![(5, "/real.png".to_string())],
+            "only the tag that is code counts; found {found:?}",
+        );
+    }
+
+    /// A tag that follows real code on the same line is still found.
+    ///
+    /// The mask blanks what is not code and keeps every other byte in place, so
+    /// this is the case that would break if it ever stopped preserving offsets.
+    #[test]
+    fn a_tag_after_a_comment_on_the_same_line_is_still_found() {
+        let source = "export const x = /* pick one */ <img src=\"/after.png\" />\n";
+        assert_eq!(raw_image_urls(source), vec![(1, "/after.png".to_string())]);
     }
 
     #[test]

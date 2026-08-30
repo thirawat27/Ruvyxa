@@ -1,0 +1,352 @@
+{
+  "contract": "ruvyxa.config-surface",
+  "schemaVersion": 1,
+  "why": [
+    "`ruvyxa.config` has three descriptions of one object, and only two of them",
+    "were ever held together. `ProjectConfig` in crates/ruvyxa_cli/src/config.rs",
+    "decides what the compiler reads; `CONFIG_KEY_SCHEMA` in",
+    "packages/ruvyxa/runtime/config-schema.mjs decides what the renderer accepts;",
+    "`RuvyxaConfig` in packages/@ruvyxa/core/src/types.ts decides what TypeScript",
+    "accepts. tests/packages/core/config-schema.test.ts held the second and third",
+    "level against each other, and nothing at all compared the first.",
+    "",
+    "So `image.maxWidth` — declared `pub max_width: u32` with a default of 3840",
+    "and a documented `0` escape hatch, and declared `maxWidth?: number` in the",
+    "public type — was missing from the schema and from the hand-written literal",
+    "the schema test compares against. Both descriptions that were gated agreed",
+    "with each other and disagreed with Rust, so the gate saw nothing, and",
+    "`assertKnownKeys` threw `RUV1602 unknown config.image field: maxWidth`",
+    "before any command could run. Every command loads the config first, so a",
+    "project that set the documented option could not run `dev`, `build`,",
+    "`start`, `check`, `routes`, `analyze`, `doctor`, `clean`, `bench`,",
+    "`test:parity`, or `add`.",
+    "",
+    "This file is the missing third edge. `config_surface_matches_the_rust_config`",
+    "in crates/ruvyxa_cli/src/tests.rs reads each field list back out of serde —",
+    "every one of these structs carries `deny_unknown_fields`, so it names the",
+    "fields it accepts in the error it raises for one it does not — and asserts",
+    "the table below equals it. `config-schema.test.ts` asserts CONFIG_KEY_SCHEMA",
+    "equals the same table in both directions. A key in Rust and not in the",
+    "schema is the defect above; a key in the schema and not in Rust is an option",
+    "the compiler silently ignores.",
+    "",
+    "Field lists are sorted by code unit, and no field name is transcribed by",
+    "hand on the Rust side: a `#[serde(rename)]` that changes a wire name changes",
+    "the probed list in the same commit."
+  ],
+  "probes": {
+    "serde": [
+      "The struct's own `deny_unknown_fields` error names every field it accepts.",
+      "`rustPath` is where the probe key is planted, relative to `rustType`; a",
+      "`[]` suffix means the segment is an array and the probe goes into element 0."
+    ],
+    "none": [
+      "No Rust struct describes this section: Rust reads the whole block as one",
+      "opaque value and the JavaScript renderer owns its shape. `reason` says why."
+    ]
+  },
+  "sections": {
+    "config": {
+      "rustType": "ProjectConfig",
+      "rustPath": [],
+      "probe": "serde",
+      "fields": [
+        "adapter",
+        "adapterOptions",
+        "appDir",
+        "build",
+        "cache",
+        "content",
+        "css",
+        "debug",
+        "i18n",
+        "image",
+        "markdown",
+        "middleware",
+        "outDir",
+        "plugins",
+        "react",
+        "reactCompiler",
+        "render",
+        "runtime",
+        "security",
+        "server",
+        "site",
+        "typedRoutes",
+        "typescript"
+      ]
+    },
+    "config.build": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["build"],
+      "probe": "serde",
+      "fields": [
+        "jsx",
+        "manifest",
+        "map",
+        "minify",
+        "prerenderCache",
+        "split",
+        "target",
+        "treeShake",
+        "warm",
+        "workers"
+      ]
+    },
+    "config.cache": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["cache"],
+      "probe": "serde",
+      "fields": ["css", "dir", "routes"]
+    },
+    "config.content": {
+      "rustType": null,
+      "probe": "none",
+      "reason": [
+        "`ProjectConfig::_content` is `Option<serde_json::Value>`: the content",
+        "engine runs entirely in JavaScript and Rust only forwards the block. The",
+        "renderer's `assertKnownKeys(config.content, 'config.content')` is the only",
+        "reader of this shape."
+      ],
+      "fields": ["engine"]
+    },
+    "config.content.engine": {
+      "rustType": null,
+      "probe": "none",
+      "reason": ["Nested inside the opaque `content` block; see `config.content`."],
+      "fields": [
+        "exclude",
+        "feedPath",
+        "language",
+        "llmsPath",
+        "locale",
+        "manifestPath",
+        "minTermLength",
+        "searchPath",
+        "sitemapPath",
+        "stopWords"
+      ]
+    },
+    "config.css": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["css"],
+      "probe": "serde",
+      "fields": ["entries"]
+    },
+    "config.debug": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["debug"],
+      "probe": "serde",
+      "fields": ["overlay", "traces"]
+    },
+    "config.i18n": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["i18n"],
+      "probe": "serde",
+      "fields": ["cookie", "defaultLocale", "detectLocale", "localeParam", "locales"]
+    },
+    "config.image": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["image"],
+      "probe": "serde",
+      "fields": [
+        "effort",
+        "keepOriginal",
+        "lossless",
+        "maxWidth",
+        "onDemand",
+        "optimize",
+        "quality",
+        "variantWidths",
+        "workers"
+      ]
+    },
+    "config.image.onDemand": {
+      "rustType": "OnDemandImageConfigOptions",
+      "rustPath": [],
+      "probe": "serde",
+      "reason": [
+        "Probed directly rather than through `image.onDemand`, because",
+        "`OnDemandImageOptions` is an `#[serde(untagged)]` enum over `bool` and",
+        "this struct, and untagged deserialization discards the inner error."
+      ],
+      "fields": ["enabled", "maxWidth"]
+    },
+    "config.markdown": {
+      "rustType": null,
+      "probe": "none",
+      "reason": [
+        "`ProjectConfig::markdown_enabled` is `Option<bool>`: Rust only needs to",
+        "know whether to start the persistent MDX bridge, and the executable",
+        "unified plugins stay in the JavaScript config module. The renderer",
+        "collapses the whole block to `true` before Rust ever sees it."
+      ],
+      "fields": ["gfm", "recmaPlugins", "rehypePlugins", "remarkPlugins", "remarkRehypeOptions"]
+    },
+    "config.middleware": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["middleware"],
+      "probe": "serde",
+      "fields": ["builtin", "timeoutMs", "workers"]
+    },
+    "config.middleware.builtin": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["middleware", "builtin"],
+      "probe": "serde",
+      "fields": ["cors", "headers", "log", "rate", "timing"]
+    },
+    "config.middleware.builtin.cors": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["middleware", "builtin", "cors"],
+      "probe": "serde",
+      "fields": ["credentials", "headers", "maxAge", "methods", "origins"]
+    },
+    "config.middleware.builtin.rate": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["middleware", "builtin", "rate"],
+      "probe": "serde",
+      "fields": ["key", "max", "window"]
+    },
+    "config.render": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["render"],
+      "probe": "serde",
+      "fields": ["revalidate", "strategy"]
+    },
+    "config.security": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["security"],
+      "probe": "serde",
+      "fields": [
+        "actionLimit",
+        "actionRateLimit",
+        "apiLimit",
+        "fetchMeta",
+        "headers",
+        "pluginLimit",
+        "sameOrigin",
+        "trustedProxyIps"
+      ]
+    },
+    "config.security.actionRateLimit": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["security", "actionRateLimit"],
+      "probe": "serde",
+      "fields": ["max", "window"]
+    },
+    "config.server": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["server"],
+      "probe": "serde",
+      "fields": ["host", "port"]
+    },
+    "config.site": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["site"],
+      "probe": "serde",
+      "fields": ["description", "language", "robots", "sitemap", "title", "url"]
+    },
+    "config.site.robots": {
+      "rustType": "RobotsGenerationOptions",
+      "rustPath": [],
+      "probe": "serde",
+      "reason": [
+        "Probed directly rather than through `site.robots`, because `RobotsSetting`",
+        "is an `#[serde(untagged)]` enum over `bool` and this struct."
+      ],
+      "fields": ["host", "rules", "sitemap"]
+    },
+    "config.site.robots.rules[]": {
+      "rustType": "RobotsRuleOptions",
+      "rustPath": [],
+      "probe": "serde",
+      "reason": [
+        "The only section behind two untagged layers: `RobotsSetting` wraps",
+        "`RobotsGenerationOptions`, whose `rules` field is the untagged",
+        "`OneOrManyRules`. Probed directly for that reason, which is also why the",
+        "struct is `pub(crate)` rather than private to",
+        "crates/ruvyxa_cli/src/site_discovery.rs."
+      ],
+      "fields": ["allow", "crawlDelay", "disallow", "userAgent"]
+    },
+    "config.site.sitemap": {
+      "rustType": "SitemapGenerationOptions",
+      "rustPath": [],
+      "probe": "serde",
+      "reason": [
+        "Probed directly rather than through `site.sitemap`, because",
+        "`SitemapSetting` is an `#[serde(untagged)]` enum over `bool` and this",
+        "struct."
+      ],
+      "fields": ["additionalPaths", "defaults", "entries", "exclude"]
+    },
+    "config.site.sitemap.defaults": {
+      "rustType": "SitemapGenerationOptions",
+      "rustPath": ["defaults"],
+      "probe": "serde",
+      "fields": ["changeFrequency", "lastModified", "priority"]
+    },
+    "config.site.sitemap.entries[]": {
+      "rustType": "SitemapGenerationOptions",
+      "rustPath": ["entries[]"],
+      "probe": "serde",
+      "fields": [
+        "alternates",
+        "changeFrequency",
+        "images",
+        "lastModified",
+        "priority",
+        "url",
+        "videos"
+      ]
+    },
+    "config.site.sitemap.entries[].alternates": {
+      "rustType": "SitemapGenerationOptions",
+      "rustPath": ["entries[]", "alternates"],
+      "probe": "serde",
+      "fields": ["languages"]
+    },
+    "config.site.sitemap.entries[].videos[]": {
+      "rustType": "SitemapGenerationOptions",
+      "rustPath": ["entries[]", "videos[]"],
+      "probe": "serde",
+      "fields": [
+        "content_loc",
+        "description",
+        "duration",
+        "expiration_date",
+        "family_friendly",
+        "live",
+        "platform",
+        "player_loc",
+        "publication_date",
+        "rating",
+        "requires_subscription",
+        "restriction",
+        "tag",
+        "thumbnail_loc",
+        "title",
+        "uploader",
+        "view_count"
+      ]
+    },
+    "config.site.sitemap.entries[].videos[].platform": {
+      "rustType": "SitemapGenerationOptions",
+      "rustPath": ["entries[]", "videos[]", "platform"],
+      "probe": "serde",
+      "fields": ["content", "relationship"]
+    },
+    "config.site.sitemap.entries[].videos[].restriction": {
+      "rustType": "SitemapGenerationOptions",
+      "rustPath": ["entries[]", "videos[]", "restriction"],
+      "probe": "serde",
+      "fields": ["content", "relationship"]
+    },
+    "config.site.sitemap.entries[].videos[].uploader": {
+      "rustType": "SitemapGenerationOptions",
+      "rustPath": ["entries[]", "videos[]", "uploader"],
+      "probe": "serde",
+      "fields": ["content", "info"]
+    }
+  }
+}

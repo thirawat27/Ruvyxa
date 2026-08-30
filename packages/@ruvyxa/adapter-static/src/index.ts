@@ -85,10 +85,23 @@ function normalizeOutputDir(value: string | undefined): string {
       '[RUV2001] staticAdapter: "outputDir" must be a non-empty relative directory inside the build output',
     )
   }
+  // Names the build owns at its root. `client-report.json` is the client build
+  // report; it used to be `client/manifest.json`, covered by `client`, and now
+  // sits outside the published directory precisely so it is never served — but
+  // that also took it out from behind `client`, and an `outputDir` spelled
+  // after it would write the static site over the file the pre-renderer and
+  // every adapter function read.
   if (
-    ['assets', 'build.json', 'cache', 'client', 'manifest.json', 'prerender', 'server'].includes(
-      segments[0],
-    )
+    [
+      'assets',
+      'build.json',
+      'cache',
+      'client',
+      'client-report.json',
+      'manifest.json',
+      'prerender',
+      'server',
+    ].includes(segments[0])
   ) {
     throw new Error(
       '[RUV2001] staticAdapter: "outputDir" overlaps protected build output; use a directory such as static or deploy/public',

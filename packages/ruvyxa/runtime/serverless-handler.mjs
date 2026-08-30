@@ -26,7 +26,7 @@
  */
 
 import { runAction, validateActionPayload, validateActionRequest } from './action-runtime.mjs'
-import { methodNotAllowed, selectRouteHandler } from './api-methods.mjs'
+import { methodNotAllowed, normalizeResponse, selectRouteHandler } from './api-methods.mjs'
 import {
   collectRevalidations,
   requestContext,
@@ -35,6 +35,11 @@ import {
 } from './request-context.mjs'
 import { canonicalRoutePath, createCanonicalRouteMatcher } from './route-match.mjs'
 import { encodeFlightPayload, publicFlightError } from './flight.mjs'
+// The same two cross-site checks `action-runtime.mjs` applies to
+// `/__ruvyxa/action`, read straight from the shared policy so `/__ruvyxa/rsc`
+// gets the rule rather than a port of it. Already in `HANDLER_RUNTIME_FILES` and
+// already copied beside this file in every function bundle.
+import { fetchSiteIsCrossSite, originIsCrossSite, parseForwardedScheme } from './origin-policy.mjs'
 
 const MAX_REVALIDATIONS_PER_REQUEST = 64
 const MAX_REVALIDATION_PATH_LENGTH = 2_048
@@ -62,6 +67,26 @@ const MAX_ACTION_NONCES_PER_CLIENT = MAX_ACTION_NONCES / 10
 const ACTION_PATH = '/__ruvyxa/action'
 const FLIGHT_PATH = '/__ruvyxa/flight'
 const RSC_PATH = '/__ruvyxa/rsc'
+const IMAGE_PATH = '/__ruvyxa/image'
+
+/**
+ * The paths this host answers itself, decided before the plugin stage runs.
+ *
+ * The four `dispatch` rows of
+ * `tests/fixtures/framework-endpoint-conformance.json`, and the ordering half of
+ * a divergence: on the native host these are axum routes and the plugin-bearing
+ * handler is the fallback, so a reserved path never reaches
+ * `apply_request_plugins`. This host wrapped the plugin stage around everything,
+ * so an `http.onRequest({ match: ['*'] })` auth hook guarded
+ * `POST /__ruvyxa/action` when deployed and did not guard it under
+ * `dev`/`start` — the direction that matters, because the guard is then never
+ * exercised where it is being written.
+ *
+ * A subset of `RESERVED_FRAMEWORK_PATHS` in `plugin-http.mjs`, which is the
+ * registration-time half of the same rule: the paths there include the ones only
+ * the native host serves, and a plugin may not claim any of them on either host.
+ */
+const FRAMEWORK_ENDPOINT_PATHS = Object.freeze([ACTION_PATH, FLIGHT_PATH, RSC_PATH, IMAGE_PATH])
 
 /**
  * The header that keeps {@link RSC_PATH} out of reach of a cross-origin page,
@@ -568,7 +593,14 @@ export function createHandler(options) {
     const ingress = limitRequestBody(request)
     if (ingress.response) return ingress.response
     try {
-      if (typeof pluginHttp !== 'function') return await dispatch(ingress.request, runtimeContext)
+      // The framework's own endpoints are decided here rather than inside the
+      // plugin stage, which is what the native router's route-before-fallback
+      // ordering does. A plugin can no longer shadow one, hook one, or 404 one
+      // at its discretion — and `withDefaultSecurityHeaders` still runs on the
+      // way out, which is the coverage a response hook was being used for.
+      if (typeof pluginHttp !== 'function' || ownedByFramework(ingress.request)) {
+        return await dispatch(ingress.request, runtimeContext)
+      }
       return await pluginHttp(ingress.request, async (forwarded) => {
         const candidate = forwarded ?? ingress.request
         if (candidate === ingress.request) return dispatch(candidate, runtimeContext)
@@ -601,26 +633,43 @@ export function createHandler(options) {
   }
 
   /**
+   * The canonical, base-path-stripped pathname, or `null` when there is none.
+   *
+   * `dispatch` owns malformed-path reporting and answers the canonical 400, so
+   * the two callers ahead of it — the body policy and the framework-endpoint
+   * ordering — answer `null` and let the request reach it. A path this cannot
+   * resolve is one no framework endpoint claims either way.
+   */
+  function endpointPathname(request) {
+    try {
+      return stripBasePath(canonicalRequestPath(new URL(request.url).pathname), basePath)
+    } catch {
+      return null
+    }
+  }
+
+  /** Whether this host answers the request itself, ahead of any plugin. */
+  function ownedByFramework(request) {
+    const pathname = endpointPathname(request)
+    return pathname !== null && FRAMEWORK_ENDPOINT_PATHS.includes(pathname)
+  }
+
+  /**
    * Select the same body owner as the native router. Actions have their own
    * Axum body layer and do not pass through the generic API fallback limit.
    */
   function requestBodyPolicy(request) {
-    try {
-      const pathname = stripBasePath(canonicalRequestPath(new URL(request.url).pathname), basePath)
-      if (pathname === ACTION_PATH) {
-        return { limit: actionPolicy.actionLimit, message: 'Action payload is too large' }
-      }
-      // A server-function call is arguments, not an upload: React encodes them
-      // as text unless one is a file, and a file large enough to matter belongs
-      // in a route handler that can stream it. Same bound as the native host's
-      // `MAX_SERVER_ACTION_BODY`, applied in the same place the other endpoint
-      // bounds are, so a call accepted locally is accepted here.
-      if (pathname === RSC_PATH) {
-        return { limit: RSC_ACTION_BODY_LIMIT, message: 'Server-function call too large' }
-      }
-    } catch {
-      // `dispatch` owns malformed-path reporting. The generic cap remains a
-      // safe ingress bound until it returns the canonical 400 response.
+    const pathname = endpointPathname(request)
+    if (pathname === ACTION_PATH) {
+      return { limit: actionPolicy.actionLimit, message: 'Action payload is too large' }
+    }
+    // A server-function call is arguments, not an upload: React encodes them
+    // as text unless one is a file, and a file large enough to matter belongs
+    // in a route handler that can stream it. Same bound as the native host's
+    // `MAX_SERVER_ACTION_BODY`, applied in the same place the other endpoint
+    // bounds are, so a call accepted locally is accepted here.
+    if (pathname === RSC_PATH) {
+      return { limit: RSC_ACTION_BODY_LIMIT, message: 'Server-function call too large' }
     }
     return { limit: apiBodyLimit, message: 'Request body is too large' }
   }
@@ -649,7 +698,7 @@ export function createHandler(options) {
 
     // The request boundary above already decoded and normalized the path using
     // the same segment rules as the Rust development server.
-    if (pathname === '/__ruvyxa/image') {
+    if (pathname === IMAGE_PATH) {
       return handleDynamicImage(
         request,
         runtimeContext.optimizeImage ?? optimizeImage,
@@ -674,8 +723,20 @@ export function createHandler(options) {
 
     const match = matchRoute(pathname)
     if (!match) {
-      const redirect = localeRedirect(request, pathname, basePath, matchRoute, i18n)
-      if (redirect) return Response.redirect(new URL(redirect, request.url), 307)
+      const redirect = localeRedirect(request, pathname, url.search, basePath, matchRoute, i18n)
+      // The path alone, never an origin. `Response.redirect()` demands an
+      // absolute URL, so this reached for `new URL(redirect, request.url)` and
+      // took its origin from `request.url` — which the standalone server builds
+      // from the raw `Host` header, so a client chose the redirect target. No
+      // browser forges `Host` on its own, but the response carries no
+      // `Vary: Host`, so any shared cache keyed on path can store the forged
+      // `Location` and hand it to real visitors.
+      //
+      // RFC 9110 has allowed a relative `Location` since 2014 and every browser
+      // resolves one against the request URL, so this is the same answer for
+      // every legitimate request — and it is byte for byte what the native
+      // host's locale redirect in `render_pipeline.rs` sends.
+      if (redirect) return new Response(null, { status: 307, headers: { location: redirect } })
       // The application's own not-found page, pre-rendered by the build.
       //
       // `app/not-found.tsx` is the file every reader coming from another
@@ -856,11 +917,79 @@ export function createHandler(options) {
   }
 
   /**
+   * Refuse a `/__ruvyxa/rsc` request that is not provably same-origin.
+   *
+   * The pair `validate_action_request` and `server_components_request_rejection`
+   * both apply, reading the same two policy fields, because this is the same
+   * class of request: a `GET` renders the visitor's page with their cookies and
+   * a `POST` runs a project server function.
+   *
+   * This endpoint's whole request-validation story used to be one custom header,
+   * on the premise that a cross-origin page cannot set one without a preflight
+   * nothing answers. `createFetchMiddleware`'s CORS layer wraps the entire
+   * handler and answers preflights before `dispatch` is reached, so a project
+   * that enabled CORS for its own API — `{ origins: ['*'], credentials: true }`
+   * — silently turned the header requirement into a preflight that *is*
+   * answered, and a third-party page could call any server function with the
+   * visitor's cookies.
+   *
+   * Fail-closed with neither `Origin` nor `Sec-Fetch-Site` present is inherited
+   * from `originIsCrossSite` and is deliberate: the browser halves of this
+   * endpoint (`rsc-client-runtime.mjs` and `@ruvyxa/react`'s router) always run
+   * in a browser, and a browser sends one of the two. A `curl` that sends
+   * neither now gets 403 here, as it always has at `/__ruvyxa/action`.
+   *
+   * A deployed function has no transport peer to weigh `X-Forwarded-Proto`
+   * against, so — exactly as `actionOriginIsCrossSite` does — the header is read
+   * as stated: the platform's ingress is the trusted proxy by construction, and
+   * the host comparison is the load-bearing check either way.
+   */
+  function serverComponentsRequestRejection(headers) {
+    const trustedScheme = parseForwardedScheme(headers.get('x-forwarded-proto'))
+    if (
+      actionPolicy.sameOrigin !== false &&
+      originIsCrossSite(headers, headers.get('host') ?? '', { trustedScheme })
+    ) {
+      return textResponse(403, 'Cross-origin server-components request blocked')
+    }
+    if (actionPolicy.fetchMeta !== false && fetchSiteIsCrossSite(headers)) {
+      return textResponse(403, 'Cross-site server-components request blocked')
+    }
+    return null
+  }
+
+  /**
+   * Fixed-window limiter for one server-function call, shaped like
+   * `actionRateLimitResponse` and keyed like `rsc_action_rate_limit_key`.
+   *
+   * Client, route, and the function being called, so a page that issues several
+   * server-function calls in one interaction spends a budget per function rather
+   * than one between them — the granularity the action endpoint gets from naming
+   * the action.
+   *
+   * The `rsc:` prefix keeps these buckets out of the action endpoint's: one map
+   * serves both, and a reference and an action name are separate namespaces that
+   * can legitimately spell the same thing on one route. The path is the
+   * canonical one, so alternate spellings of one route cannot each open a fresh
+   * bucket. Both are the native key's two deliberate differences, kept here so
+   * the two hosts refuse the same call at the same count.
+   */
+  function rscActionRateLimitResponse(request, requestPath, reference) {
+    const key = boundedKey(
+      `rsc:${clientAddress(request.headers, trustedProxies, ingressHeaders)}:${requestPath}:${reference}`,
+    )
+    return consumeFixedWindow(actionBuckets, key, actionRateLimit.max, actionRateLimit.window, {
+      message: 'Server-function rate limit exceeded',
+    })
+  }
+
+  /**
    * The Flight payload for a soft navigation into a server-components route.
    *
    * Mirrors `rsc_payload_endpoint` in the native server: the same header gate,
-   * the same content type, and the same `Vary` — the browser router calls one
-   * endpoint and must not be able to tell which host answered.
+   * the same origin and fetch-metadata pair, the same content type, and the same
+   * `Vary` — the browser router calls one endpoint and must not be able to tell
+   * which host answered.
    *
    * This reported 501 in every deployed build until the generated route
    * registry learned to render through the server-components pipeline, so a
@@ -874,12 +1003,14 @@ export function createHandler(options) {
         headers: { allow: 'GET, POST', 'content-type': 'text/plain; charset=utf-8' },
       })
     }
-    // The header a cross-origin page cannot set without a preflight. Same gate
-    // the native server applies, and the reason this endpoint needs no CORS
-    // rule of its own.
+    // The header a cross-origin page cannot set without a preflight this host
+    // does not answer — unless the project configured one, which is why the
+    // origin pair below runs as well and this is no longer the whole gate.
     if (request.headers.get(RSC_REQUEST_HEADER) !== '1') {
       return textResponse(400, 'Server-components payload requests require the Ruvyxa header')
     }
+    const refused = serverComponentsRequestRejection(request.headers)
+    if (refused) return refused
 
     const pathname = canonicalRoutePath(url.searchParams.get('path') ?? '')
     if (pathname === null) return textResponse(400, 'Payload request has an invalid route')
@@ -947,6 +1078,8 @@ export function createHandler(options) {
     if (request.headers.get(RSC_REQUEST_HEADER) !== '1') {
       return textResponse(400, 'Server-components payload requests require the Ruvyxa header')
     }
+    const refused = serverComponentsRequestRejection(request.headers)
+    if (refused) return refused
     const reference = request.headers.get(SERVER_ACTION_HEADER) ?? ''
     if (reference === '') {
       return textResponse(400, 'Server-function calls must name a reference')
@@ -954,6 +1087,20 @@ export function createHandler(options) {
 
     const pathname = canonicalRoutePath(url.searchParams.get('path') ?? '')
     if (pathname === null) return textResponse(400, 'Payload request has an invalid route')
+
+    // After validation and before anything is imported or run, the position
+    // `handleServerAction` uses: a malformed request is cheap to refuse and must
+    // not consume a client's budget. The key is the canonical request path, the
+    // same string the native host takes from its resolved route, so both hosts
+    // bucket one route's calls together however the caller spelled it.
+    //
+    // Ahead of the route lookup rather than behind it, which is the one place
+    // this differs from the native ordering: an unmatched path is answered from
+    // this map instead of costing a matcher walk per request, and the two hosts
+    // still refuse a real call at the same count.
+    const limited = rscActionRateLimitResponse(request, pathname, reference)
+    if (limited) return limited
+
     const match = matchRoute(pathname)
     if (!match || match.route.kind !== 'page') {
       return textResponse(404, 'Payload route was not found')
@@ -1217,7 +1364,13 @@ export function createHandler(options) {
    * middleware is reused here rather than adding a second scheme.
    */
   function actionRateLimitResponse(request, targetPath, actionName) {
-    const key = `${clientAddress(request.headers, trustedProxies, ingressHeaders)}:${targetPath}:${actionName}`
+    // Bounded for the same reason the built-in limiter's key is: the path is
+    // caller-written and this map retains ten thousand of whatever it is
+    // handed. The client is at the front of the identity, so a caller cannot
+    // reach another client's bucket by lengthening the part it controls.
+    const key = boundedKey(
+      `${clientAddress(request.headers, trustedProxies, ingressHeaders)}:${targetPath}:${actionName}`,
+    )
     return consumeFixedWindow(actionBuckets, key, actionRateLimit.max, actionRateLimit.window, {
       message: 'Action rate limit exceeded',
     })
@@ -1332,6 +1485,15 @@ export function createHandler(options) {
    * function sends and the value the native host sends for the same route
    * cannot drift. A header the render already set always wins: a page that
    * chose its own caching meant it.
+   *
+   * `requestScoped` outranks the strategy. `documentCacheControl` describes the
+   * *route*; `requestScoped` describes *this response*, and a render that read
+   * cookies, headers, or draft mode produced one visitor's document. Telling a
+   * shared cache it may reuse that for the route's window is how one visitor's
+   * page reaches everybody else — the same reason the stores above refuse it,
+   * applied to the other cache the response can reach. Mirrors the `formData`
+   * branch in `servePageDocument`, which answers `no-store` for exactly this
+   * reason, and `insert_document_cache_control` on the native host.
    */
   async function handlePage(route, request, pathname, params, runtimeContext) {
     const rendered = await servePageDocument(route, request, pathname, params, runtimeContext)
@@ -1342,7 +1504,9 @@ export function createHandler(options) {
     try {
       rendered.headers.set(
         'cache-control',
-        documentCacheControl(route.render.strategy, route.render.revalidate),
+        rendered.requestScoped
+          ? 'no-store'
+          : documentCacheControl(route.render.strategy, route.render.revalidate),
       )
     } catch {
       // A response whose headers are immutable already decided.
@@ -1583,8 +1747,24 @@ async function handleDynamicImage(request, optimizer, defaultQuality = DEFAULT_I
  * page a project may legitimately own — was redirected under `ruvyxa dev` and
  * silently excluded once deployed. It is matched by whole segment now, as
  * `/api` already was.
+ *
+ * `search` is the request's query string including its leading `?`, or `''`.
+ * Both hosts built `Location` from the path alone, so `GET /about?q=hello`
+ * answered `/en/about` and every query-bearing entry point on an i18n site lost
+ * its parameters on the first, unprefixed hit — search, pagination, UTM tags,
+ * an OAuth `?code=`/`?state=` callback. A 307 preserves the method and the body
+ * and says nothing about the query: the query is part of the target URI and has
+ * to be reproduced explicitly.
+ *
+ * @param {Request} request
+ * @param {string} pathname
+ * @param {string} search
+ * @param {string} basePath
+ * @param {(pathname: string) => { route: { kind: string } } | null} matchRoute
+ * @param {Record<string, unknown> | null | undefined} config
+ * @returns {string | null}
  */
-function localeRedirect(request, pathname, basePath, matchRoute, config) {
+function localeRedirect(request, pathname, search, basePath, matchRoute, config) {
   if (
     !config ||
     !['GET', 'HEAD'].includes(request.method) ||
@@ -1602,7 +1782,11 @@ function localeRedirect(request, pathname, basePath, matchRoute, config) {
     const candidate = pathname === '/' ? `/${locale}` : `/${locale}${pathname}`
     const matched = matchRoute(candidate)
     if (matched?.route.kind === 'page') {
-      return `${basePath === '/' ? '' : basePath}${candidate}`
+      // `URL.search` is `''` for both an absent query and a bare `?`, so an
+      // empty query never leaves a dangling `?` on the target — which is the
+      // same answer `locale_redirect_path` gives after splitting the raw
+      // request target.
+      return `${basePath === '/' ? '' : basePath}${candidate}${search ?? ''}`
     }
   }
   return null
@@ -1676,15 +1860,88 @@ function localizeHtmlDocument(html, routePath, pathname, params, config) {
   return document
 }
 
-function escapeHtmlAttribute(value) {
-  return String(value)
-    .replaceAll('&', '&amp;')
-    .replaceAll('"', '&quot;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
+// Exported for `tests/packages/ruvyxa/document-head-parity.test.mjs`, which
+// replays the shared escaping table against this copy and the two others. An
+// unexported copy is one the fixture cannot reach, which is the whole failure
+// this table exists to stop.
+export function escapeHtmlAttribute(value) {
+  return (
+    String(value)
+      .replaceAll('&', '&amp;')
+      .replaceAll('"', '&quot;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      // `&#39;`, not `&apos;`: HTML 4 does not define the latter. Kept level with
+      // `escape_html` on the native host, which escapes the same values for the
+      // same documents -- a character taught to one and not the other is how the
+      // two hosts come to emit different bytes for one input.
+      .replaceAll("'", '&#39;')
+  )
 }
 
-const MAX_TRACKED_RATE_LIMIT_KEYS = 10_000
+export const MAX_TRACKED_RATE_LIMIT_KEYS = 10_000
+
+/**
+ * The widest a tracked rate-limit key may be, in characters.
+ *
+ * Matches the sixty-four hex digits `bounded_key` in
+ * `crates/ruvyxa_middleware/src/builtin.rs` produces, so
+ * `tests/fixtures/rate-limit-conformance.json` can hold one bound over both
+ * hosts.
+ */
+const MAX_RATE_LIMIT_KEY_LENGTH = 64
+
+/**
+ * Sixteen hex digits that separate two identities sharing a long prefix.
+ *
+ * Not a cryptographic hash and not offered as one: two thirty-two-bit FNV-1a
+ * passes with different offset bases, spliced. It is only ever appended *after*
+ * the first characters of the identity it describes, so producing the same
+ * bounded key as another client still means reproducing that client's prefix —
+ * which is the part an attacker does not have. `Math.imul` keeps it in the
+ * integer fast path; a BigInt loop over a 16 KB header value would hand the
+ * flood this function exists to bound a second cost to inflict.
+ *
+ * @param {string} value
+ */
+function identityDigest(value) {
+  let low = 0x811c9dc5
+  let high = 0x01000193
+  const bytes = new TextEncoder().encode(value)
+  for (let index = 0; index < bytes.length; index += 1) {
+    low = Math.imul(low ^ bytes[index], 0x01000193)
+    high = Math.imul(high ^ bytes[index], 0x85ebca6b)
+  }
+  return `${(low >>> 0).toString(16).padStart(8, '0')}${(high >>> 0).toString(16).padStart(8, '0')}`
+}
+
+/**
+ * The fixed-width map key one client identity is tracked under.
+ *
+ * The identity is not bounded and is not ours: `key: "header:x-api-key"` takes
+ * the header verbatim, and `crates/ruvyxa_middleware/src/stack.rs` accepts any
+ * valid header name for `key:`, so the only limit on a tracked key was the
+ * server's header size
+ * limit — ten thousand of those retain tens of megabytes. The crate's "bounded
+ * memory" promise was true of the *count* and not of the *size*. This makes it
+ * true of both.
+ *
+ * The native twin hashes with blake3, which this host cannot reach: this module
+ * is copied verbatim into edge bundles where `node:crypto` does not exist, and
+ * `crypto.subtle` is async while this limiter is not. So an identity already
+ * inside the bound is kept as it is, and a longer one is truncated onto a digest
+ * of the whole. What the two hosts must agree on is the observable contract —
+ * bounded length, one key per identity, and no two identities collapsing into
+ * one bucket — and that is what
+ * `tests/fixtures/rate-limit-conformance.json` holds them to.
+ *
+ * @param {string} identity
+ */
+export function boundedKey(identity) {
+  const value = String(identity)
+  if (value.length <= MAX_RATE_LIMIT_KEY_LENGTH) return value
+  return `${value.slice(0, MAX_RATE_LIMIT_KEY_LENGTH - 17)}#${identityDigest(value)}`
+}
 
 /** Compile validated built-in middleware into a Fetch-native wrapper. */
 function createFetchMiddleware(config, trustedProxies = [], ingressHeaders = [], logAs = 'text') {
@@ -1837,14 +2094,41 @@ function rateLimitResponse(request, rate, buckets, trustedProxies, ingressHeader
 }
 
 /**
+ * The key of the bucket whose window started earliest, or `undefined` if none.
+ *
+ * The bucket to give up when the map is full and the sweep freed nothing: the
+ * client that has gone quietest. `RateLimitLayer::allow` picks the same one
+ * with `min_by_key` over `last_refill`. A tie is broken by whichever the map
+ * yields first, which differs between the two hosts and is deliberately not
+ * part of the shared contract.
+ *
+ * @param {Map<string, {remaining: number, startedAt: number}>} buckets
+ */
+function leastRecentlyStartedKey(buckets) {
+  let oldestKey
+  let oldestStartedAt = Infinity
+  for (const [trackedKey, tracked] of buckets) {
+    if (tracked.startedAt < oldestStartedAt) {
+      oldestStartedAt = tracked.startedAt
+      oldestKey = trackedKey
+    }
+  }
+  return oldestKey
+}
+
+/**
  * Consume one unit from a fixed-window bucket, or return the 429 to send.
  *
  * The built-in `rate` middleware and the server-action endpoint both need this,
  * and running two counters with slightly different eviction rules is how a
  * limiter ends up enforcing two different policies depending on which door a
  * request came through.
+ *
+ * Mirrors `RateLimitLayer::allow` in `crates/ruvyxa_middleware/src/builtin.rs`,
+ * and `tests/fixtures/rate-limit-conformance.json` is what holds the two to one
+ * answer.
  */
-function consumeFixedWindow(
+export function consumeFixedWindow(
   buckets,
   key,
   max,
@@ -1863,8 +2147,27 @@ function consumeFixedWindow(
       for (const [trackedKey, tracked] of buckets) {
         if (now - tracked.startedAt >= windowMs) buckets.delete(trackedKey)
       }
-      if (buckets.size >= MAX_TRACKED_RATE_LIMIT_KEYS) {
-        return rateLimited(message, 1)
+      // The sweep frees only a bucket whose *whole* window has elapsed, so
+      // inside one window it can free nothing at all — which is exactly the
+      // state one client produces by sending a distinct `X-Api-Key` per
+      // request. Refusing here would hand that one client the whole
+      // deployment: every visitor the map has not already seen gets a 429
+      // until the window rolls.
+      //
+      // "Fail closed" is the right answer when a limiter cannot answer. This
+      // one can: it is not out of answers, it is out of slots, and a slot can
+      // be taken back. Evict the least recently started bucket — the client
+      // that has gone quietest — and admit the new one. The evicted client is
+      // re-admitted with a full allowance the moment it returns, so the cost
+      // of the flood falls on the strictness of the limit rather than on
+      // availability. Scanning for the oldest rather than trusting the Map's
+      // insertion order costs what the native host already pays for the same
+      // decision, and does not quietly become wrong the day a bucket is
+      // restarted in place.
+      while (buckets.size >= MAX_TRACKED_RATE_LIMIT_KEYS) {
+        const oldestKey = leastRecentlyStartedKey(buckets)
+        if (oldestKey === undefined) break
+        buckets.delete(oldestKey)
       }
     }
     bucket = { remaining: max, startedAt: now }
@@ -1887,11 +2190,25 @@ function rateLimited(message, retryAfterSeconds) {
   })
 }
 
-function rateLimitKey(request, configuredKey, trustedProxies, ingressHeaders) {
+/**
+ * Which identity one request is rate-limited under, bounded before it is kept.
+ *
+ * Mirrors `RateLimitLayer::extract_key` in
+ * `crates/ruvyxa_middleware/src/builtin.rs`.
+ *
+ * A configured header that is absent — or present and empty, which identifies
+ * nobody either — falls back to the client address rather than to a shared
+ * literal. A request missing the header is not the *same* client as every other
+ * request missing it, and bucketing them together turns the limiter into the
+ * outage it exists to prevent: one caller that never sends the header drains a
+ * counter every other such caller has to share.
+ */
+export function rateLimitKey(request, configuredKey, trustedProxies, ingressHeaders) {
   if (typeof configuredKey === 'string' && configuredKey.startsWith('header:')) {
-    return request.headers.get(configuredKey.slice('header:'.length)) ?? 'unknown'
+    const configured = request.headers.get(configuredKey.slice('header:'.length))
+    if (configured) return boundedKey(configured)
   }
-  return clientAddress(request.headers, trustedProxies, ingressHeaders)
+  return boundedKey(clientAddress(request.headers, trustedProxies, ingressHeaders))
 }
 
 // ─── Client Identity ────────────────────────────────────────────────────────
@@ -2296,7 +2613,11 @@ function isUnsafeSegment(segment) {
   for (const char of segment) {
     if (char === '/' || char === '\\' || char === ':') return true
     const code = char.codePointAt(0)
-    if (code < 0x20 || code === 0x7f) return true
+    // C0 *and* C1. Rust's `char::is_control()` covers U+0080–U+009F and this
+    // copy stopped at U+007F, so the writer refused a segment the readers would
+    // have accepted — a divergence the shared table had no case for until now.
+    // `line 346` above already spells the full range; these two agree again.
+    if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) return true
   }
   return false
 }
@@ -2523,32 +2844,5 @@ export function resolveRouteForTesting(routes, pathname) {
       : null
   } catch {
     return null
-  }
-}
-
-// ─── Response Normalization ─────────────────────────────────────────────────
-
-function normalizeResponse(result, route = 'this route') {
-  if (result instanceof Response) return result
-  // Returning serialisable data instead of a Response is a supported
-  // convenience. Returning nothing is not: `Response.json(undefined)` throws
-  // "Value is not JSON serializable" from inside undici, and the message that
-  // reached the caller named neither the handler nor the fact that it returned
-  // nothing — the suggested fix was to check the module's imports.
-  if (result === undefined) {
-    throw new Error(
-      `RUV1504 the handler for ${route} returned nothing. A route handler must return a Response, ` +
-        'or data that can be serialised as JSON, which is sent as `Response.json(data)`.',
-    )
-  }
-  try {
-    return Response.json(result)
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error)
-    throw new Error(
-      `RUV1504 the handler for ${route} returned a value that cannot be serialised as JSON ` +
-        `(${detail}). Return a Response, or data built from plain objects, arrays, strings, ` +
-        'numbers, booleans, and null.',
-    )
   }
 }

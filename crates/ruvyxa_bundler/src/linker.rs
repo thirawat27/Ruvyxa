@@ -37,6 +37,7 @@
 //! For a 100-module graph with 5 layers, this cuts link time by ~4× on
 //! a 4-core machine.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -945,10 +946,22 @@ fn rewrite_module_into(
             drop_external_imports,
             importer,
         );
+        // The body is indented because it sits inside the wrapper, but a line
+        // whose *first* byte is text — a continuation line of a multi-line
+        // template literal, or of a `\`-continued string — carries those two
+        // spaces into the string rather than into the source. Harmless for
+        // CSS-in-JS; wrong for YAML, a `<pre>` block, a Markdown fence, or
+        // anything else indentation-significant. `compiler.mjs`'s `linkModules`
+        // asks `createCodeIndex` the same question about the same two spaces.
+        //
+        // The first byte, not `statement_start`: a code line that opens with a
+        // string (`  "key": 1,`) starts its literal at the first non-whitespace
+        // byte, and that line is code and does get indented.
+        let line_start = statement_start - (line.len() - line.trim_start().len());
         write_tracked_line(
             body,
             &commonjs_rewritten,
-            indent,
+            indent && module_ast.is_code_offset(line_start),
             &mut origins,
             Some(index as u32),
         );
@@ -1049,18 +1062,42 @@ fn reject_surviving_esm(body: &str, module_path: &str) -> Result<()> {
         let line_end = body[offset..]
             .find('\n')
             .map_or(body.len(), |at| offset + at);
-        let hint = match split_from_specifier(body[line_start..line_end].trim()) {
-            Some((_, specifier)) => format!(
-                "Its specifier `{specifier}` did not resolve to a module in this bundle, \
-                 so the statement was left as it was written. Check that the file it names \
-                 exists and is reachable from the entry, or add the package to \
-                 `build.external`."
-            ),
-            None => "Modules whose statements share a line are normally re-printed one \
-                     statement per line before linking, so this one may have failed to \
-                     parse for re-printing. Check it for syntax this build does not \
-                     support, or add the package to `build.external`."
-                .to_string(),
+        // `masked` is byte-for-byte the same length as `body`, so the line's
+        // bounds address the same text in both.
+        let opens_an_unclosed_clause =
+            masked[line_start..line_end]
+                .bytes()
+                .fold(0isize, |balance, byte| match byte {
+                    b'{' => balance + 1,
+                    b'}' => balance - 1,
+                    _ => balance,
+                })
+                > 0;
+        let hint = if opens_an_unclosed_clause {
+            // The third cause, and the one neither of the other two describes:
+            // the statement's clause is broken across lines, so there is no
+            // whole statement on this line for the rewriters to read and no
+            // specifier on it to blame.
+            "Its clause opens a `{` that this line does not close, so the statement \
+             spans lines and the line-based linker never saw all of it. Such a module \
+             is normally re-printed one statement per line before linking, so this one \
+             may have failed to parse for re-printing. Check it for syntax this build \
+             does not support, or add the package to `build.external`."
+                .to_string()
+        } else {
+            match split_from_specifier(body[line_start..line_end].trim()) {
+                Some((_, specifier)) => format!(
+                    "Its specifier `{specifier}` did not resolve to a module in this bundle, \
+                     so the statement was left as it was written. Check that the file it names \
+                     exists and is reachable from the entry, or add the package to \
+                     `build.external`."
+                ),
+                None => "Modules whose statements share a line are normally re-printed one \
+                         statement per line before linking, so this one may have failed to \
+                         parse for re-printing. Check it for syntax this build does not \
+                         support, or add the package to `build.external`."
+                    .to_string(),
+            }
         };
         return Err(BundleError::Compiler(format!(
             "RUV1612 {module_path} still contains a top-level `{keyword}` after linking, \
@@ -1550,6 +1587,31 @@ fn normalize_esm_statement(line: &str) -> Option<String> {
     Some(out)
 }
 
+/// The spelling every pass over a module's lines must ask its questions of.
+///
+/// [`normalize_esm_statement`] returns `None` for the already-spaced common
+/// case, so this borrows the line unchanged there and allocates only for the
+/// minified forms. It exists because normalisation used to be applied in one
+/// place — `rewrite_module_into` — while two other passes walked the *same*
+/// lines of the *same* module and tested the raw bytes: `collect_external_imports`
+/// asked `starts_with("import ")`, which `import{x}from"pkg"` fails, and
+/// `declares_esm_syntax` asked `starts_with("export ")`, which
+/// `export{a as default}` fails.
+///
+/// The consequences were both silent. The hoister skipped the line, the
+/// rewriter then normalised it, failed to resolve the external specifier, and —
+/// `drop_external_imports` being true for every module segment — replaced it
+/// with an empty line: nothing hoisted, no `RUV1611` stub, the binding gone,
+/// and a bundle that still parses, so neither `verify_linked_syntax` nor
+/// `reject_surviving_esm` had anything to say. Without the `__esModule` marker,
+/// an importer's default import silently bound the whole namespace object.
+///
+/// Route a fourth reader of these lines through here rather than through
+/// `trimmed`.
+fn normalized_statement(line: &str) -> Cow<'_, str> {
+    normalize_esm_statement(line).map_or(Cow::Borrowed(line), Cow::Owned)
+}
+
 fn is_linker_identifier_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$'
 }
@@ -1633,17 +1695,28 @@ fn collect_external_imports(modules: &[&CompiledModule], target: BundleTarget) -
         let deps = DepIndex::new(&module.deps, &module.dependency_aliases);
         let module_ast = crate::ast::parse_module(&module.js);
         for (line, statement_start) in lines_with_statement_offsets(&module.js) {
-            let trimmed = line.trim();
-            if !trimmed.starts_with("import ") || !module_ast.is_code_offset(statement_start) {
+            if !module_ast.is_code_offset(statement_start) {
+                continue;
+            }
+            // Normalised before anything is asked of it, because
+            // `rewrite_module_into` normalises this very line one pass later.
+            // Asking the raw bytes here meant the hoister skipped a minified
+            // statement that the rewriter then deleted.
+            let statement = normalized_statement(line.trim());
+            if !statement.starts_with("import ") {
                 continue;
             }
 
             let side_effect_only =
-                trimmed.starts_with("import \"") || trimmed.starts_with("import '");
+                statement.starts_with("import \"") || statement.starts_with("import '");
             let specifier = if side_effect_only {
-                extract_quoted_string(trimmed.strip_prefix("import ").unwrap_or(trimmed))
+                extract_quoted_string(
+                    statement
+                        .strip_prefix("import ")
+                        .unwrap_or(statement.as_ref()),
+                )
             } else {
-                split_from_specifier(trimmed).map(|(_, specifier)| specifier)
+                split_from_specifier(&statement).map(|(_, specifier)| specifier)
             };
 
             let Some(specifier) = specifier else {
@@ -1673,7 +1746,9 @@ fn collect_external_imports(modules: &[&CompiledModule], target: BundleTarget) -
             }
 
             if target != BundleTarget::Client || !is_bare_specifier(&specifier) {
-                imports.insert(ensure_semicolon(trimmed));
+                // The normalised spelling is what gets hoisted: the raw one is
+                // the statement this pass could not read.
+                imports.insert(ensure_semicolon(&statement));
                 continue;
             }
 
@@ -1682,7 +1757,7 @@ fn collect_external_imports(modules: &[&CompiledModule], target: BundleTarget) -
             if side_effect_only {
                 continue;
             }
-            let Some((before_from, _)) = split_from_specifier(trimmed) else {
+            let Some((before_from, _)) = split_from_specifier(&statement) else {
                 continue;
             };
             let Some(clause) = before_from.strip_prefix("import ") else {
@@ -2148,7 +2223,13 @@ fn declares_esm_syntax(source: &str, module_ast: &crate::ast::ModuleAst) -> bool
     });
     has_esm_import
         || lines_with_statement_offsets(source).any(|(line, offset)| {
-            line.trim_start().starts_with("export ") && module_ast.is_code_offset(offset)
+            // Normalised for the same reason `collect_external_imports` is:
+            // `export{a as default}` is what a published `dist` contains, and
+            // a raw `starts_with("export ")` reads it as not-an-export. The
+            // marker then went missing and an importer's default import
+            // silently bound the namespace object.
+            module_ast.is_code_offset(offset)
+                && normalized_statement(line.trim_start()).starts_with("export ")
         })
 }
 
@@ -3189,6 +3270,41 @@ export const q = readFile;
         assert!(code.contains(&"export default sample;"), "{code:?}");
     }
 
+    /// The wrapper's indentation must not end up inside the string.
+    ///
+    /// Every module body is written into its IIFE one physical line at a time
+    /// and the two spaces used to go on unconditionally — including on a
+    /// continuation line of a multi-line template literal, which is string
+    /// content rather than source. `linkModules` in
+    /// `packages/ruvyxa/runtime/compiler.mjs` corrupted it identically, so SSR
+    /// and the client bundle agreed with each other and disagreed with what
+    /// plain ESM produces: nothing surfaced as a hydration mismatch and the
+    /// only symptom was a string quietly not what the author wrote. Harmless
+    /// for CSS-in-JS, wrong for YAML, a `<pre>` block, or a Markdown fence.
+    ///
+    /// `tests/fixtures/module-syntax-conformance.json` holds the JavaScript
+    /// half to the same answer, by executing it.
+    #[test]
+    fn a_multi_line_template_literal_keeps_its_own_indentation() {
+        let output = link_unresolved_import(
+            BundleTarget::Ssr,
+            "export const css = `a {\n  color: red;\n}`;\nexport default function Page() {}",
+        );
+
+        assert!(
+            output.contains("\n  color: red;\n"),
+            "the template's own indentation was rewritten: {output}"
+        );
+        assert!(
+            !output.contains("\n    color: red;\n"),
+            "the wrapper's indentation landed inside the string: {output}"
+        );
+        assert!(
+            output.contains("\n}`;"),
+            "the literal's closing line was indented too: {output}"
+        );
+    }
+
     #[test]
     fn client_link_keeps_template_literal_samples_out_of_hoisted_imports() {
         let entry = PathBuf::from("/app/docs.tsx");
@@ -3396,6 +3512,37 @@ export const q = readFile;
         assert!(!output.contains("  import React from \"react\";"));
     }
 
+    /// A published `dist` writes the same statement without the spaces.
+    ///
+    /// `collect_external_imports` tested `starts_with("import ")` on the raw
+    /// line, which `import{React}from"react"` fails — so the hoister skipped
+    /// it, `rewrite_module_into` normalised the very same line one pass later,
+    /// failed to resolve the external specifier, and (because
+    /// `drop_external_imports` is true for every module segment) replaced it
+    /// with an empty line. Nothing hoisted, no `RUV1611` stub, the binding
+    /// gone, and the bundle still parses — so no guard fired.
+    #[test]
+    fn server_link_hoists_minified_external_imports() {
+        for (minified, hoisted) in [
+            (
+                "import{React}from\"react\"",
+                "import {React} from \"react\";",
+            ),
+            ("import*as R from\"react\"", "import * as R from \"react\";"),
+            ("import\"react\"", "import \"react\";"),
+        ] {
+            let output = link_unresolved_import(
+                BundleTarget::Ssr,
+                &format!("{minified}\nexport default function Page() {{}}"),
+            );
+
+            assert!(
+                output.starts_with(hoisted),
+                "`{minified}` was not hoisted: {output}"
+            );
+        }
+    }
+
     /// Nothing resolves a bare specifier inside a `<script type="module">`, and
     /// Ruvyxa emits no import map, so hoisting one into a browser bundle used
     /// to kill the entire chunk with a message naming neither the package nor
@@ -3421,6 +3568,65 @@ export const q = readFile;
             output.contains("/app/page.tsx"),
             "the stub must name the importer: {output}"
         );
+    }
+
+    /// The minified spellings must reach the same `RUV1611` stub.
+    ///
+    /// Skipped by the hoister and then erased by the rewriter, the binding
+    /// disappeared with no stub and no diagnostic: the browser threw
+    /// `ReferenceError: React is not defined` from a content-hashed chunk that
+    /// named neither the package nor the importer.
+    #[test]
+    fn client_link_stubs_minified_unresolvable_bare_imports() {
+        for (minified, binding) in [
+            ("import{React}from\"react\"", "React"),
+            ("import*as R from\"react\"", "R"),
+        ] {
+            let output = link_unresolved_import(
+                BundleTarget::Client,
+                &format!("{minified}\nexport default function Page() {{}}"),
+            );
+
+            assert!(
+                !output.contains("from \"react\""),
+                "a bare specifier must not reach a browser bundle: {output}"
+            );
+            assert!(output.contains("RUV1611"), "`{minified}`: {output}");
+            assert!(
+                output.contains(&format!(
+                    "const {binding} = __ruvyxaMissingImport__(\"react\", \"{binding}\""
+                )),
+                "`{minified}`: {output}"
+            );
+        }
+    }
+
+    /// `export{a as default}` is an ES module, so its namespace needs the
+    /// marker that tells an importer `default` means the `default` export.
+    ///
+    /// `declares_esm_syntax` tested `starts_with("export ")` on the raw line,
+    /// which the minified spelling fails — so no marker was written, and
+    /// `interop_default` then handed `import X from` the whole namespace
+    /// object instead of the exported value. Nothing throws; the importer just
+    /// silently holds `{ default: … }`.
+    #[test]
+    fn a_minified_only_export_still_marks_the_namespace_as_esm() {
+        for source in [
+            "const a = 1;\nexport{a as default}\n",
+            "const a = 1;\nexport { a as default }\n",
+        ] {
+            let entry = PathBuf::from("/p/a.ts");
+            let linked = link(
+                &[fixture(entry.clone(), source, Vec::new())],
+                &client_input(entry),
+            )
+            .unwrap();
+
+            assert!(
+                linked.contains(ESM_NAMESPACE_MARKER),
+                "the namespace was not marked as ESM for `{source}`: {linked}"
+            );
+        }
     }
 
     /// The stub is the *runtime* answer; the build has to give one too.
@@ -4016,8 +4222,14 @@ export default function Layout({ children }) {
             // on its own.
             let prepared = crate::compiler::prepared_for_linking(dependency);
             let linked = link_and_parse(&prepared);
+            // Asked of the mask, the way `reject_surviving_esm` asks it. A
+            // statement-shaped line inside template text is text, and it now
+            // reaches the bundle at the column the author wrote it in — the
+            // linker no longer indents a literal's continuation lines — so a
+            // raw `contains` would read the sample as a surviving export.
+            let masked = crate::ast::masked_code(&linked);
             assert!(
-                !linked.contains(
+                !masked.contains(
                     "
 export "
                 ),

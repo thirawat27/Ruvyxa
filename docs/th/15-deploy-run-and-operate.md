@@ -157,7 +157,7 @@ pnpm verify:reproducible --root path/to/project
 - **โค้ดที่ emit ออกมาต่างกัน** = ข้อบกพร่อง และทำให้ check ไม่ผ่าน แปลว่ามีบางอย่างใน build ขึ้นกับ
   เวลาจริง, ลำดับการวนซ้ำ, ค่าสุ่ม, absolute path หรือ locale ของเครื่อง
 - **Build telemetry** — `createdAtUnix` กับ `timing` ใน `build.json` และตัวนับ cache ใน
-  `client/manifest.json` ที่ `ruvyxa bench` อ่าน — เป็นข้อมูลว่า build _ทำงานอย่างไร_ จึงต่างกันได้
+  `client-report.json` ที่ `ruvyxa bench` อ่าน — เป็นข้อมูลว่า build _ทำงานอย่างไร_ จึงต่างกันได้
   ตามธรรมชาติ รายงานให้ทราบแต่ไม่ทำให้ fail
 - **Prerendered HTML ต่างกัน** เกือบทุกครั้งเกิดจากหน้าเว็บของคุณเอง render นาฬิกาหรือค่าสุ่ม Ruvyxa
   แยกกรณีนี้จากบั๊กไม่ได้ จึงรายงานไว้ให้คุณตัดสิน

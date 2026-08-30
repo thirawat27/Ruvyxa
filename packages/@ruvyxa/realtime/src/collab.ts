@@ -16,6 +16,15 @@
  * Shared state is not a CRDT. Concurrent edits to one key do not merge; the
  * later write replaces the earlier one. Model a document as many small keys
  * when you want two peers to edit it at once without overwriting each other.
+ *
+ * A write made while the socket is down is held and replayed on the next
+ * welcome, which is a deliberate convergence choice: the local write lands
+ * *after* whatever peers wrote during the outage, so the reconnecting peer wins
+ * the key. The alternative — dropping it, which is what this client used to do
+ * — is still last-writer-wins, but with "the write never happened" as the
+ * answer and no signal that it did not. Losing a user's own edit silently is
+ * the worse of the two, so the buffer wins and the loss is reported when it
+ * cannot be avoided.
  */
 
 import type { WebSocketLike } from './client.js'
@@ -84,8 +93,15 @@ export interface CollabClient {
   onError(listener: CollabErrorListener): () => void
   /** Publish this connection's presence, replacing whatever it published before. */
   setPresence(state: unknown): void
-  /** Write shared-state keys. A `null` value deletes the key. */
-  setState(entries: Record<string, unknown>): void
+  /**
+   * Write shared-state keys. A `null` value deletes the key.
+   *
+   * Returns `true` when the frame reached an open socket. `false` means the
+   * write is held for the next reconnect instead — or, once the room is closed
+   * or the pending buffer is full, that it was dropped and `onError` has been
+   * told. An empty write returns `true`: nothing was sent and nothing is owed.
+   */
+  setState(entries: Record<string, unknown>): boolean
   close(): void
 }
 
@@ -104,6 +120,28 @@ interface ServerFrame {
 
 const DEFAULT_PATH = '/__ruvyxa/collab'
 const ROOM_PATTERN = /^[A-Za-z0-9:._/-]{1,128}$/
+/**
+ * Keys one outgoing `set` frame may carry, mirroring `MAX_ENTRIES_PER_WRITE` in
+ * `crates/ruvyxa_dev_server/src/collab.rs`. The server rejects an oversized
+ * write whole, so a replay of keys accumulated across many small writes has to
+ * travel in batches rather than as one frame the room would refuse.
+ */
+const MAX_ENTRIES_PER_FRAME = 32
+/**
+ * Bytes of key and value one replayed frame may carry, from `MAX_FRAME_BYTES`
+ * in `crates/ruvyxa_dev_server/src/collab.rs` less room for the envelope. A
+ * batch that crosses it is refused whole, so coalescing keys that were written
+ * one at a time has to respect the same ceiling the writes did.
+ */
+const MAX_REPLAY_BYTES_PER_FRAME = 32 * 1024 - 128
+/**
+ * Keys a disconnected client will hold for replay. `MAX_STATE_KEYS` in
+ * `crates/ruvyxa_dev_server/src/collab.rs` is the room's own ceiling, so a
+ * longer queue could not be flushed even if the socket came back — past this
+ * point the buffer is only a leak that grows for as long as the network is
+ * down, which is why the overflow is reported instead of absorbed.
+ */
+const MAX_PENDING_WRITE_KEYS = 256
 
 /**
  * Open a collaboration room and keep a local mirror of it.
@@ -111,7 +149,9 @@ const ROOM_PATTERN = /^[A-Za-z0-9:._/-]{1,128}$/
  * The client reconnects with backoff and re-reads the room from the welcome
  * snapshot each time, so a dropped connection converges rather than replaying
  * a partial history. Local presence is re-published after every reconnect
- * because the server drops presence with the connection that produced it.
+ * because the server drops presence with the connection that produced it, and
+ * shared-state writes made while the socket was down are replayed for the same
+ * reason: nothing else would ever carry them to the server.
  */
 export function createCollabClient(options: CollabClientOptions): CollabClient {
   const room = options.room
@@ -153,6 +193,11 @@ export function createCollabClient(options: CollabClientOptions): CollabClient {
   // Retained across reconnects: the server discards presence with the socket,
   // so the local peer must republish itself to reappear for everyone else.
   let localPresence: unknown = null
+  // Writes the socket could not take, newest value per key, in the order the
+  // keys were first written. Flushed from the welcome handler beside the
+  // presence republish and cleared as each batch leaves, so a write survives a
+  // blip once and is not replayed onto every later reconnect.
+  const pendingWrites = new Map<string, unknown>()
 
   let self: string | undefined
   let connected = false
@@ -194,6 +239,38 @@ export function createCollabClient(options: CollabClientOptions): CollabClient {
     return true
   }
 
+  /**
+   * Send the writes a dead socket refused, oldest key first.
+   *
+   * A batch is removed only once it has left, so a socket that dies part way
+   * through the flush leaves the remainder pending for the reconnect after it
+   * rather than losing the tail of the queue.
+   */
+  function flushPendingWrites(): void {
+    while (pendingWrites.size > 0) {
+      const entries: Record<string, unknown> = {}
+      const keys: string[] = []
+      let bytes = 0
+      for (const [key, value] of pendingWrites) {
+        const cost = frameCost(key, value)
+        // The first entry always travels, even when it alone is over the
+        // ceiling: the server answers that with an error the application can
+        // see, and holding it back instead would wedge every key behind it.
+        if (
+          keys.length > 0 &&
+          (keys.length === MAX_ENTRIES_PER_FRAME || bytes + cost > MAX_REPLAY_BYTES_PER_FRAME)
+        ) {
+          break
+        }
+        entries[key] = value
+        keys.push(key)
+        bytes += cost
+      }
+      if (!send({ type: 'set', entries })) return
+      for (const key of keys) pendingWrites.delete(key)
+    }
+  }
+
   function applyFrame(frame: ServerFrame): void {
     switch (frame.type) {
       case 'welcome': {
@@ -215,6 +292,10 @@ export function createCollabClient(options: CollabClientOptions): CollabClient {
         // Republish immediately so peers already in the room see this one with
         // its real state rather than the null it was announced with.
         if (localPresence !== null) send({ type: 'presence', state: localPresence })
+        // Then carry the writes the drop stranded. They land after anything
+        // peers wrote during the outage, so this peer wins those keys — chosen
+        // over losing the local edit outright, which is what happened before.
+        flushPendingWrites()
         publish()
         return
       }
@@ -361,18 +442,40 @@ export function createCollabClient(options: CollabClientOptions): CollabClient {
         presenceTimer = schedule(flushPresence, presenceThrottleMs - elapsed)
       }
     },
-    setState(entries: Record<string, unknown>) {
+    setState(entries: Record<string, unknown>): boolean {
       if (!entries || typeof entries !== 'object' || Array.isArray(entries)) {
         throw new TypeError('Collaboration setState expects an object of keys to write')
       }
-      if (Object.keys(entries).length === 0) return
-      send({ type: 'set', entries })
+      const written = Object.entries(entries)
+      if (written.length === 0) return true
+      // The whole batch travels as one frame while connected, because the
+      // server gives one room version to one frame and a caller writing several
+      // keys together means them to land together.
+      if (send({ type: 'set', entries })) return true
+      // A closed room has no reconnect coming, so holding the write would only
+      // hide it. The `false` is the whole signal an application gets.
+      if (stopped) return false
+      let dropped = 0
+      for (const [key, value] of written) {
+        if (!pendingWrites.has(key) && pendingWrites.size >= MAX_PENDING_WRITE_KEYS) dropped += 1
+        else pendingWrites.set(key, value)
+      }
+      if (dropped > 0) {
+        fail(
+          `Collaboration setState dropped ${dropped} write${dropped === 1 ? '' : 's'} while ` +
+            `disconnected: ${MAX_PENDING_WRITE_KEYS} keys are already waiting to be sent`,
+        )
+      }
+      return false
     },
     close() {
       stopped = true
       generation++
       cancel(reconnectTimer)
       if (presenceTimer !== undefined) cancel(presenceTimer)
+      // Nothing will reconnect to carry these, and an unreachable buffer is
+      // just retained memory for as long as the caller holds the client.
+      pendingWrites.clear()
       listeners.clear()
       errorListeners.clear()
       socket?.close(1000, 'client closed')
@@ -407,6 +510,20 @@ function collabUrl(configured: string | undefined, room: string): string {
   }
   url.searchParams.set('room', room)
   return url.href
+}
+
+const utf8 = new TextEncoder()
+
+/**
+ * What one `"key":value,` pair adds to a frame, in the bytes the server counts.
+ *
+ * The server measures the encoded payload, not its characters, so a room whose
+ * values are not ASCII would otherwise be measured short by exactly the margin
+ * that makes a frame too large.
+ */
+function frameCost(key: string, value: unknown): number {
+  const encoded = JSON.stringify(value)
+  return utf8.encode(JSON.stringify(key)).length + utf8.encode(encoded ?? 'null').length + 2
 }
 
 function boundedDelay(value: number, name: string): number {

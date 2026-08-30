@@ -23,27 +23,3 @@ allowBuilds:
   # Dart Sass uses this optional native watcher only for its CLI watch mode. Ruvyxa calls the
   # compile API directly, so keep the install deterministic without executing its build script.
   '@parcel/watcher': false
-minimumReleaseAgeExclude:
-  - '@oxc-transform/binding-android-arm-eabi@0.142.0 || 0.143.0'
-  - '@oxc-transform/binding-android-arm64@0.142.0 || 0.143.0'
-  - '@oxc-transform/binding-darwin-arm64@0.142.0 || 0.143.0'
-  - '@oxc-transform/binding-darwin-x64@0.142.0 || 0.143.0'
-  - '@oxc-transform/binding-freebsd-x64@0.142.0 || 0.143.0'
-  - '@oxc-transform/binding-linux-arm-gnueabihf@0.142.0 || 0.143.0'
-  - '@oxc-transform/binding-linux-arm-musleabihf@0.142.0 || 0.143.0'
-  - '@oxc-transform/binding-linux-arm64-gnu@0.142.0 || 0.143.0'
-  - '@oxc-transform/binding-linux-arm64-musl@0.142.0 || 0.143.0'
-  - '@oxc-transform/binding-linux-ppc64-gnu@0.142.0 || 0.143.0'
-  - '@oxc-transform/binding-linux-riscv64-gnu@0.142.0 || 0.143.0'
-  - '@oxc-transform/binding-linux-riscv64-musl@0.142.0 || 0.143.0'
-  - '@oxc-transform/binding-linux-s390x-gnu@0.142.0 || 0.143.0'
-  - '@oxc-transform/binding-linux-x64-gnu@0.142.0 || 0.143.0'
-  - '@oxc-transform/binding-linux-x64-musl@0.142.0 || 0.143.0'
-  - '@oxc-transform/binding-openharmony-arm64@0.142.0 || 0.143.0'
-  - '@oxc-transform/binding-wasm32-wasi@0.142.0'
-  - '@oxc-transform/binding-win32-arm64-msvc@0.142.0 || 0.143.0'
-  - '@oxc-transform/binding-win32-ia32-msvc@0.142.0 || 0.143.0'
-  - '@oxc-transform/binding-win32-x64-msvc@0.142.0 || 0.143.0'
-  - oxc-transform@0.142.0 || 0.143.0
-  - sass@1.103.0
-  - '@types/react-dom@19.2.5'

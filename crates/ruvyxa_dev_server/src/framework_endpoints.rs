@@ -29,8 +29,9 @@ use tracing::error;
 #[cfg(test)]
 use crate::RuntimeCache;
 use crate::action_security::{
-    action_client_ip, action_rate_limit_key, action_reference_id, hmr_origin_is_cross_site,
-    validate_action_payload, validate_action_request,
+    action_client_ip, action_fetch_site_is_cross_site, action_origin_is_cross_site,
+    action_rate_limit_key, action_reference_id, hmr_origin_is_cross_site, validate_action_payload,
+    validate_action_request,
 };
 use crate::devtools::dashboard_html;
 use crate::dynamic_image::{self, DynamicImageError};
@@ -497,7 +498,7 @@ fn flight_render_response(
     with_security_headers(response)
 }
 
-/// Header that keeps `/__ruvyxa/rsc` out of reach of a cross-origin page.
+/// Header naming a request as a server-components navigation.
 ///
 /// Four spellings, not two, and this comment claimed two until the count was
 /// taken: here, in `createHandler` (`serverless-handler.mjs`, the host every
@@ -507,6 +508,12 @@ fn flight_render_response(
 /// `requiredHeaders` on `/__ruvyxa/rsc` in
 /// `tests/fixtures/framework-endpoint-conformance.json` is the table both
 /// request hosts replay instead.
+///
+/// It is **not** the cross-origin gate, and describing it as one is what left
+/// this endpoint unguarded: the built-in CORS layer wraps the whole router, so
+/// a project that configures CORS for its own API answers the preflight this
+/// header was supposed to make unanswerable. [`server_components_request_rejection`]
+/// is the gate.
 const RSC_REQUEST_HEADER: &str = "x-ruvyxa-rsc";
 
 /// One server-components route, resolved and owned.
@@ -523,13 +530,79 @@ struct ServerComponentsRoute {
     params: RouteParams,
 }
 
+/// Refuse a `/__ruvyxa/rsc` request that is not provably same-origin.
+///
+/// The same pair `validate_action_request` applies to `/__ruvyxa/action`,
+/// reading the same two `ServerConfig` fields, because this is the same class of
+/// request: a `GET` renders the visitor's page with their cookies and a `POST`
+/// runs a project server function. Both fields default to `true` and this
+/// endpoint simply never read them — its whole request-validation story was one
+/// custom header, on the premise that a cross-origin page cannot set one without
+/// a preflight nothing answers. The built-in CORS layer wraps the entire router
+/// (`build_app_router` in `lib.rs`) and answers preflights before the router is
+/// consulted, so a project that enabled CORS for its own API silently turned the
+/// header requirement into a preflight that *is* answered.
+///
+/// Fail-closed with neither `Origin` nor `Sec-Fetch-Site` is inherited from
+/// `origin_is_cross_site` and is deliberate: the browser halves of this endpoint
+/// (`rsc-client-runtime.mjs` and `@ruvyxa/react`'s router) always run in a
+/// browser, and a browser sends one of the two.
+fn server_components_request_rejection(
+    headers: &HeaderMap,
+    config: &ServerConfig,
+    peer: SocketAddr,
+) -> Option<Response> {
+    if config.same_origin_actions && action_origin_is_cross_site(headers, config, peer.ip()) {
+        return Some(
+            (
+                StatusCode::FORBIDDEN,
+                "Cross-origin server-components request blocked",
+            )
+                .into_response(),
+        );
+    }
+    if config.fetch_metadata_actions && action_fetch_site_is_cross_site(headers) {
+        return Some(
+            (
+                StatusCode::FORBIDDEN,
+                "Cross-site server-components request blocked",
+            )
+                .into_response(),
+        );
+    }
+    None
+}
+
+/// Rate-limit key for one server-function call, shaped like
+/// `action_rate_limit_key`.
+///
+/// Client, route, and the function being called, so a page that issues several
+/// server-function calls in one interaction spends a budget per function rather
+/// than one between them — the same granularity the action endpoint gets from
+/// naming the action.
+///
+/// Two differences from `action_rate_limit_key`, both deliberate. The prefix
+/// keeps these buckets out of the action endpoint's: one `ActionRateLimiter` is
+/// shared by both endpoints, and a reference and an action name are separate
+/// namespaces that can legitimately spell the same thing on one route. And the
+/// path is the canonical one the router resolved rather than the raw query
+/// value, so alternate spellings of one route cannot each open a fresh bucket.
+fn rsc_action_rate_limit_key(
+    peer: SocketAddr,
+    headers: &HeaderMap,
+    request_path: &str,
+    reference: &str,
+    config: &ServerConfig,
+) -> String {
+    let client = action_client_ip(peer, headers, config);
+    format!("rsc:{client}:{request_path}:{reference}")
+}
+
 /// Resolve `/__ruvyxa/rsc`'s route, or the response explaining why it cannot.
 ///
-/// The same-origin header check lives here rather than in each endpoint so the
-/// `GET` and the `POST` cannot come to differ about it. A cross-origin page
-/// cannot set a custom header without a preflight, and nothing here answers one,
-/// so a third-party site cannot reach either verb even with credentials
-/// attached.
+/// Every gate the two verbs share lives here rather than in each endpoint, so
+/// the `GET` and the `POST` cannot come to differ about any of them: the
+/// navigation header, the origin and fetch-metadata pair, and the route lookup.
 ///
 /// The refusal is boxed. An `axum` `Response` is far larger than the resolved
 /// route, so an unboxed `Err` would make every caller of this function carry a
@@ -539,6 +612,7 @@ async fn resolve_server_components_route(
     state: &AppState,
     headers: &HeaderMap,
     path: &str,
+    peer: SocketAddr,
 ) -> Result<ServerComponentsRoute, Box<Response>> {
     if headers
         .get(RSC_REQUEST_HEADER)
@@ -552,6 +626,9 @@ async fn resolve_server_components_route(
             )
                 .into_response(),
         )));
+    }
+    if let Some(refusal) = server_components_request_rejection(headers, &state.config, peer) {
+        return Err(Box::new(with_security_headers(refusal)));
     }
     let Ok(request_path) = canonical_request_path(path) else {
         return Err(Box::new(with_security_headers(
@@ -635,18 +712,21 @@ fn flight_payload_response(payload: String) -> Response {
 /// so the visitor's headers are forwarded and the response is marked private
 /// and uncacheable.
 ///
-/// The custom header is what keeps it same-origin. A cross-origin page cannot
-/// set it without a preflight, and nothing here answers one — so a third-party
-/// site cannot read a visitor's rendered page even with credentials attached.
+/// [`server_components_request_rejection`] is what keeps it same-origin, so a
+/// third-party site cannot read a visitor's rendered page even with credentials
+/// attached. The custom header alone was believed to do that and does not — see
+/// that function for why.
 pub(crate) async fn rsc_payload_endpoint(
     State(state): State<Arc<AppState>>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>,
     Query(query): Query<RscPayloadQuery>,
     headers: HeaderMap,
 ) -> Response {
-    let route_match = match resolve_server_components_route(&state, &headers, &query.path).await {
-        Ok(resolved) => resolved,
-        Err(response) => return *response,
-    };
+    let route_match =
+        match resolve_server_components_route(&state, &headers, &query.path, peer).await {
+            Ok(resolved) => resolved,
+            Err(response) => return *response,
+        };
     let request_path = route_match.path.clone();
     let header_pairs = forwarded_header_pairs(&headers);
 
@@ -706,12 +786,19 @@ const MAX_SERVER_ACTION_BODY: usize = 4 * 1024 * 1024;
 /// The same path that serves a route's payload, because it is the same question
 /// asked twice: `GET` renders the route, `POST` runs one of the functions it
 /// exposes and returns what that function produced. A second path would mean a
-/// second reserved route and a second place the same-origin header is checked.
+/// second reserved route and a second place the shared gate is checked.
 ///
 /// The reply is itself a Flight payload, so a server function may return an
 /// element tree — including client components — and not only data.
+///
+/// This is a mutation endpoint and carries a limiter for the same reason
+/// `/__ruvyxa/action` does: without one an unauthenticated caller drives project
+/// server functions at line rate on a production `ruvyxa start` host,
+/// exhausting the worker pool and starving page renders, while the other
+/// mutation endpoint refuses the 601st call in a minute.
 pub(crate) async fn rsc_action_endpoint(
     State(state): State<Arc<AppState>>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>,
     Query(query): Query<RscPayloadQuery>,
     headers: HeaderMap,
     body: Bytes,
@@ -738,10 +825,40 @@ pub(crate) async fn rsc_action_endpoint(
                 .into_response(),
         );
     }
-    let route_match = match resolve_server_components_route(&state, &headers, &query.path).await {
-        Ok(resolved) => resolved,
-        Err(response) => return *response,
+    let route_match =
+        match resolve_server_components_route(&state, &headers, &query.path, peer).await {
+            Ok(resolved) => resolved,
+            Err(response) => return *response,
+        };
+
+    // After validation and before the worker is asked for anything, the same
+    // position `/__ruvyxa/action` uses: a malformed request is cheap to refuse
+    // and must not consume a client's budget.
+    let rate_key =
+        rsc_action_rate_limit_key(peer, &headers, &route_match.path, reference, &state.config);
+    let retry_after = {
+        let Ok(mut limiter) = state.action_limiter.lock() else {
+            error!("action rate limiter mutex poisoned; rejecting request");
+            return with_security_headers(
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Service temporarily unavailable",
+                )
+                    .into_response(),
+            );
+        };
+        (!limiter.allow(&rate_key)).then(|| limiter.retry_after_seconds(&rate_key))
     };
+    if let Some(retry_after) = retry_after {
+        return with_security_headers(
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(header::RETRY_AFTER, retry_after.to_string())],
+                "Server-function rate limit exceeded",
+            )
+                .into_response(),
+        );
+    }
 
     let content_type = headers
         .get(header::CONTENT_TYPE)
@@ -1320,6 +1437,7 @@ fn debug_traces_enabled(config: &ServerConfig) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::action_security::ActionRateLimiter;
 
     /// The `/__ruvyxa/rsc` gate is one rule with two implementations.
     ///
@@ -1384,6 +1502,243 @@ mod tests {
             2,
             "the contract requires a header on /__ruvyxa/rsc that this host does not check: \
              {required:?}"
+        );
+    }
+
+    /// A browser's loopback peer, so `forwarded_scheme` finds a trusted proxy.
+    fn local_peer() -> SocketAddr {
+        "127.0.0.1:54321"
+            .parse()
+            .expect("a literal socket address parses")
+    }
+
+    /// The header pair a browser sends on a same-document `fetch`.
+    fn browser_headers(origin: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("app.test"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_str(origin).expect("a literal origin is a valid header value"),
+        );
+        headers
+    }
+
+    /// `/__ruvyxa/rsc` is the second mutation endpoint and ran none of the
+    /// first one's guards.
+    ///
+    /// Its gate was one custom header, justified by "a cross-origin page cannot
+    /// set a custom header without a preflight, and nothing here answers one" —
+    /// but the built-in CORS layer wraps the whole router and answers the
+    /// preflight before the router is consulted, echoing the caller's `Origin`
+    /// and, with `credentials: true`, `Access-Control-Allow-Credentials`. A
+    /// project that enabled CORS for its own API therefore lost the only CSRF
+    /// defence its server functions had.
+    #[test]
+    fn a_cross_origin_server_components_request_is_refused() {
+        let config = ServerConfig::dev(".", "app.test", 3000);
+        let refusal = server_components_request_rejection(
+            &browser_headers("https://evil.test"),
+            &config,
+            local_peer(),
+        )
+        .expect("a cross-origin server-components request must be refused");
+
+        assert_eq!(refusal.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn a_cross_site_server_components_request_is_refused() {
+        let config = ServerConfig::dev(".", "app.test", 3000);
+        let mut headers = browser_headers("https://app.test");
+        headers.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
+
+        let refusal = server_components_request_rejection(&headers, &config, local_peer())
+            .expect("a cross-site server-components request must be refused");
+
+        assert_eq!(refusal.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn a_same_origin_server_components_request_is_admitted() {
+        let config = ServerConfig::dev(".", "app.test", 3000);
+        assert!(
+            server_components_request_rejection(
+                &browser_headers("https://app.test"),
+                &config,
+                local_peer(),
+            )
+            .is_none(),
+            "the browser shape the RSC client runtime sends must still be served"
+        );
+
+        let mut metadata = HeaderMap::new();
+        metadata.insert(header::HOST, HeaderValue::from_static("app.test"));
+        metadata.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+        assert!(
+            server_components_request_rejection(&metadata, &config, local_peer()).is_none(),
+            "Fetch Metadata alone is same-origin evidence, as it is for /__ruvyxa/action"
+        );
+    }
+
+    /// Fail-closed with no origin evidence at all, exactly as the action
+    /// endpoint is.
+    ///
+    /// This is the behaviour change a non-browser caller sees, and it is why
+    /// `tests/packages/ruvyxa/framework-endpoints.test.mjs` sends a same-origin
+    /// `Origin` on the `/__ruvyxa/rsc` probes: the RSC client runtime only ever
+    /// runs in a browser, and a browser sends one of the two.
+    #[test]
+    fn a_server_components_request_with_no_origin_evidence_is_refused() {
+        let config = ServerConfig::dev(".", "app.test", 3000);
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("app.test"));
+
+        assert!(
+            server_components_request_rejection(&headers, &config, local_peer()).is_some(),
+            "neither Origin nor Sec-Fetch-Site is not evidence of a same-origin caller"
+        );
+    }
+
+    #[test]
+    fn the_server_components_origin_gate_follows_the_action_configuration() {
+        let mut config = ServerConfig::dev(".", "app.test", 3000);
+        config.same_origin_actions = false;
+        config.fetch_metadata_actions = false;
+
+        assert!(
+            server_components_request_rejection(
+                &browser_headers("https://evil.test"),
+                &config,
+                local_peer(),
+            )
+            .is_none(),
+            "`same_origin_actions` and `fetch_metadata_actions` decide both mutation endpoints"
+        );
+    }
+
+    /// Mirrors `rate_limits_action_keys` in `lib.rs` for the RSC `POST`.
+    ///
+    /// The granularity is the point of the last two assertions: a page that
+    /// issues several server-function calls per interaction must not spend one
+    /// budget, so the key names the function as well as the route — the same
+    /// shape `action_rate_limit_key` uses for the action's name.
+    #[test]
+    fn rate_limits_rsc_action_keys() {
+        let mut limiter = ActionRateLimiter::new(
+            crate::ACTION_RATE_LIMIT_MAX,
+            crate::ACTION_RATE_LIMIT_WINDOW,
+        );
+        let config = ServerConfig::dev(".", "app.test", 3000);
+        let headers = browser_headers("https://app.test");
+
+        let save = rsc_action_rate_limit_key(
+            local_peer(),
+            &headers,
+            "/dashboard",
+            "app/dashboard/page.tsx#save",
+            &config,
+        );
+        let load = rsc_action_rate_limit_key(
+            local_peer(),
+            &headers,
+            "/dashboard",
+            "app/dashboard/page.tsx#load",
+            &config,
+        );
+        let elsewhere = rsc_action_rate_limit_key(
+            local_peer(),
+            &headers,
+            "/settings",
+            "app/dashboard/page.tsx#save",
+            &config,
+        );
+
+        for _ in 0..crate::ACTION_RATE_LIMIT_MAX {
+            assert!(limiter.allow(&save));
+        }
+        assert!(!limiter.allow(&save));
+        assert!(limiter.allow(&load));
+        assert!(limiter.allow(&elsewhere));
+    }
+
+    /// The two mutation endpoints share one limiter, so they must not share a
+    /// bucket.
+    ///
+    /// A server function reference and an action name are separate namespaces —
+    /// nothing stops a project from having both spelled `save` on one route —
+    /// and a shared bucket would spend one endpoint's budget on the other's
+    /// traffic.
+    #[test]
+    fn an_rsc_action_key_cannot_collide_with_an_action_endpoint_key() {
+        let config = ServerConfig::dev(".", "app.test", 3000);
+        let headers = browser_headers("https://app.test");
+        let query = ActionQuery {
+            path: "/dashboard".to_string(),
+            name: "save".to_string(),
+            id: None,
+        };
+
+        assert_ne!(
+            action_rate_limit_key(local_peer(), &headers, &query, &config),
+            rsc_action_rate_limit_key(local_peer(), &headers, "/dashboard", "save", &config)
+        );
+    }
+
+    /// The endpoint contract records which guards each host runs, not only
+    /// which headers it demands.
+    ///
+    /// `requiredHeaders` could express the header gate and nothing else, so the
+    /// contract could not see that `/__ruvyxa/action` ran four guards and
+    /// `/__ruvyxa/rsc` ran one — the two hosts were held level on a rule that
+    /// was not the load-bearing one. `requiredOrigin` and `rateLimited` are the
+    /// two that were missing, and every dispatched endpoint has to answer both
+    /// so a new one cannot arrive without deciding.
+    #[test]
+    fn every_dispatched_endpoint_declares_the_guards_it_runs() {
+        let contract: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/framework-endpoint-conformance.json"
+        ))
+        .expect("the framework endpoint contract must be valid JSON");
+
+        let mut guards: std::collections::BTreeMap<&str, (&str, &str)> =
+            std::collections::BTreeMap::new();
+        for endpoint in contract["endpoints"]
+            .as_array()
+            .expect("endpoints must be an array")
+            .iter()
+            .filter(|endpoint| endpoint["serverless"] == "dispatch")
+        {
+            let path = endpoint["path"].as_str().expect("a path is a string");
+            let read = |field: &str| -> &str {
+                let value = endpoint[field].as_str().unwrap_or_else(|| {
+                    panic!("{path} is dispatched, so the contract must declare `{field}`")
+                });
+                assert!(
+                    matches!(value, "both" | "native" | "none"),
+                    "{path}'s `{field}` is {value:?}; the contract allows only \
+                     \"both\", \"native\", or \"none\""
+                );
+                value
+            };
+            guards.insert(path, (read("requiredOrigin"), read("rateLimited")));
+        }
+
+        assert_eq!(
+            guards.get("/__ruvyxa/action").copied(),
+            Some(("both", "both")),
+            "/__ruvyxa/action runs an origin check and a rate limiter on both hosts"
+        );
+        let (origin, limited) = guards
+            .get("/__ruvyxa/rsc")
+            .copied()
+            .expect("the contract must describe /__ruvyxa/rsc");
+        assert_ne!(
+            origin, "none",
+            "this host refuses a cross-origin /__ruvyxa/rsc request, so the contract must say so"
+        );
+        assert_ne!(
+            limited, "none",
+            "this host rate-limits POST /__ruvyxa/rsc, so the contract must say so"
         );
     }
 

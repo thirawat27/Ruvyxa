@@ -20,7 +20,17 @@ export function google(options: BuiltinOAuthOptions): OAuthProvider {
     scopes: options.scopes ?? ['openid', 'email', 'profile'],
     mapProfile(profile) {
       const value = record(profile)
-      return userFromProfile('google', value.sub, value.email, value.name, value.picture)
+      // Google returns `email_verified` and it is the only thing that makes the
+      // address an identifier; anything other than a literal `true` is "not
+      // vouched for", including the string `"true"` some IdPs send.
+      return userFromProfile(
+        'google',
+        value.sub,
+        value.email,
+        value.name,
+        value.picture,
+        value.email_verified === true,
+      )
     },
   }
 }
@@ -39,12 +49,19 @@ export function github(options: BuiltinOAuthOptions): OAuthProvider {
     scopes: options.scopes ?? ['read:user', 'user:email'],
     mapProfile(profile, _tokens: OAuthTokenSet): AuthUser {
       const value = record(profile)
+      // `true` rather than a field read from the profile: GitHub's `/user`
+      // returns no verification flag because it has no unverified address to
+      // return — the endpoint selects the account's public email from the
+      // addresses GitHub itself confirmed. There is nothing to read, and
+      // leaving this absent would say "unknown" about an address the provider
+      // does in fact stand behind.
       return userFromProfile(
         'github',
         value.id,
         value.email,
         value.name ?? value.login,
         value.avatar_url,
+        true,
       )
     },
   }
@@ -69,13 +86,14 @@ function userFromProfile(
   emailValue: unknown,
   nameValue: unknown,
   imageValue: unknown,
+  emailVerified: boolean,
 ): AuthUser {
   if ((typeof idValue !== 'string' && typeof idValue !== 'number') || String(idValue) === '') {
     throw new TypeError(`${provider} profile is missing an id`)
   }
   return {
     id: `${provider}:${String(idValue)}`,
-    ...(typeof emailValue === 'string' ? { email: emailValue } : {}),
+    ...(typeof emailValue === 'string' ? { email: emailValue, emailVerified } : {}),
     ...(typeof nameValue === 'string' ? { name: nameValue } : {}),
     ...(typeof imageValue === 'string' ? { image: imageValue } : {}),
   }

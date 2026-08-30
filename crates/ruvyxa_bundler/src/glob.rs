@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::ast;
+use crate::resolver::ResolveGraphCache;
 use crate::{BundleError, Result};
 
 #[derive(Debug, Default)]
@@ -13,14 +14,77 @@ pub(crate) struct GlobExpansion {
     pub watch_roots: Vec<PathBuf>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread has parsed a module inside
+    /// [`expand_import_meta_glob`].
+    ///
+    /// The pass reads the scanner only to ask `is_code_offset` about a marker
+    /// position, so a module with no marker in it never needs the parse at
+    /// all — and essentially no module has one. Without the guard every module
+    /// in every route's graph paid a full byte scan for nothing, on top of the
+    /// scan `collect_deps_uncached` already performs on the same text.
+    ///
+    /// A skipped parse leaves no trace in the pass's output, so removing the
+    /// guard again would be silent. This counter is what makes it loud:
+    /// `the_marker_guard_skips_the_parse_for_a_module_without_one` fails the
+    /// moment the parse moves back above the search.
+    ///
+    /// Thread-local rather than a process-global counter, because the harness
+    /// runs tests on concurrent threads and a shared counter would answer with
+    /// whatever a sibling test happened to expand.
+    static PARSED_MODULES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn parsed_modules_on_this_thread() -> usize {
+    PARSED_MODULES.with(std::cell::Cell::get)
+}
+
+/// Parse a module for this pass, recording the parse in test builds.
+fn parse_counted(source: &str) -> ast::ModuleAst {
+    #[cfg(test)]
+    PARSED_MODULES.with(|count| count.set(count.get() + 1));
+    ast::parse_module(source)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many directory walks this thread has started for a glob pattern.
+    ///
+    /// The walk itself is memoized on the resolver cache, and a memo hit leaves
+    /// no trace in the expansion it hands back — the source, the matches, and
+    /// the watch roots are identical either way. This counter is what makes the
+    /// memo's removal loud, the same way `PARSED_MODULES` holds the marker
+    /// guard.
+    static DIRECTORY_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn directory_walks_on_this_thread() -> usize {
+    DIRECTORY_WALKS.with(std::cell::Cell::get)
+}
+
 pub(crate) fn expand_import_meta_glob(
     source: &str,
     importer_dir: &Path,
     project_root: &Path,
+    cache: &ResolveGraphCache,
     resolve_pattern: impl Fn(&str) -> Option<PathBuf>,
 ) -> Result<GlobExpansion> {
     const MARKER: &str = "import.meta.glob";
-    let ast = ast::parse_module(source);
+    // Search before parsing. The scanner is consulted only to ask
+    // `is_code_offset` about a marker position, so a module with no marker in
+    // its bytes has nothing to ask — and that is essentially every module, on
+    // every route, including every `node_modules` file a client graph reaches.
+    // The two neighbouring passes over the same scanner already guard this way.
+    if !source.contains(MARKER) {
+        return Ok(GlobExpansion {
+            source: source.to_string(),
+            ..Default::default()
+        });
+    }
+    let ast = parse_counted(source);
     let mut replacements = Vec::new();
     let mut hoisted_imports: Vec<String> = Vec::new();
     let mut all_matches = Vec::new();
@@ -50,15 +114,22 @@ pub(crate) fn expand_import_meta_glob(
             )));
         }
         let watch_root = glob_watch_root(&absolute_pattern, project_root);
-        let mut matches = collect_matches(&absolute_pattern, &watch_root)?;
-        // Sort and dedup on the *same* key. `slash` normalizes separators, so
-        // two paths that differ only by `\` vs `/` sort adjacent but are not
-        // `PathBuf`-equal — a plain `dedup()` let them both through and emitted
-        // the same specifier twice in the generated object literal.
-        // `sort_by_cached_key` also computes each key once instead of once per
-        // comparison.
-        matches.sort_by_cached_key(|path| slash(path));
-        matches.dedup_by_key(|path| slash(path));
+        // Walked once per (pattern, watch root) for the life of this cache. The
+        // ordered, deduplicated list is what is memoized, not the raw walk: the
+        // sort is part of the answer every caller wants, and repeating it per
+        // module would be work the memo exists to remove.
+        let matches = cache.matched_glob_files(&absolute_pattern, &watch_root, || {
+            let mut matches = collect_matches(&absolute_pattern, &watch_root)?;
+            // Sort and dedup on the *same* key. `slash` normalizes separators,
+            // so two paths that differ only by `\` vs `/` sort adjacent but are
+            // not `PathBuf`-equal — a plain `dedup()` let them both through and
+            // emitted the same specifier twice in the generated object literal.
+            // `sort_by_cached_key` also computes each key once instead of once
+            // per comparison.
+            matches.sort_by_cached_key(|path| slash(path));
+            matches.dedup_by_key(|path| slash(path));
+            Ok(matches)
+        })?;
 
         let entries = matches
             .iter()
@@ -83,7 +154,7 @@ pub(crate) fn expand_import_meta_glob(
             .collect::<Vec<_>>()
             .join(", ");
         replacements.push((start, parsed.end, format!("{{{entries}}}")));
-        all_matches.extend(matches);
+        all_matches.extend(matches.iter().cloned());
         watch_roots.push(watch_root);
         cursor = parsed.end;
         call_index += 1;
@@ -196,6 +267,8 @@ fn parse_call(source: &str, start: usize) -> Result<ParsedCall> {
 }
 
 fn collect_matches(pattern: &Path, watch_root: &Path) -> Result<Vec<PathBuf>> {
+    #[cfg(test)]
+    DIRECTORY_WALKS.with(|count| count.set(count.get() + 1));
     if !watch_root.is_dir() {
         return Ok(Vec::new());
     }
@@ -404,6 +477,7 @@ mod tests {
             &format!("export const all = import.meta.glob('{pattern}');"),
             &root,
             &root,
+            &ResolveGraphCache::new(),
             |_| None,
         )
         .unwrap();
@@ -436,6 +510,7 @@ mod tests {
             &format!("export const all = import.meta.glob('{pattern}', {{ eager: true }});"),
             &root,
             &root,
+            &ResolveGraphCache::new(),
             |_| None,
         )
         .unwrap();
@@ -465,6 +540,7 @@ mod tests {
             ),
             &root,
             &root,
+            &ResolveGraphCache::new(),
             |_| None,
         )
         .unwrap();
@@ -484,11 +560,116 @@ mod tests {
             "{}\nexport const all = import.meta.glob('{pattern}');",
             contract["scanning"]["mustExpandAfter"].as_str().unwrap()
         );
-        let scanned = expand_import_meta_glob(&guarded, &root, &root, |_| None).unwrap();
+        let scanned =
+            expand_import_meta_glob(&guarded, &root, &root, &ResolveGraphCache::new(), |_| None)
+                .unwrap();
         assert!(
             !scanned.source.contains("import.meta.glob"),
             "a regex literal must not hide a later glob call: {}",
             scanned.source
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The pass does no work for a module that carries no glob call.
+    ///
+    /// Every non-JSON, non-content, non-external module in every route's graph
+    /// reaches this function, which for a client bundle includes every
+    /// `node_modules` file. The scanner's facts are needed only to ask
+    /// `is_code_offset` about a marker position, so parsing before searching was
+    /// one full byte scan of every module for a marker essentially none of them
+    /// carry.
+    #[test]
+    fn the_marker_guard_skips_the_parse_for_a_module_without_one() {
+        let root = temp_directory("marker-guard");
+        let source = "export const value = 1;\nexport function render() { return null }\n";
+
+        let before = parsed_modules_on_this_thread();
+        let expansion =
+            expand_import_meta_glob(source, &root, &root, &ResolveGraphCache::new(), |_| None)
+                .unwrap();
+        assert_eq!(
+            parsed_modules_on_this_thread(),
+            before,
+            "a module with no `import.meta.glob` must not be parsed"
+        );
+
+        // Behaviour-preserving: the guard returns the same expansion the walk
+        // would have produced for a module with no call in it.
+        assert_eq!(expansion.source, source);
+        assert!(expansion.matches.is_empty());
+        assert!(expansion.watch_roots.is_empty());
+
+        // And a module that *does* carry the marker still parses, so the guard
+        // cannot be "passed" by never parsing at all.
+        let directory = root.join("content");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("a.ts"), "export const value = 1;").unwrap();
+        let before = parsed_modules_on_this_thread();
+        expand_import_meta_glob(
+            "export const all = import.meta.glob('./content/*.ts');",
+            &root,
+            &root,
+            &ResolveGraphCache::new(),
+            |_| None,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed_modules_on_this_thread(),
+            before + 1,
+            "a module carrying the marker still needs the scanner"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// One build walks a glob's directory tree once, however many modules and
+    /// routes name the pattern.
+    ///
+    /// The expander runs per module per route, so a content site globbing
+    /// `./content/**/*.md` re-walked that whole tree once per route and paid it
+    /// again on every incremental rebuild — a non-empty `watch_roots` disables
+    /// persistent dependency-edge reuse, so the pass never gets to skip.
+    #[test]
+    fn a_glob_pattern_is_walked_once_for_the_life_of_one_cache() {
+        let root = temp_directory("glob-memo");
+        let directory = root.join("content");
+        fs::create_dir_all(&directory).unwrap();
+        for name in ["a.ts", "b.ts"] {
+            fs::write(directory.join(name), "export const value = 1;").unwrap();
+        }
+        let source = "export const all = import.meta.glob('./content/*.ts');";
+        let cache = ResolveGraphCache::new();
+
+        let before = directory_walks_on_this_thread();
+        let first = expand_import_meta_glob(source, &root, &root, &cache, |_| None).unwrap();
+        assert_eq!(
+            directory_walks_on_this_thread(),
+            before + 1,
+            "the first module to name a pattern walks it"
+        );
+
+        let second = expand_import_meta_glob(source, &root, &root, &cache, |_| None).unwrap();
+        assert_eq!(
+            directory_walks_on_this_thread(),
+            before + 1,
+            "a second module naming the same pattern must reuse the walk"
+        );
+        // A memo hit is indistinguishable from a walk in what it produces.
+        assert_eq!(first.source, second.source);
+        assert_eq!(first.matches, second.matches);
+        assert_eq!(first.watch_roots, second.watch_roots);
+        assert_eq!(first.matches.len(), 2);
+
+        // A different cache is a different build. Keying the memo here rather
+        // than on a process global is what keeps `dev` able to see a file that
+        // appeared between two routes.
+        expand_import_meta_glob(source, &root, &root, &ResolveGraphCache::new(), |_| None).unwrap();
+        assert_eq!(
+            directory_walks_on_this_thread(),
+            before + 2,
+            "a fresh cache must walk again rather than answer from another build"
         );
 
         fs::remove_dir_all(root).unwrap();

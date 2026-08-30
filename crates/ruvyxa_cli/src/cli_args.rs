@@ -184,6 +184,27 @@ pub(crate) fn normalize_option_args(args: &mut [OsString]) {
     }
 }
 
+/// The text after an option's leading dashes, however they were typed.
+///
+/// `--` is the canonical spelling. The other two are what a text editor or a
+/// chat client leaves behind after "smart" punctuation has rewritten a typed
+/// double hyphen: U+2014 EM DASH, and U+2013 EN DASH for the shorter
+/// substitution some of them make. A user who pastes a command out of a
+/// document is otherwise told the argument does not exist, which is true and
+/// unhelpful.
+///
+/// The rewrite is safe only because the caller gates it: `canonical_option_name`
+/// has to recognise what follows, so an ordinary positional argument that
+/// happens to begin with a dash of any kind passes through untouched and clap
+/// answers for it.
+fn option_body(arg: &str) -> Option<&str> {
+    const EM_DASH: &str = "\u{2014}";
+    const EN_DASH: &str = "\u{2013}";
+    arg.strip_prefix("--")
+        .or_else(|| arg.strip_prefix(EM_DASH))
+        .or_else(|| arg.strip_prefix(EN_DASH))
+}
+
 pub(crate) fn normalized_option_arg(arg: &OsString) -> Option<String> {
     let arg = arg.to_str()?;
 
@@ -191,7 +212,7 @@ pub(crate) fn normalized_option_arg(arg: &OsString) -> Option<String> {
         return Some("-h".to_string());
     }
 
-    let option = arg.strip_prefix("--")?;
+    let option = option_body(arg)?;
     let (name, value) = option
         .split_once('=')
         .map_or((option, None), |(name, value)| (name, Some(value)));
@@ -267,6 +288,11 @@ pub(crate) fn canonical_command_name(command: &str) -> Option<&'static str> {
         "trace" => Some("trace"),
         "bench" => Some("bench"),
         "test:parity" => Some("test:parity"),
+        // The module doc has promised this spelling since it was written, and
+        // it was the one entry of the sixteen that did not exist. A colon is
+        // awkward to type in some shells and needs quoting in others, so the
+        // hyphenated form is what a user reaches for.
+        "test-parity" => Some("test:parity"),
         "parity" => Some("parity"),
         "plugin" => Some("plugin"),
         "adds" => Some("adds"),

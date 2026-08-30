@@ -1,5 +1,1022 @@
 # Changelog
 
+## Unreleased
+
+### A release is gated on both dependency audits
+
+Both audit lanes lived in a workflow the release did not depend on, whose push triggers were
+filtered to manifest files — so a tag could publish, from the job holding the npm token, with an
+advisory never examined. The release verification runs them now. The JavaScript lane also gained a
+second pass without `--prod`: that flag excludes devDependencies, and every dependency the root
+manifest declares is one, so the existing lane audited none of the tooling that runs inside CI.
+
+### The silent-default check reads JavaScript too, and three more Rust spellings
+
+The rule is that a failed read must not become a value the caller cannot tell apart from a real one.
+The check that enforced it read only Rust, in a repository whose first rule is that both halves move
+together — and on the Rust side three spellings walked past it: `unwrap_or(value)`, an
+`unwrap_or_else` whose error is named rather than written `_`, and a chain whose combinator landed
+outside its statement window. It now covers `packages/**` for an empty `catch` around a read, and
+the rule itself has tests, which it never had.
+
+### `pnpm release:bump` leaves a formatted tree
+
+The bump rewrote about twenty manifests with `JSON.stringify`, which is not the formatting this
+repository keeps, so it left the tree failing `format:check` — a CI step on all five platforms and a
+release verification step — with a failure that named every manifest and none of them said "bump".
+
+### Smaller gate repairs
+
+`check-doc-links` saw only committed files, so a document added in the working tree could introduce
+a broken link and pass; it now reads the working tree, as its sibling already did. The dependency
+manifests under `crates/` and `templates/` are walked through the helper written to stop an
+unhandled `ENOENT` on build residue, which two other scripts already used. A constant whose
+arithmetic wraps across lines is reported rather than crashing the check with a stack trace naming
+neither the constant nor its file. And 23 stale `minimumReleaseAgeExclude` entries, naming versions
+this workspace no longer pins under a policy that was never configured, are gone.
+
+### Two copies of the request context can no longer disagree
+
+The per-request store behind `cookies()`, `headers()` and `draftMode()` installs its reader on
+`globalThis`, last writer wins, while the writer that fills it was per module instance. Which copy
+the host imported therefore decided whether the two halves agreed, on the stated premise that "the
+last one loaded is the one whose `runWithRequestContext` the host will call" — an assumption about
+module load order that nothing enforced, in a function bundle that can carry two copies. Had it ever
+inverted, every accessor would have thrown "was called outside a request" for every request in a
+deployed build, and — the dangerous half — a request-scoped render would have been reported as
+cacheable and stored in a cache shared with other users. The writer is installed beside the readers
+now, so whichever copy wins owns both.
+
+### One implementation of the action payload, action result, and handler response
+
+The worker carried its own copies of three helpers that already existed in the modules it imports
+from: the action payload parser, the action result wrapper, and the handler-response normaliser, the
+last of which lived in three places including its RUV1504 message text. Nothing behavioural changes
+— the copies were proven identical before any was deleted — but the payload parser decides how an
+action's input is decoded, and a content-type rule fixed in one copy would have left `ruvyxa dev`
+and `ruvyxa start` behaving differently from every deployed build.
+
+### The two module graphs sort strings the same way
+
+Everything sorted into a build artifact — cache keys, content fingerprints, `import.meta.glob` key
+order, emitted bytes — came out in one order on the Rust side and a different one on the Node side
+for names containing an astral character. Rust orders a `String` by its UTF-8 bytes, which is
+code-point order; the shared JavaScript comparator used `<`, which orders by UTF-16 code units, and
+the two disagree wherever a surrogate pair meets U+E000–U+FFFF. It needed both character classes in
+one sorted set of file names to fire, so it never did — but the whole point of that module is that
+ordering is a contract. It compares code points now, and a shared table is replayed by both
+languages. The comparator is named `compareCodePoints` rather than `compareCodeUnits`, because the
+old name is what made the divergence hard to see.
+
+### A package subpath cannot leave its package through a symlink
+
+The Node resolver rejected every lexical escape from a package — `..`, an absolute path, a backslash
+— and then joined and probed. A symlink is not lexical, so a package could point a declared subpath
+anywhere on disk and this graph would follow it while the Rust graph, which canonicalises for its
+existence probe and reuses that for containment, would not. The security side is mild, since the
+escaping path is chosen by an installed package. The parity side is the one that matters: two graphs
+answering one import with two different files.
+
+### The HTML escaper escapes the apostrophe, in all three copies of it
+
+`escape_html` describes itself as the one place that rule lives in the workspace. It was written
+three more times — a private twin beside it, one inside the prelude the bundler generates, and one
+in the writer a deployed request-time render goes through — and all of them replaced `&`, `<`, `>`
+and `"` but not `'`. Nothing was injectable, because every call site today is element text or a
+double-quoted attribute; the risk was the next single-quoted attribute, added by an author who
+reasonably trusts the workspace's named escaper. All of them now write `&#39;` (not `&apos;`, which
+HTML 4 does not define), the private twin is a call to the named one, and a shared table holds the
+remaining copies to the same character set.
+
+### The public-directory containment check no longer depends on its callers
+
+`contained_public_asset` resolved paths through a helper whose documented behaviour on failure is to
+return the path unresolved — correct for the diagnostics it exists for, wrong for a guard, because
+`starts_with` compares components and an unresolved `public/../secret.txt` does start with `public`.
+No caller could reach it, since each rejects `..` first, but the guarantee now belongs to the
+function whose name makes it.
+
+### PostCSS builds in a private scratch directory
+
+The directory holding a project's compiled stylesheet during a PostCSS run was
+`$TMPDIR/ruvyxa-postcss/{pid}-{nanos}`, created with an operation that succeeds on a directory that
+already exists — so on a shared build host the path could be claimed in advance and read. It is now
+created exclusively, private to the user, and removed when the run ends.
+
+### `test:parity` measures the server it is meant to measure
+
+The command whose job is to prove a route answers the same under both hosts was driving a second,
+weaker copy of the static-file rules: no ETag, no `Cache-Control`, no `Accept-Ranges`, no
+conditional or range handling, no streaming, and an error rather than a 404 for a missing file. That
+copy is gone and the parity path now goes through the same functions a live request does.
+
+### Static assets carry a date validator, and answer one
+
+`ruvyxa start` and `ruvyxa dev` now send `Last-Modified` with every public and client asset, on the
+200, the 206 and the 304 alike, and answer an `If-Modified-Since` revalidation with a 304. Public
+assets ship `must-revalidate`, so a client that cannot use entity tags was re-downloading every
+image, font and video on every revalidation; it now gets an empty 304. When a request carries both
+validators the entity tag decides and the date is ignored, which is what RFC 9110 asks of a server
+that understands both — a stale `If-None-Match` beside a date that happens to cover the file is a
+client holding something else, and it gets the file. The standalone server already behaved this way,
+so this closes a difference between the two rather than changing both.
+
+### A resumed download stops continuing a file that changed underneath it
+
+`If-Range` is now honoured by the standalone server, in both the entity-tag and date forms, and the
+native host answers the date form as well as the tag form it already understood. A server that
+ignores `If-Range` answers a byte range out of whatever the file is _now_, so a download resumed
+across a deploy silently assembled one file out of two different builds. A validator that no longer
+matches gets the whole file instead, which is also how the client learns the file changed.
+
+On Bun this needed a further step. A handler that deliberately answers 200 to a request carrying
+`Range` had that answer rewritten to a 206 by `Bun.serve`'s own range handling, for a `BunFile` body
+and for that file's stream alike, which put the corruption back one layer below the decision. Only
+responses that actually decline a range take the different path, and they still stream.
+
+### A render worker is now allowed to finish what it holds before the pool kills it
+
+The worker script gives itself five seconds to settle its in-flight requests once its stdin closes,
+and exits immediately when it is holding none. The host waited two, so any shutdown that reached a
+busy worker — every `recycle` after an instrumentation change, every worker retired mid-build —
+skipped straight to `TerminateProcess`/`SIGKILL` and logged "Node worker did not stop in time". The
+grace was written down twice, in two languages, with two different numbers, so the mechanism by
+which an in-flight render survives a worker replacement could never run. The window is now one
+number: `RUVYXA_WORKER_SHUTDOWN_MS`, normalized into the child's environment the way
+`RUVYXA_WORKER_TIMEOUT_MS` already is, with the host waiting that plus a one-second margin. Raising
+it raises both halves, and an ordinary Ctrl-C is unaffected because an idle worker still exits the
+moment its stdin closes.
+
+### A request the worker cannot accept fails on its deadline instead of hanging
+
+A worker whose event loop is blocked stops draining its stdin, and the host's queue to it is
+bounded. Queuing the request line was outside the request timeout, so once that queue filled, the
+call waited with no deadline at all: the caller believed it had one, no error was ever surfaced, and
+the request outlived every timeout above it. The enqueue is now covered by the same response timeout
+as the wait that follows it — the host's budget already carries a grace for exactly this part — and
+a queue that will not accept the line reports a worker that is not reading its input, so the pool
+can replace it.
+
+### A retired worker can no longer be orphaned between the pool and the retiring list
+
+Replacing a saturated worker, and recycling a whole generation, removed the old process from the
+pool and registered it as retiring in two separate steps. Shutdown samples the two lists in that
+same order, so a process could be missing from both: nothing then unwound its drain task, nothing
+dropped its handle, and a `node` process was left running with the build directory open. A build
+performs the transition once every thirty-two isolated renders. Both steps now happen under one
+critical section, so the process is in exactly one list at every instant.
+
+### `output_with_timeout` no longer leaks a child process when the wait itself fails
+
+If the underlying `waitpid`/`WaitForSingleObject` returned an error, the function returned with the
+child still running — `std::process::Child` does not terminate on drop — and both output-draining
+threads still blocked on their pipes. That is the orphaned runtime holding handles on the build
+directory that this helper exists to prevent, reached through its one uncovered path. Every exit
+from the wait now kills and reaps the child and joins the readers first.
+
+### A dev-mode edit trace is bounded in stages, not just in traces
+
+`/__ruvyxa/trace-ack` appends a stage to a caller-named trace, and the DevTools poll clones every
+stage it finds. The number of traces was capped but the number of stages inside one was not, so
+request volume grew a single trace without limit and made each poll more expensive than the last. A
+trace now keeps its first sixty-four stages and counts the rest as `suppressedEvents`, so a
+truncated timeline says that it is truncated. Unknown trace ids still answer `404`.
+
+### Every development-only guard in a dependency now folds, not just the first sixty-four
+
+While a production client graph is resolved, `if (process.env.NODE_ENV !== "production") { … }` in a
+`node_modules` module is folded away so a browser bundle carries one implementation instead of two.
+The fold ran a fixed sixty-four times, because each pass rescanned the module from its first byte
+and the ceiling was there to bound that cost rather than to bound the number of real guards. So the
+sixty-fifth guard and everything after it shipped, and nothing downstream could remove it: the
+linker injects `var process = globalThis.process || { env: { NODE_ENV: "production" } }`, which
+oxc's compressor cannot treat as a constant. A minified package carries far more than sixty-four of
+them, so development-only warnings and their string literals reached browsers. The ceiling is gone
+because the cost it was bounding is gone: one pass now collects every non-overlapping guard in the
+module and applies them last-first, so a pass costs one scan rather than one per fold, and the
+number of passes is bounded by nesting depth rather than by guard count. Nothing bounds the number
+of guards any more, and nothing needs to — every replacement is one of the guard's own inner spans,
+so it is strictly shorter than what it replaces and the text cannot stop shrinking. A megabyte-sized
+dependency with five hundred guards folded in 400 ms before and folds in 5 ms now, with all five
+hundred gone rather than sixty-four. Affected dependencies emit fewer bytes, so their cache keys
+change and the next build rewrites them.
+
+### A source map says `null` for a source it has no text for, rather than claiming it is empty
+
+Source Map v3 gives `null` and `""` different meanings in `sourcesContent`: `null` is "content not
+available", which sends a debugger to fetch the original file, and `""` says the file is empty.
+Ruvyxa wrote `""` for both, and every module served from the shared-route registry is registered
+without text — so stepping into a shared module in DevTools opened a blank pane instead of the
+source. Sources with no recorded text now serialize as `null`, and a genuinely empty file stays
+distinguishable from an absent one.
+
+### JSX text is text, so an `@` a page renders is no longer deleted from it
+
+`@` is not a JavaScript operator, so an `@` in a code position begins a decorator — and both
+compilers strip decorators, because the emitted bundle is plain JavaScript, which has no such
+syntax. Neither source scanner recorded JSX children as text, so children were a code position: in
+`<p>write to @support</p>` the `@` follows an alphanumeric, which is exactly where a decorator on a
+class member sits, and the page shipped as `<p>write to </p>`. Both halves did it and both did it
+silently — the Rust compiler on the plan path, which is the one every build takes, and
+`runtime/compiler.mjs` on every server render of the same route. Both scanners now read a JSX
+element from its `<` to its matching close and record its children and its quoted attribute values
+as text, while `{ … }` expression containers stay code, so an `import()`, a `require()`, or a
+`process.env` read inside one is still a graph edge and still reaches the boundary check. An element
+the walk cannot read through to its close is declined outright and scanned exactly as before — a
+generic arrow such as `<T extends object>(x: T) => x` opens what looks like a tag and never closes
+it — because dropping an import from the module graph is a worse mistake than keeping a false
+decorator, and it is the silent one. `tests/fixtures/source-scanner-conformance.json` carries
+thirteen new JSX cases, and both scanners replay every one.
+
+### One rule now decides where a decorator may be written
+
+`strip_decorators` fronted its tokenizer with a line scan for a leading `@`, a third statement of
+the placement rule written before that rule widened to member positions and never levelled with it.
+A caller that supplied a parse plan stripped `class S { @log run() {} }`; a caller that did not got
+the source back untouched, so `@log` reached plain JavaScript through the public `transform` and
+`transform_with_options` entry points. Every build supplies a plan, so no build shipped that — but
+the two answers were both reachable and only one was right. The pre-filter is now only what it
+claims to be: a module containing no `@` at all has nothing to strip. Where a decorator may sit is
+`ast::decorator_can_start`'s answer, and now nothing else's.
+
+### A client build report that cannot be read fails the build instead of shipping dead pages
+
+`client-report.json` says which browser bundle each route loads, and both halves of a build read it:
+the pre-renderer, to put the script tag into every baked document, and the adapter runner, to freeze
+the same assets into the registry a deployed function renders through. Each answered an unreadable
+or truncated report the same way — with no assets at all — and no assets means the document is
+handed back exactly as rendered: no bootstrap block, no module preloads, no
+`<script type="module">`. The build reported success, the deployed site rendered every page
+correctly, and nothing on it was interactive. The output audit could not see it either, because it
+looks for references that do not resolve and a document that references nothing has none. A
+**missing** report is still an empty map, since a `--server-only` artifact and a project whose
+routes ship no browser bundle both legitimately leave none; every other failure is now an error
+naming the file to delete and rebuild.
+
+### The final `build.json` is published atomically
+
+Two of its fields — the total build time and the artifacts the adapter emitted — are only knowable
+after the output has been committed and the adapter stage has run, so the document is written a
+second time, over a file already in place. That write was a plain truncate-and-write, and
+`ruvyxa start` and every adapter parse the result: a build interrupted inside that window left a
+truncated `build.json` that failed the deployment with nothing to say the build itself had been
+fine. It goes through the same atomic publish the artifact caches use now, so a reader sees either
+the previous complete document or the new one.
+
+### Pre-render inputs are canonicalized once instead of twice
+
+Every input path a render reports was resolved and canonicalized when the job's input list was
+built, and canonicalized again when the artifact was stored — the second answering identically by
+construction, which is why it survived. `canonicalize` is a filesystem syscall and the expensive one
+on Windows, so a dynamic route expanded to thousands of paths paid two per module per path. The
+store keys by what it is given now. One branch of the input resolution did not hold up its end of
+that contract, rebuilding its answer from the `--root` value as typed rather than from the resolved
+project root, and it is normalized like the branch beside it.
+
+### The `webVitals` collector refuses a flood instead of writing it to the log
+
+The endpoint validated the _shape_ of a beacon carefully — an enum for `name`, a finite non-negative
+`value`, a `/`-prefixed `pathname` under 2 KB — and never the volume, so anyone could write records
+into the application's logs for as long as they cared to: per-GB ingestion billing, a retention
+window shortened by the flood, and up to 2 KB of chosen `pathname` per record polluting the
+dashboards the plugin exists to fill. It now enforces a fixed-window ceiling, defaulting to 120
+records per client per minute and fifty times that from all clients combined, and answers a beacon
+past it with `429` rather than a silent `204` — a collector that quietly discards measurements
+biases the numbers it reports. `clientIp` names the per-client budget's identity and is shaped
+exactly like `@ruvyxa/auth`'s, because only the deployment knows whether a forwarded header can be
+believed; without it there is no per-client bucket and the endpoint ceiling is what remains. A
+user-agent fallback is deliberately not offered: it would put every visitor on one browser into one
+bucket. `rateLimit: false` turns the whole thing off where a WAF already bounds the endpoint. This
+is the fifth rate limiter in the workspace and the third to replay
+`tests/fixtures/rate-limit-conformance.json`.
+
+### An OAuth session records whether the provider verified the address it returned
+
+`google()` read `sub`, `email`, `name`, and `picture` and dropped `email_verified`, and `AuthUser`
+had no field that could have carried it, so a consumer could not re-derive it. Sessions are keyed on
+`id` (`google:${sub}`, `github:${id}`) and were never at risk themselves — but an application that
+links an OAuth login to an existing credentials account by address, which is a common enough pattern
+that the framework should not make it look safe, was deciding who somebody is from a claim nobody
+had checked. `AuthUser.emailVerified` carries the answer now: from Google only when the profile said
+`email_verified: true`, and `true` from GitHub, whose `/user` email is selected from the addresses
+GitHub itself confirmed. Absent still means the provider said nothing, which is never a reason to
+treat an address as verified.
+
+### `pwa()` refuses a service worker scope the deployed file cannot claim
+
+`serviceWorkerPath` and `scope` were validated independently and never compared, and the header that
+makes a broad scope legal — `Service-Worker-Allowed` — is written by the plugin's own request
+handler and by nothing else in the repository: no adapter, no platform config, and no static
+handler. `build.onComplete` writes the worker as a plain public asset, so a project that moved
+`sw.js` out of the root registered fine in development and failed in production with
+`SecurityError: The path of the provided scope … is not under the max scope allowed`, on exactly the
+CDN-served deployments that are hardest to reach. A scope outside the worker's own directory is now
+a `TypeError` at config time naming both paths. The default configuration is unaffected, because a
+worker at the root already claims everything; a project that was relying on the broad scope where
+the plugin serves the file has to move `serviceWorkerPath` into the directory its scope needs.
+
+### `wellKnown()` rejects a contact line and a content type at config time
+
+`securityTxt.contact` was checked for a scheme prefix and then interpolated into a `Contact: …`
+line, while every other URL field in the same function rejects `[\r\n\0]` — so a copy-pasted contact
+string carrying a newline did not corrupt the record, it extended it with a `Policy:` or
+`Canonical:` of its author's choosing. Separately, `entries[].contentType` was stored unvalidated
+and first reached a `Headers` constructor inside the request handler, which turned a config typo
+into a 500 on a `/.well-known/` path in production. Both are checked at construction now, the
+content type by probing the same constructor that will build the response.
+
+### A directory under `app/` that cannot be read is reported instead of read as empty
+
+`WalkDir` reports a per-entry failure as an `Err` item and `fs::read_dir` as an `Err` return, and
+nine places in route discovery dropped them — `filter_map(Result::ok)`, `let Ok(entries) = … else`,
+`file_type().is_ok_and(…)`. All of them answered "I could not look" with "there is nothing there",
+which has three outcomes with the same silence: a route directory the build cannot open simply does
+not exist, so its pages 404 in production with no diagnostic; the refusal of an intercepting route
+outside a parallel-route slot is what gets skipped, so a folder in an unreadable subtree can mount a
+publicly reachable page at a URL its author wrote as an overlay; and an interception or a
+parallel-route slot disappears from the generated entry. All nine now raise `RUV1021` naming the
+directory and the reason the operating system gave. `collectIntercepts` in
+`runtime/route-intercepts.mjs` — the `ruvyxa dev` half of the same walk — reports the same
+condition, so the two hosts still agree.
+
+### An uploaded SARIF report no longer spells out where the build ran
+
+SARIF is written to be uploaded, and four of its fields carried absolute paths: `locations` fell
+back to the absolute path whenever the project root could not prefix it, which it cannot for
+anything reached through a symlink, since the path is canonicalized first; `message` was never
+relativised at all, and route diagnostics interpolate absolute paths straight into their
+explanations; a rule's `fullDescription` carries the first such explanation verbatim; and
+`importChain` was serialized as it stood. Between them the report disclosed the developer's or CI
+runner's directory layout, the username in a home-directory path, and the names of sibling
+workspaces. Paths are relative to the project root now, by the raw spelling as well as the canonical
+one, and a file the root cannot explain is named `<outside-project>/<file>` rather than in full. The
+terminal renderer is unchanged: an absolute path there is the one a reader copies.
+
+### A file name cannot rewrite the terminal it is printed into
+
+Repository file paths reach the terminal directly — `ruvyxa routes` prints one per route — and a
+terminal is an interpreter. A name carrying `ESC [ 2 J`, an OSC title-set sequence, or a run of
+newlines and forged `✓` glyphs could rewrite what a reviewer sees in a CI log for a pull request
+from a fork, hiding a failure or forging a pass. Every value a colour role or a decorative ramp
+paints is now filtered first, whether or not colour is on, since a redirected log is exactly the
+case where it is off; and every finished line keeps only the colour changes the framework itself
+wrote, so a table cell printed as it arrived is filtered too. Rejected characters render as U+FFFD,
+because a name that was tampered with should look tampered with.
+
+### Piping Ruvyxa's output into `head` is a clean stop, not a panic
+
+Every durable line the shared terminal layer prints went out through `println!`, which panics when
+the write fails — and it fails as soon as the reader goes away. `ruvyxa routes | head -5` and
+`ruvyxa check | grep -q RUV` reported a panic and a non-zero exit for a command that did exactly
+what was asked. A closed pipe now ends the write quietly. Every other write failure still panics, so
+a full disk under a redirected stdout keeps saying so.
+
+### The route manifest is published by replacement rather than truncated in place
+
+`write_manifest` used `fs::write`, which truncates and then writes, so for the length of the write
+`routes.json` was observably empty or partial: an interrupted build left a zero-byte file that still
+looks present to anything testing only for existence, and `ruvyxa start` reading a directory being
+rebuilt saw a parse error for a document nobody wrote. It goes through the same durable publish
+every cache in the workspace already uses, so a reader sees either the previous manifest or the new
+one.
+
+### One diagnostic per leaked environment variable, in `check` and `dev` too
+
+`RUV1008` was raised once per `process.env` read rather than once per name, so a module reading one
+private variable in four places produced four identical diagnostics and the report was longest
+exactly where the reader most needs to see the set of leaked names. The bundler stopped doing this;
+the route graph, which is what `ruvyxa check` and `ruvyxa dev` report from, had a second copy of the
+same loop and did not — so the two halves disagreed about how many problems one file has. Both
+deduplicate at the point the diagnostic is raised, in first-seen source order, leaving the shared
+extraction contract the two module graphs are held to untouched.
+
+### The security defaults reach every response a Bun or Deno deployment sends
+
+The generated standalone server is one program with three transports, and the two fetch transports
+added the framework's security headers in only two places — the static response and the handler
+result. Three responses went through neither: `/__ruvyxa/health`, `/__ruvyxa/metrics`, and the
+runtime's own 500, all of which are answered outside that path. The Node transport sets the headers
+on the response object before it looks at the URL and `ruvyxa start` applies them as the outermost
+layer over its whole router, so the same build served the same probe with seven headers on one
+runtime and none on another. All three now carry them. `/__ruvyxa/metrics` also answers a non-read
+verb with `405` and `Allow: GET, HEAD` when a token is configured — falling through to routing told
+an operator who had pointed a scraper at it with the wrong method that the endpoint was never
+deployed — and stays a `404` for every verb when no token is set. A static file's own headers now
+outrank the defaults on the fetch transports as they already did on the other two hosts.
+
+### A redeploy no longer serves the previous build's incrementally rendered pages
+
+An immutable compute bundle — AWS Amplify's, and anything else that sets `isrCache: 'tmp'` — stores
+ISR refreshes in the host's temporary directory, and it used one fixed name there. That name was
+shared by every Ruvyxa deployment on the machine and by every previous build of the same one, and
+the runtime cache is read before the bundled prerender output, so a redeploy answered its first
+request per ISR page with the document the _previous_ build wrote, whose `<script src>` names client
+chunks the new build no longer publishes. The directory is now named from the build id and the path
+the bundle was deployed to, and it is created owner-only, so nothing on a shared host can plant a
+file at a route's cache path and have it served as that page. An in-place restart of a new build
+starts with a cold ISR cache and answers from the bundled prerender output until it warms.
+
+### A failed `router.retry()` clears its loading state where React can see it
+
+`retry()` cleared the pending flag in a `finally` and let the rejection propagate, so the notify
+that every other failure path in the router pairs with the clear never ran. `useSyncExternalStore`
+re-reads only when it is notified, so the `true` React last rendered stood: a spinner that never
+stopped and, for an application that wired one to `pending`, a submit button that never re-enabled —
+at the moment a user is most likely to press it again. The clear and the notification are now one
+act.
+
+### A multi-line value in `.env` is one value, not a truncation plus junk variables
+
+The `.env` reader walked the file a line at a time and unquoted within a line, so a quoted value
+that spanned lines — a PEM certificate, a service-account key, an SSH key, all routine for the auth
+and deploy integrations this framework ships — set the variable to its opening fence with the quote
+still attached, and then read the base64 body, which contains `=`, as further assignments. Those
+invented names reached every worker process and folded into the build dependency hash and the
+artifact cache key, so two checkouts of one project could disagree about what to rebuild. A quoted
+value now continues until its quote closes, an unquoted value drops a trailing ` # comment` while a
+`#` with no whitespace before it stays part of the value, and a quote that never closes keeps its
+old single-line answer rather than swallowing the rest of the file.
+
+### A plugin socket transport may only claim a literal path
+
+`realtime@1` and `presence@1` let a plugin name the path its WebSocket is served on, and both hosts
+that check it rejected `?`, `#`, and `*` — the axum 0.7 wildcard alphabet — while the server runs
+axum 0.8, where a capture is `{name}` and a catch-all `{*rest}`. A plugin declaring
+`realtime: { path: '/{room}' }` therefore registered a single-segment wildcard that shadowed every
+one-segment page in the project, and `path: '/{'` panicked the router at startup, which is the
+outcome the check exists to prevent. The rule is an allowlist now — one or more `/`-prefixed
+segments of letters, digits, `-`, `.`, `_`, or `~` — so it cannot rot as the router's syntax moves,
+and a refused path says what it may contain. A plugin that deliberately claimed a parameterised,
+trailing-slash, or percent-encoded transport path is now refused with a diagnostic instead of being
+accepted and mis-registered.
+
+### `ruvyxa start` refuses a busy port instead of quietly taking another one
+
+The bind step scanned up to a hundred ports past the one it was asked for, and it did that
+identically for `ruvyxa dev` and for `ruvyxa start`. Moving on is a convenience for a developer
+watching the terminal; a container has no such reader, so a production process bound a port nothing
+routed to, its health check failed against the configured port, and the supervisor reported a
+restart loop while the real cause — usually the previous instance not having exited — went past as a
+line on stdout. The generated standalone server has always let `EADDRINUSE` surface. `ruvyxa dev`
+still scans forward. `ruvyxa start` and `ruvyxa preview` now try the configured port only and fail
+with RUV1201, which already names the process holding it.
+
+### A generic type in a `.ts` file no longer pulls React into the bundle
+
+The bundler seeded a `react/jsx-runtime` dependency edge for the module the automatic JSX transform
+was about to inject that import into, and decided which module that was from the source scanner's
+`<`-heuristic alone. In a `.ts` file `<` opens a type, so `new Map<string, number>()` — or any
+generic call, type argument, or angle-bracket assertion — set it, while the transform refuses JSX
+for `.ts`, `.mts`, and `.cts` outright and injected nothing. Every plain-TypeScript module
+mentioning a generic therefore carried a dependency on a module it never imported: a larger module
+graph, a different answer from shared-chunk analysis, which keys on those edges, and React reaching
+route bundles that render nothing. The seed now waits on the same extension rule the transform
+applies, so it fires for the `.tsx` and `.jsx` modules that really do get a helper import and for
+the `.js` family the guess still answers for. The Node graph never had this — it reads the helper
+import off the transformed module — so this brings the two graphs level rather than changing both.
+Affected projects will see the client bundle shrink and its content hash change on the next build.
+
+### `RUV1008` reports each leaked environment variable once
+
+The private-environment-variable diagnostic was emitted once per read rather than once per name, so
+a module reading `process.env.DATABASE_URL` in five places produced five identical entries. The
+noise grew with how badly a module violated the rule, which is exactly when the reader most needs to
+see the _set_ of names that leaked, and because the rendered strings travel through the shared-chunk
+artifact cache the duplication was stored as well as printed. Names are now reported once each, in
+the order they first appear in the file.
+
+### `ruvyxa start` drains and sheds load the way the standalone server does
+
+Two lifecycle behaviours landed on the generated standalone server and nowhere else, so the same
+project answered differently depending on whether it was run by `ruvyxa start` or by its own build.
+Both are now on the Axum host as well, reading the same environment variables with the same
+defaults.
+
+A shutdown signal used to raise the drain flag and stop the listener as adjacent statements, so the
+`503` with `{"status":"draining"}` and `Retry-After: 1` that `/__ruvyxa/health` builds could never
+be read: a readiness probe is by definition a fresh connection, and it was refused rather than told
+to stop routing here. Everything the load balancer sent while it was still deregistering failed in a
+browser instead of being retried against another instance. The host now keeps listening, and serving
+normally, for `RUVYXA_DRAIN_DELAY` milliseconds before it stops accepting — five seconds by default
+under `ruvyxa start`, capped at half of `RUVYXA_SHUTDOWN_GRACE` so in-flight work keeps a budget of
+its own. `RUVYXA_DRAIN_DELAY=0` closes straight away, which is right where nothing is load-balancing
+the process and is the default under `ruvyxa dev`, where a five-second wait on Ctrl-C reads as a
+hang. A second signal ends the window immediately either way. `RUVYXA_SHUTDOWN_GRACE` now bounds
+in-flight work here too and defaults to the standalone host's twenty-five seconds rather than five,
+so a six-second render is no longer cut off on one host and allowed to finish on the other.
+
+The host also had no admission control: no concurrency limit, no queue cap, and no overload answer.
+Under a burst larger than the machine, every request waited, none was refused, and latency grew
+without bound while `/__ruvyxa/health` still answered `200`. `RUVYXA_MAX_CONCURRENCY` now bounds how
+many renders run at once — by default the machine's share of the cores, clamped to between two and
+eight — and `RUVYXA_MAX_QUEUE` bounds how many may wait, four per slot by default. Past both, a
+caller gets `503` with `Retry-After` rather than being parked on memory this process has to keep. A
+slot is released when the response exists, not when its body finishes, so a streamed document or a
+server-sent-event stream costs a slot for milliseconds rather than for its lifetime. Admission wraps
+the page fallback only, so `/__ruvyxa/health` is answered before it and an orchestrator never
+restarts a process that was merely busy. `RUVYXA_MAX_CONCURRENCY=0` turns it off, and `ruvyxa dev`
+defaults to off: one developer with a browser is not a load event.
+
+### The standalone server's body limit accounts for server function payloads
+
+`REQUEST_BODY_LIMIT` was derived from the API limit alone, so a project that tightened `apiLimit`
+also silently capped `POST /__ruvyxa/rsc`: a server action carrying more than that — a form with an
+uploaded field, a large mutation payload — was rejected with `413` before the handler saw it, even
+though the action limit permitted it. The cap is now the maximum of the API limit, the action limit,
+and the RSC action limit, and a test pins that the emitted server declares the same expression the
+serverless handler does.
+
+### Out-of-range image settings are config errors instead of silent rewrites
+
+`image.quality` and `image.effort` were clamped at each place they were read, so a project asking
+for `quality: 150` got a quality-100 build and no diagnostic, while every other out-of-range number
+in the file failed the build by name. `image.workers` had no bound at all — it reached
+`rayon::ThreadPoolBuilder` as written, where a stray digit is a spawn failure naming rayon rather
+than the config key.
+
+All three are now validated with the rest of the configuration: `image.quality` must be 1–100 (the
+bounds the shared on-demand image fixture already declared), `image.effort` 0–6, and `image.workers`
+0–256, where `0` keeps its documented meaning of "let Rayon decide". The clamps stay as defence in
+depth.
+
+**Breaking:** a project whose config carries a value outside those ranges — including `quality: 0`,
+which used to be clamped to 1 — now fails with `RUV1601`/`RUV1602` naming the field, where it
+previously built something it had not asked for.
+
+### `ruvyxa dev` keeps the generated `sitemap.xml` and `robots.txt` current
+
+Development wrote both documents into a cache directory that outlives every route change and
+restart, through the function that stages a build's `assets/` — and that function refuses to
+overwrite an existing file, because during a build the file already there is the project's own
+`public/sitemap.xml` and must win. In the cache directory the only thing that could already be there
+is its own output from an older route set, so the command a project runs while working on its SEO
+answered with a snapshot from whenever the directory was created, across restarts, until it was
+deleted. A route added, an `exclude` rule changed, or a robots policy edited changed nothing
+visible.
+
+The two directories now state their own rule. The dev server's copy is rewritten from the current
+routes on every discovery and drops what the configuration no longer generates; the build still
+refuses to overwrite a project-owned file.
+
+### Machine-readable output no longer aborts when the reader closes the pipe
+
+`doctor --json`, `trace`, and `bench --json` wrote through `println!`, which panics when the pipe is
+closed — so `ruvyxa doctor --json | jq '.adapter'` could turn a successful diagnostic run into an
+abort and a failed CI step. All three now use the same broken-pipe-safe writer as `routes --json`
+and `analyze`, and a test holds every command in the CLI to it.
+
+### WebSocket frames are bounded by the transport, not only by the parser
+
+The three WebSocket endpoints accepted axum's default 64 MiB message before handing the bytes to a
+parser that refuses anything over 32 KiB, so a peer could make the server buffer two thousand times
+the limit it was about to be told about. The upgrade now carries the same bound the parser enforces,
+derived from one constant so the two cannot drift.
+
+A peer sending an over-limit frame previously received a JSON `error` frame and kept its connection;
+it is now disconnected without a close handshake. No client shipped with this framework is affected
+— the official one caps its frames below the limit — but a third-party client relying on the error
+frame will see a dropped socket instead.
+
+### A locale redirect keeps the query string
+
+Requesting `/about?ref=email` with locale detection on redirected to `/en/about`, dropping the query
+entirely: campaign parameters, pagination, filters and search terms all vanished on a visitor's
+first request, which is exactly the request most likely to carry them. Both request hosts now append
+the original query to the redirect target, and the shared i18n conformance fixture states it.
+
+### A bare specifier is a package specifier, in both module graphs
+
+`import { x } from 'utils'` resolved to two different files depending on which graph asked. The Rust
+bundler probed the project root between `tsconfig` and `node_modules`, so it took `<root>/utils/`
+when one existed; `ruvyxa dev` and every prerender worker took `node_modules/utils`. The browser
+bundle and the server render could contain genuinely different modules for the same import, with no
+diagnostic from either.
+
+The probe is gone. Both graphs now resolve a non-relative specifier as `tsconfig paths` →
+`tsconfig baseUrl` → `node_modules`, with nothing in between — which is what `tsc`, your editor, and
+every other tool in the ecosystem already answered. `baseUrl` is the supported way to ask for
+project-root-relative resolution and works in both graphs.
+
+**If you relied on the probe**, the build now tells you so rather than failing later in the browser:
+new diagnostic **`RUV1808`** fires when a bare specifier resolves nowhere _and_ a project-root file
+would have answered it, naming that file and the two supported spellings (`./utils` or a `baseUrl` /
+`paths` entry). A specifier a package answers is unaffected.
+
+Fixed alongside it: on Windows a generated entry is spelled `D:/project/app/page.tsx` — absolute,
+but with no leading slash — and the Rust resolver tested only for a leading `/`. Every generated
+entry was therefore falling through to the package walk and being rescued by the probe that has now
+been removed. It uses a real absolute-path test, as `compiler.mjs` always did.
+
+### Four diagnostic codes were split so one code means one thing
+
+`RUV1002`, `RUV1006` and `RUV1011` each carried more than one meaning — six between them. That is
+not only untidy: the SARIF writer keys its rule table by code and keeps the **first** diagnostic it
+sees, so an uploaded report described every result under one of those codes with whichever
+explanation happened to come first. A reader searching the code in the docs got the wrong cause.
+
+The commoner meaning kept its number in each pair:
+
+| Meaning                                                      | Was       | Now           |
+| ------------------------------------------------------------ | --------- | ------------- |
+| Catch-all route must be the final URL segment                | `RUV1002` | **`RUV1017`** |
+| Intercepting route climbs above the app root                 | `RUV1006` | **`RUV1018`** |
+| Server components route also opts into partial pre-rendering | `RUV1011` | **`RUV1019`** |
+| Server components route carries an intercepting route        | `RUV1011` | **`RUV1020`** |
+
+**Breaking** for anything matching on a code: a script grepping `RUV1011`, a dashboard rule, a
+suppression list. The troubleshooting chapter lists all four new codes.
+
+A source-scanning test now fails the build when one code acquires a second meaning, so this class
+cannot accumulate again. Three collisions in `ruvyxa_dev_server` (`RUV1402`, `RUV1403`, `RUV1500`)
+are recorded as known divergences pinned by their exact titles — they are not fixed, but a _new_ or
+_changed_ meaning among them now fails the gate.
+
+### `/__ruvyxa/rsc` now runs the same guards as `/__ruvyxa/action`, on both hosts
+
+The framework has two endpoints that invoke project server functions. One of them checked the
+request's origin, its fetch metadata, its content type, a stale-reference token, a replay nonce, and
+a rate limit. The other checked that a single custom header was present.
+
+That header was doing real work — a cross-origin page cannot set one without a preflight — but the
+project's own CORS configuration answers preflights before the router is consulted, so a project
+that enabled CORS for its API silently handed third-party pages the ability to call its server
+functions with the visitor's cookies attached. And independently of any configuration,
+`POST /__ruvyxa/rsc` had no ceiling of any kind, while its sibling refused the 601st call in a
+minute.
+
+Both endpoints now run the same origin and fetch-metadata pair and share one action rate limiter, on
+the Axum host that serves `ruvyxa dev` and `ruvyxa start` and on the handler every deployed build
+uses. `tests/fixtures/framework-endpoint-conformance.json` records which guards each endpoint runs
+and is replayed from both languages, so the two hosts cannot drift apart again.
+
+**Breaking, deliberately.** `/__ruvyxa/rsc` is now fail-closed when a request carries neither
+`Origin` nor `Sec-Fetch-Site`: a `curl` probe that used to render now gets `403`, exactly as
+`/__ruvyxa/action` always has. The RSC client runtime always runs in a browser and always sends one.
+
+**Also breaking:** plugin `http` hooks no longer run over `/__ruvyxa/action`, `/__ruvyxa/flight`,
+`/__ruvyxa/rsc`, or `/__ruvyxa/image` in deployed builds, and a plugin route may no longer claim one
+of those paths. The native host never offered that coverage, so a plugin written against
+`ruvyxa dev` behaved differently once deployed — which is the divergence this closes.
+`withDefaultSecurityHeaders` still runs over those endpoints.
+
+### `healthCheck()` no longer returns the probe's exception text to anonymous callers
+
+The failure branch put the raw exception message in the response body. `/health` is reachable
+without credentials by definition — a platform probe calls it — so whatever it says is public. With
+a database probe that meant `connect ECONNREFUSED 10.0.0.5:5432` from `pg`, or the host, port and
+database name from Prisma, handed to anyone who asked, at exactly the moment the system was under
+stress and the answer was most useful to an attacker.
+
+The body is now a fixed `{ "status": "error" }` and the real message goes to the plugin's
+diagnostics, where an operator can still reach it. `healthCheck({ exposeErrors: true })` restores
+the old behaviour for a `/health` that genuinely is not internet-reachable; its documentation says
+so.
+
+**Operators:** if you were reading the cause out of the endpoint, read it from the diagnostics log
+instead, or opt in explicitly on an internal-only path.
+
+### `fonts()` cannot hang a build any more
+
+Both build-time fetches ran with no timeout and no response size limit. The plugin's error story is
+that a failure becomes a warning and the build continues — but that only covers a fetch that
+_fails_. One that neither succeeds nor fails was uncovered, so a host that accepted the connection
+and never answered left `ruvyxa build` waiting until CI's own timeout killed the job, with no
+diagnostic naming the cause.
+
+Both fetches now run under a bounded timeout and refuse an oversized body, and an abort lands in the
+existing fail-soft path: a `RUV2103` warning that names the timeout, plus the documented fallback
+stylesheet. The build finishes.
+
+### A page that read cookies is no longer advertised to a CDN as reusable
+
+Every render reports whether it read request state — `cookies()`, `headers()`, `draftMode()` — and
+both hosts consulted that answer to decide whether the HTML could be **stored**: never in the ISR
+cache, never in the render cache, never written to disk. Nothing consulted it when the response's
+own `cache-control` was written. So the document was kept out of the caches this framework owns and
+handed to the one it does not: an `isr` route that called `cookies()` left with
+`public, max-age=0, s-maxage=<window>, stale-while-revalidate=<up to a year>` and one visitor's
+personalised HTML in the body, and a shared cache given that stores it and answers every later
+request for the URL from it. `ssg` and `csr` did the same thing more quietly with
+`public, max-age=0, must-revalidate`. The `draftMode()` case is the sharpest: it exists to show
+unpublished content to an authorised previewer, and its own documentation promises such a request is
+never served from a cache.
+
+The route's strategy describes the route; whether this render read request state describes this
+response, and the response now wins. A request-scoped document leaves with `no-store` whatever the
+strategy says, on the deployed host and on the Axum host that serves `ruvyxa dev` and `ruvyxa start`
+alike. `no-store` is strictly stricter than what was sent before, so nothing that was correct can
+break.
+
+**Operators:** a route declared `isr` (or `ssg`, or `csr`) whose page reads request state on every
+request — an A/B bucket keyed on a header, a greeting that reads a cookie — stops being
+CDN-cacheable and starts reaching the origin on every request. That is the correct behaviour and it
+was never safe to cache, but it is a real origin-load increase on any such route. A page that does
+not read request state is unaffected and keeps the lifetime its strategy names. If a route shows up
+in that traffic and does not need the visitor's data, remove the accessor; if it does need it, the
+requests it now receives were always requests only the origin could answer.
+
+### `router.push()` refuses a scheme it cannot navigate to, and `<Link>` refuses to render one that executes
+
+`navigate()` parsed its href, decided it was not a page this router owns, and then handed
+`window.location.assign` the caller's **raw string** instead of the value it had just parsed. Every
+other path in the file passes the parsed URL. That one line made `useRouter().push(href)` execute a
+`javascript:` URL in the current document, which matters because a router argument is so often data:
+a CMS link field, a `?next=` parameter, a profile URL, a search result. Without a router there is no
+way for a page to turn a data string into a navigation, so this was a sink an `<a>` click never had,
+and the framework's own typing — `ExternalHref`, and a `route()` helper whose example is a CMS field
+— told authors that passing data here was supported.
+
+A href is now classified before anything acts on it. A same-origin `http:`/`https:` URL is this
+router's own. `http:`, `https:`, `mailto:`, `tel:`, `sms:`, and a `#` fragment against the page
+already showing are handed to the browser, by their parsed `href`. Anything else — `javascript:`,
+`data:`, `blob:`, `vbscript:`, and any scheme not on that list — is refused with a `console.error`
+naming the href and the scheme. `prefetch()` asks the same question in the same words.
+
+The allow-list is deliberately generous and the refusal deliberately loud, but it is an allow-list:
+a custom scheme passed to `router.push()` or `router.prefetch()` — `web+foo:`, an app deep link —
+now needs to be admitted there, and until it is, the call reports and does nothing.
+
+`<Link>` asks the same question, and asks it before it acts. It used to call `preventDefault()` and
+_then_ hand the href to `navigate()`, so a left-click on `<Link href="web+foo:…">` had the browser's
+own handling suppressed first and the router's refusal delivered a moment later: the link did
+nothing at all, where before the allow-list existed the browser had opened it. The href is now the
+fourth reason `<Link>` declines a click — beside the modifier key, the `target`, and the `download`
+it already declined for — so a scheme this router will not navigate is left to the browser exactly
+as a plain `<a href>` leaves it, with no console noise, because nothing was refused. Only a href the
+router will actually act on has its default prevented. A middle-click, a modifier-click, a `target`,
+and a `download` behave as they always have.
+
+That leaves the anchor itself, which is a second sink and always was. `<Link>` rendered its href
+verbatim, so `<Link href={route(record.url)}>` holding a `javascript:` URL executed on a left-click,
+on a middle-click, on Enter, and in the HTML the server wrote — before any of this component's
+JavaScript existed to have an opinion about it. Handing the click back to the browser is the right
+answer for `web+foo:` and the wrong one here, because "the browser handles it" is precisely what
+executes the URL. A plain `<a href>` has always behaved the same way, so this was never a
+regression; it is a hole the framework is well placed to close, and now does.
+
+Two schemes run code wherever the browser follows them — `javascript:` and `vbscript:` — and
+`<Link>` renders neither. The attribute is omitted rather than replaced with `#`, so the anchor is
+inert: not focusable, not activated by Enter, nothing for a middle-click to open, which is the
+honest rendering of a destination that was refused. The scheme is read with the URL parser rather
+than matched as text, because the browser's parser is the only thing that agrees with the browser
+that `"  JaV\tascRipt:alert(1)"` is a `javascript:` URL. In development the refusal is reported once
+per href, naming the href and saying what would work instead; a production build never reaches it,
+and the bundler's `NODE_ENV` fold removes it outright.
+
+`data:` is the third scheme, and it is refused as a **destination** and rendered as a **file**.
+Every current engine has blocked top-level `data:` navigation since 2017, so a `data:text/html` href
+in an anchor cannot become a document and cannot run its script — what is left is a link that does
+nothing, which is worth telling the author about, and
+`<Link href="data:text/csv;charset=utf-8,…" download="report.csv">`, which is the ordinary way an
+application hands a visitor a generated table and must keep working. So a `data:` href with a
+`download` attribute renders unchanged, and one without it is refused with a warning naming
+`download` as the fix. `download` does not relax `javascript:` or `vbscript:`: those execute on
+Enter and on a middle-click whatever the attribute says.
+
+This is narrower than the router's allow-list on purpose — the two answer different questions, and
+"the router will not navigate here" is not "this is dangerous to render". Every href the browser has
+always understood still renders unchanged: relative paths, `#` anchors, query-only hrefs, `mailto:`,
+`tel:`, `sms:`, cross-origin `https:`, `blob:`, and the custom schemes the router declines but a
+registered handler may accept.
+
+**Applications:** a page deliberately rendering a `javascript:` href through `<Link>` stops working,
+because the anchor now renders with no destination at all. That is the intent. Use a `<button>` with
+an `onClick` handler for an action, or a plain `<a>` when the URL itself is really what was meant. A
+`data:` href used as a link destination goes inert the same way; a `data:` href with `download` is
+untouched.
+
+### The PWA service worker's cache name is derived from the build, not stamped `v1`
+
+`pwa()` named its cache `<scope hash>-v1`. Nothing build-derived reached that name: the hash covered
+the scope, which is fixed configuration, and the suffix was a constant somebody was expected to
+remember to change. The generated worker is cache-first with no revalidation and no expiry for
+`font`, `image`, `script`, and `style`, and its `activate` deletes only the caches sharing its
+prefix whose name **differs** — so with the default the old cache was never a different name and was
+never dropped. A shipped fix to any unfingerprinted asset therefore never reached a returning
+visitor who had installed the worker: no error, no user-visible cause, and permanently stale
+application behaviour on that device if the asset was a script. Fingerprinted output was unaffected,
+because a new content hash is a new URL, which is exactly why this only ever showed up on the assets
+nobody fingerprints.
+
+Cache identity in this repository is derived, never stamped, and this was the one place it was not.
+The suffix is now a hash of the scope, the precache list, the offline fallback, and the build's own
+manifest, computed at `build.onComplete` and threaded to both the writer and the `http.onRequest`
+handler that serves `/sw.js`, so a host and a build never claim two different caches for one worker.
+The prefix stays scope-derived and stable on purpose: `activate` recognises the previous build's
+cache by that prefix, and a prefix that moved with the build could never delete anything.
+
+**Operators:** a new build is now a new cache, so each deploy discards the runtime cache and costs
+one cold fetch per runtime-cached asset afterwards. That is the correct trade against serving an
+asset stale forever, but it is a behaviour change for offline-after-deploy: a visitor who goes
+offline between the deploy and those refetches has an empty runtime cache, where before they had a
+full and possibly wrong one. `version` still exists and still pins the cache name outright — it is
+now an override rather than the default mechanism, and setting it brings the original trap back with
+it.
+
+### `contentEngine()` stops re-deriving its artifacts per request in production
+
+The plugin registered its live handler for `/sitemap.xml`, `/rss.xml`, `/content.json`,
+`/search-index.json`, and `/llms.txt` unconditionally, unlike `feed()` and `searchIndex()`, which
+both register only in development. The handler recursively walks the whole content tree and stats
+every page it finds _to compute the key its own cache is checked against_, so those syscalls were
+per request whether the cache hit or not — on precisely the paths crawlers poll, behind a
+`cache-control: no-cache` no CDN absorbs. A crawl of a project with a few hundred `page.md` files
+turned into a `stat` storm against the origin. It was also two sources of truth: the artifact the
+build wrote under `assets/` was shadowed by a live re-derivation from source, so a source tree that
+drifted after the build served bytes that silently stopped matching what was built and prerendered.
+
+The handler now registers only when the host reports `development`, matching `feed()` and
+`searchIndex()`. The build half is unchanged and still unconditional, so every one of those files is
+written to `assets/` exactly as before.
+
+**Operators:** a self-hosted `ruvyxa start` deployment that today picks up content edits without a
+rebuild stops doing so — the same trade `feed()` and `searchIndex()` already made. Rebuild to
+publish content changes.
+
+### Who a request belongs to, answered the same way by every host
+
+Every per-client control in the framework keys on one decision — the built-in `rate` middleware, the
+server-action rate limiter, and the action replay guard's per-client quota — and that decision was
+wrong in three independent ways.
+
+**A second `X-Forwarded-For` field line went unread.** The native host asked `HeaderMap::get`, which
+returns only the **first** value stored under a name, while RFC 7230 §3.2.2 says repeated field
+lines are semantically the comma-joined list. The module scanned right-to-left _within_ that value,
+which is the correct rule applied to the wrong line: a proxy that appends its own field line rather
+than extending the caller's — HAProxy's `option forwardfor` does this by default — leaves the
+caller's line first, so the caller handed itself its own rate-limit identity and collected a fresh
+bucket per request. Every field line is now read, last one first, which is the order the deployed
+host has always produced because the Fetch API's `Headers.get()` joins every instance with `", "`.
+`X-Forwarded-Proto` had the same first-value read, where a forged `https` misreported the scheme the
+server-action origin check compares against.
+
+**The standalone server had no peer to weigh.** The Axum host has always gated the forwarded chain
+on the transport peer — believed from loopback, or from an address inside
+`security.trustedProxyIps`, and from nothing else. The self-contained server the node, bun, deno,
+aws, railway, and render adapters emit never read its peer at all, so it believed the header
+unconditionally: a container with a published port, or the README's Docker/PM2/systemd case,
+admitted one hundred requests from one client rotating one header where `ruvyxa start` admitted
+five. The trust decision is now made in the transport, where the peer actually is —
+`req.socket.remoteAddress` on Node, `server.requestIP()` on Bun, the connection info argument on
+Deno — and a forwarded identity from an untrusted peer is deleted before the request is routed
+rather than weighed.
+
+**Two adapters declared no ingress header.** A deployed function genuinely has no peer, so the
+adapter that emitted it names the header its own platform ingress writes and overwrites. Vercel and
+Cloudflare did; Netlify and Firebase did not, and identity fell through to a right-to-left scan of
+`X-Forwarded-For` on platforms whose real client is not where that scan looks. Netlify now declares
+`x-nf-client-connection-ip`. Every adapter's answer is recorded in the shared adapter contract as a
+required key, so a new adapter has to decide rather than inherit the wrong default.
+
+Firebase is deliberately still declaring none. For Cloud Functions v2 the client is the **left** end
+of `X-Forwarded-For`, the one end this scan will not take, and naming a header the platform does not
+overwrite would reintroduce exactly the rotation the mechanism exists to prevent. It needs a
+`security.trustedProxyIps` guidance change instead and is tracked separately.
+
+**Operators:** a self-hosted deployment behind a reverse proxy that is **not** on the same host and
+**not** listed in `security.trustedProxyIps` was getting per-client limiting by accident, and now
+collapses to a single shared bucket until the proxy's address or range is configured. That is what
+`ruvyxa start` has always done with the same configuration, so it is an alignment rather than a new
+rule — but it is a visible change for self-hosted deployments, and the self-hosted adapter READMEs
+now say so. Loopback stays trusted without configuration, so a proxy terminating on the same host is
+unaffected.
+
+### `<Image>` no longer 404s on a self-hosted build with `image.optimize: false`
+
+The standalone server that the node, bun, deno, aws, railway, and render adapters emit resolved a
+PNG or JPEG URL to the `.webp` the build published, and claimed parity with the resolver
+`ruvyxa dev` and `ruvyxa start` use. That resolver answers two questions and only one was ported.
+The missing one is the one it documents as load-bearing: a `.webp` **request** resolving to the
+untouched `.png`/`.jpg` source. `<Image>` rewrites every `src` to its `.webp` URL unconditionally —
+it has no access to `image.optimize` — and `image.optimize: false` publishes the source with no
+`.webp` beside it, so every `<Image>` on the page rendered broken on every self-hosted deployment of
+such a project, invisibly, because both development commands resolved it. The same applied to any
+source the optimizer skipped.
+
+Both directions are now mirrored, under the native host's rule that **exactly one** source may
+answer: `logo.png` and `logo.jpg` beside each other is the collision the build refuses, and it is
+refused here too rather than resolved by whichever the loop reached first.
+
+### A server-sent-event stream is no longer buffered by the standalone server's compressor
+
+The compressible-type list is an allow-list written as a prefix regex, and `^text/` matched
+`text/event-stream`. The size floor that would otherwise have caught a trickle of small writes is
+deliberately waived for a body with no declared length, which is exactly what an SSE response is —
+so Node inserted a default-flush gzip and Bun and Deno a `CompressionStream`, neither of which
+flushes per chunk. An `EventSource` against a deployed build received nothing until roughly 16 KB
+had accumulated or the stream ended, while the same route streamed normally under `ruvyxa dev` and
+`ruvyxa start`, whose compression layer excludes the type.
+
+`text/event-stream` and `application/grpc` are now refused ahead of the allow-list, and the refusal
+sits in the same predicate that decides `Vary: accept-encoding`, so a response that will never be
+encoded no longer advertises a variance it does not have. `Cache-Control: no-transform` is honoured
+with them — it is the header an application has to say this with, and neither host read it.
+
+**Projects that set `no-transform` for some other reason** will see those responses sent
+uncompressed, which is what the directive means.
+
+### The standalone server admits a request before reading its body
+
+`MAX_CONCURRENT_RENDERS`/`MAX_QUEUED_RENDERS` exist to stop a burst larger than the machine becoming
+a heap holding every in-flight render at once. On the Node transport the request body was buffered
+**before** admission was asked, so the one path in the program that allocates per request was the
+one path the controller did not bound: 200 concurrent uploads were 200 buffers, while the Bun and
+Deno deployments of the same artifact refused them after four. The result was an out-of-memory kill
+reachable on the default runtime and not on the other two.
+
+The slot is now taken first and the body read inside it, so a caller with nowhere to go is refused
+before it has finished sending. The per-request cap (`security.apiLimit`) is unchanged.
+
+**Operators:** a `503` for an upload now arrives while the request body is still in flight rather
+than after it has been read, and a shutdown's drain window refuses uploads from the moment it
+begins.
+
+### The client build report has moved out of the published `client/` directory
+
+`<outDir>/client/manifest.json` is now `<outDir>/client-report.json`.
+
+`client/` is public by contract: the native server maps any flat name under `/__ruvyxa/client/` into
+it, and every static deployment copies the whole directory to the CDN. The build report sat there,
+so every deployed site served it at `/__ruvyxa/client/manifest.json` to anyone who asked. It carries
+the absolute filesystem paths of the build machine — on a developer's machine the OS account name,
+on CI the runner's workspace path — the complete module graph of every route and shared chunk, the
+bundler cache location, the configured plugin list, and per-route byte counts. That is
+reconnaissance the project had explicitly decided not to publish: the lean
+`client/route-manifest.json` exists precisely so that none of it has to ship to a browser.
+
+Excluding the file from each copy instead would have left three hosts and every adapter keeping one
+exclusion list in step. A file outside the published directory cannot be published by any of them.
+
+**Breaking, to the artifact contract.** A third-party adapter or script that opens
+`<buildDir>/client/manifest.json` will no longer find it; read `<buildDir>/client-report.json`
+instead. The file is no longer served at `/__ruvyxa/client/manifest.json` on any host and no URL
+replaces it — the report is not a browser asset. Anything that was fetching a route's scripts,
+preloads, or shared chunks over HTTP should read `/__ruvyxa/client/route-manifest.json`, the lean
+publishable table every Ruvyxa host already serves. The report's contents and shape are unchanged;
+only its location is.
+
+Ruvyxa's own readers — the pre-renderer, `adapter-runner.mjs`, `ruvyxa bench`, and the protected
+build-output names `@ruvyxa/adapter-static` refuses as an `outputDir` — all follow the new path.
+`ruvyxa bench` additionally now fails when the report is missing instead of reporting zero cache
+hits for a measurement it never took.
+
+### `createPluginHarness` now refuses what the framework refuses to boot with
+
+The plugin harness recorded every registration into an array and validated none of it, so it
+reported success for plugins `ruvyxa dev` will not start with — the exact failure it exists to
+prevent. A plugin with `http: { match: ['/api/*/items'] }` or a `level: 'error'` diagnostic had a
+green suite and a `TypeError` at startup.
+
+`createPluginHarness` now applies the production registry's contract at registration and throws for
+a duplicate plugin name, an `error`-level or malformed diagnostic, a route path that is not an exact
+absolute path, an invalid HTTP method token, two plugins claiming one route, a `match` list that is
+empty, not an array of strings, missing its leading `/`, or wildcarded anywhere but at the end, and
+an unknown or already-claimed native capability. At dispatch it throws when a hook returns something
+that is neither a `Response`, a `Request`, nor `undefined`, and when `next()` is handed the wrong
+type.
+
+Two behaviours were also brought level with the server. Hooks now match the **decoded** pathname, so
+`harness.request('/files/my%20doc')` runs a hook declared as `match: ['/files/my doc']` — the same
+answer `canonicalRoutePath` gives the router. And routes and `onRequest` hooks now dispatch from one
+registration-ordered list rather than two arrays reached by two methods, so a route registered
+before a hook short-circuits it, exactly as it does in production. `harness.request()` can therefore
+return a route's response; `harness.route()` still invokes a route directly.
+
+**Breaking, deliberately.** A suite that registers an invalid pattern, an error diagnostic, or a
+conflicting route starts failing — which is the point: it was failing in `ruvyxa dev` already.
+
+The normalisers are still written twice, here and in `packages/ruvyxa/runtime/plugin-http.mjs`,
+because the dependency runs the wrong way round. The end state is one copy in `@ruvyxa/core`
+reaching the runtime through the `--check`-gated generated-copy mechanism the router and origin
+policy already use; until then, both copies carry a comment naming the other.
+
+### `mockCache` now validates like the real `cache()`
+
+**New in `@ruvyxa/core/server`:** `parseTtl`, `validateCacheTag`, `assertCacheKey`,
+`normalizeCacheTags`, `assertCacheSerializable`, and `assertSharedCachePrivacy` are now exported.
+They were already standalone functions; exporting them lets `@ruvyxa/testing` check what the real
+builder checks instead of restating the rules and drifting from them.
+
+Every builder method on `mockCache` was a plain assignment, so
+`cache('posts').ttl('5 minutes').get(async () => ({ published: new Date() }))` passed its test and
+threw twice in production — once on the duration, once on the value. The double now runs the real
+validators and rejects a key that is not a string of at most 8192 characters, a `ttl`/`swr` outside
+`<digits><ms|s|m|h|d>`, an invalid tag or more than 32 of them, a `scope` other than `'deployment'`
+or `'request'`, and a produced value that is not a JSON-shaped tree (`RUV1841`). Shared-scope
+producers that read request state are refused with `RUV1840` — the check that stops one visitor's
+data being served to another out of a deployment cache, and the one a suite built on the old double
+never exercised.
+
+The ordering matters and is preserved: the real builder awaits the producer _before_ asserting on
+its value, so the double does too — checking earlier would diverge in the other direction.
+
+`mockCache` takes a second argument: `mockCache(seed, { requestContext: false })` makes
+`scope('request')` throw the way the real builder does outside a request. It defaults to `true`, so
+existing calls are unaffected.
+
+**Breaking, deliberately.** A suite that cached a `Date`, passed `ttl('5 minutes')`, or used a tag
+with a space starts failing — the failure it would have hit at its first real request.
+
 ## v1.1.3 (2026-08-29)
 
 A release about the deployed process as something an operator has to run: taken out of a load

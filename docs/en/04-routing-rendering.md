@@ -384,13 +384,14 @@ been parsed, which is after the last byte either way.
 
 ### Combinations Ruvyxa refuses
 
-Each of these would build cleanly and then do nothing, so discovery fails instead (`RUV1011`):
+Each of these would build cleanly and then do nothing, so discovery fails instead — one code each,
+because the fix is different in each case:
 
-| Combination                                    | Why                                                                                 |
-| ---------------------------------------------- | ----------------------------------------------------------------------------------- |
-| `'use client'` page + `serverComponents`       | a page that runs entirely in the browser has no server half to render               |
-| `export const ppr = true` + `serverComponents` | partial pre-rendering streams a shell through an entry this pipeline does not build |
-| an intercepting route + `serverComponents`     | interception is matched from a client route registry this pipeline does not publish |
+| Combination                                    | Why                                                                                 | Code      |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------- | --------- |
+| `'use client'` page + `serverComponents`       | a page that runs entirely in the browser has no server half to render               | `RUV1011` |
+| `export const ppr = true` + `serverComponents` | partial pre-rendering streams a shell through an entry this pipeline does not build | `RUV1019` |
+| an intercepting route + `serverComponents`     | interception is matched from a client route registry this pipeline does not publish | `RUV1020` |
 
 Client-side navigation works in both directions. Entering a server-components route fetches its
 payload from `/__ruvyxa/rsc` and renders it in place — no document load, and the page underneath is
@@ -537,7 +538,7 @@ Three rules make this predictable rather than magic:
 
 - **The real route must exist.** An interception is an overlay, so a reload, a shared link, or a new
   tab still has to render something. A marker whose target no page answers fails the build with
-  **RUV1006**.
+  **RUV1006**, and one that climbs more levels than the app has fails with **RUV1018**.
 - **The folder must live inside an `@name` slot.** That is the thing an overlay replaces; outside
   one there is nowhere to put it, and the build fails with **RUV1005**.
 - **Only a soft navigation intercepts.** The overlay ships inside the bundle of the page you are

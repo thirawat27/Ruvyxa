@@ -383,23 +383,20 @@ pub(crate) fn doctor(args: DoctorArgs) -> anyhow::Result<()> {
         .collect::<Vec<_>>();
 
     if args.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "frameworkVersion": env!("CARGO_PKG_VERSION"),
-                "root": args.root,
-                "buildTarget": build_target_name,
-                "javascriptRuntime": config.javascript_runtime().command(),
-                "adapter": adapter,
-                "routes": manifest.routes.len(),
-                "unsupportedRoutes": unsupported_routes,
-                "tsconfigProblem": tsconfig_problem.as_ref().map(|problem| serde_json::json!({
-                    "path": problem.path,
-                    "message": problem.message,
-                })),
-                "diagnostics": validation.diagnostics,
-            }))?
-        );
+        write_machine_report(&serde_json::to_string_pretty(&serde_json::json!({
+            "frameworkVersion": env!("CARGO_PKG_VERSION"),
+            "root": args.root,
+            "buildTarget": build_target_name,
+            "javascriptRuntime": config.javascript_runtime().command(),
+            "adapter": adapter,
+            "routes": manifest.routes.len(),
+            "unsupportedRoutes": unsupported_routes,
+            "tsconfigProblem": tsconfig_problem.as_ref().map(|problem| serde_json::json!({
+                "path": problem.path,
+                "message": problem.message,
+            })),
+            "diagnostics": validation.diagnostics,
+        }))?)?;
         return Ok(());
     }
 
@@ -580,10 +577,35 @@ pub(crate) fn clean(args: ProjectArgs) -> anyhow::Result<()> {
     let started = Instant::now();
     let config = load_project_config(&args.root)?;
     let out_dir = args.root.join(config.out_dir());
-    let removed = out_dir.exists();
-    if removed {
-        fs::remove_dir_all(&out_dir)?;
+
+    // `.ruvyxa` as well, when the project builds somewhere else.
+    //
+    // Two things live at a hardcoded `.ruvyxa/...` regardless of `outDir`: the
+    // config cache, which cannot follow `outDir` because reading `outDir` is
+    // what it exists to avoid, and the generated route types, which have no
+    // such reason. Removing only `outDir` left both behind while the command
+    // printed `removed` -- and `clean` is the escape hatch a user reaches for
+    // when a cache has gone bad, so reporting a clean that did not happen is
+    // the actual defect here.
+    //
+    // A literal, never built from anything configurable: this is the one path
+    // the framework owns by name, and composing a deletion target out of
+    // project input is how a `clean` becomes a much worse command.
+    let framework_dir = args.root.join(".ruvyxa");
+    let mut targets = vec![out_dir.clone()];
+    if framework_dir != out_dir {
+        targets.push(framework_dir);
     }
+
+    let mut removed_paths = Vec::new();
+    for target in &targets {
+        if target.exists() {
+            fs::remove_dir_all(target)?;
+            removed_paths.push(target.clone());
+        }
+    }
+    let removed = !removed_paths.is_empty();
+
     print_header("Clean");
     print_field(
         "status",
@@ -593,14 +615,19 @@ pub(crate) fn clean(args: ProjectArgs) -> anyhow::Result<()> {
             dim("already clean")
         },
     );
-    print_field("out dir", path_text(&out_dir));
+    for target in &targets {
+        print_field("out dir", path_text(target));
+    }
     print_success_banner_at(
         if removed {
             "Removed"
         } else {
             "Nothing to remove at"
         },
-        Some(&out_dir),
+        removed_paths
+            .first()
+            .or_else(|| targets.first())
+            .map(PathBuf::as_path),
         started.elapsed(),
     );
     Ok(())
@@ -615,8 +642,7 @@ pub(crate) fn trace(args: TraceArgs) -> anyhow::Result<()> {
         .find(|entry| entry.path == args.route)
         .with_context(|| format!("route {} was not found", args.route))?;
 
-    println!("{}", serde_json::to_string_pretty(route)?);
-    Ok(())
+    write_machine_report(&serde_json::to_string_pretty(route)?)
 }
 
 pub(crate) async fn bench(args: BenchArgs) -> anyhow::Result<()> {
@@ -881,7 +907,7 @@ pub(crate) fn capability_parity(
         }
     };
 
-    let mut used: Vec<(&str, String)> = Vec::new();
+    let mut used: Vec<(String, String)> = Vec::new();
     let action_routes = manifest
         .routes
         .iter()
@@ -890,7 +916,7 @@ pub(crate) fn capability_parity(
         .map(|route| route.path.clone())
         .collect::<Vec<_>>();
     if !action_routes.is_empty() {
-        used.push(("actions", action_routes.join(", ")));
+        used.push(("actions".to_string(), action_routes.join(", ")));
     }
 
     // Config-declared rather than plugin-declared, and the only capability in
@@ -898,7 +924,7 @@ pub(crate) fn capability_parity(
     // is a boolean in `ruvyxa.config.ts`, and the endpoint it turns on exists
     // only on the Axum host.
     if config.images.on_demand.enabled() {
-        used.push(("images@1", "/__ruvyxa/image".to_string()));
+        used.push(("images@1".to_string(), "/__ruvyxa/image".to_string()));
     }
 
     match describe_project_plugins(root, config) {
@@ -907,18 +933,27 @@ pub(crate) fn capability_parity(
             let hooks =
                 http["request"].as_u64().unwrap_or(0) + http["response"].as_u64().unwrap_or(0);
             if hooks > 0 {
-                used.push(("pluginHttp", format!("{hooks} hook(s)")));
+                used.push(("pluginHttp".to_string(), format!("{hooks} hook(s)")));
             }
             for capability in description["capabilities"].as_array().into_iter().flatten() {
-                if let Some(id) = capability["id"].as_str() {
+                // The id the plugin actually claimed, carried through unchanged.
+                // This used to fold everything that was not `realtime@1` onto
+                // `presence@1`, which meant the "unlisted capability" failure
+                // below -- the one whose comment explains that a missing entry
+                // there is how server actions came to work locally and 404
+                // everywhere else -- could never be reached through this loop.
+                // Unreachable rather than broken, because `plugin-http.mjs`
+                // validates the id against a two-entry allowlist first; but the
+                // next capability added is the one that pays for a safety net
+                // that was wired shut.
+                //
+                // An empty id is skipped rather than reported: it says a
+                // `describe` response was malformed, which is a different fault
+                // from a capability the contract has not been taught, and
+                // failing parity with a blank name would name neither.
+                if let Some(id) = capability["id"].as_str().filter(|id| !id.is_empty()) {
                     used.push((
-                        // Borrowed from the contract's own vocabulary so the
-                        // lookup below cannot drift from what is reported.
-                        if id == "realtime@1" {
-                            "realtime@1"
-                        } else {
-                            "presence@1"
-                        },
+                        id.to_string(),
                         capability["path"].as_str().unwrap_or("/").to_string(),
                     ));
                 }

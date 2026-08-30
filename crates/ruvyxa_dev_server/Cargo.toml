@@ -40,10 +40,10 @@ tracing.workspace = true
 walkdir.workspace = true
 webp.workspace = true
 pic-scale.workspace = true
+tempfile.workspace = true
 
 [dev-dependencies]
 jpeg-encoder.workspace = true
-tempfile.workspace = true
 
 [lints]
 workspace = true

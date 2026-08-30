@@ -79,8 +79,15 @@ export function aws(options: AwsAdapterOptions = {}): Adapter {
           .map(([key, value]) => `      - key: '${key}'\n        value: '${value}'\n`)
           .join('')
 
+      // Amplify's compute bundle is immutable, so ISR refreshes go to the
+      // host's temporary directory — shared with every other deployment on the
+      // machine and, across a redeploy, with the build this one replaces. The
+      // build id is what tells those apart; `undefined` from an output older
+      // than the deploy manifest still names the directory from where the
+      // bundle was deployed.
       const serverSource = standaloneServerSource({
         isrCache: 'tmp',
+        buildId: ctx.deployManifest?.buildId,
         runtimePolicy: runtimeBuildPolicy(ctx),
       })
       const deployRoot = 'deploy/aws/.amplify-hosting'

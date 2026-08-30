@@ -376,7 +376,28 @@ impl TypeScriptPluginBuildSession {
         {
             modules.extend(stored.modules.into_iter().map(PathBuf::from));
         }
-        if modules.is_empty() {
+        // A module the project no longer has is dropped here rather than
+        // carried forever. The merge above is deliberate -- a module the current
+        // build did not transform may still be one a previous build did, and
+        // forgetting it loses the warning -- but nothing ever removed an entry,
+        // so a deleted file stayed in the record until the dependency hash
+        // changed. Every survivor is then re-examined on every build by
+        // `transform_differs_by_environment`, which reads the file and calls the
+        // plugin hook twice: two serial NDJSON round-trips through a single
+        // `Mutex`-guarded worker, each carrying the module's whole source. For a
+        // deleted module all of that work produces `false` by way of a failed
+        // read, and the path is written back to be tried again next time.
+        //
+        // One `stat` per entry replaces it. The filter is at the write site so
+        // the merge keeps its meaning: a module absent for a moment -- mid
+        // rename, or generated and not yet written -- is forgotten and
+        // remembered again the next time a build transforms it.
+        modules.retain(|module| module.is_file());
+        // Rewritten even when nothing survives, so a store whose every entry
+        // named a deleted module is pruned rather than left on disk to be read
+        // and discarded by every build after this one. Still no file created
+        // for a project that has never had one.
+        if modules.is_empty() && !store.exists() {
             return modules;
         }
         let record = StoredPluginTransforms {
@@ -731,5 +752,102 @@ mod plugin_lane_tests {
                 case["why"].as_str().unwrap_or_default()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A module the project no longer has leaves the record.
+    ///
+    /// Nothing removed an entry before: `remembered_transformed_modules` merged
+    /// the stored set with the current one and wrote it back unfiltered, so a
+    /// deleted file stayed until the dependency hash changed. Every survivor is
+    /// re-examined on every build by `transform_differs_by_environment`, which
+    /// reads the module and calls the plugin hook twice -- so a deleted module
+    /// cost two serial worker round-trips per build to conclude nothing, for as
+    /// long as the generation lasted.
+    #[test]
+    fn a_deleted_module_leaves_the_plugin_transform_record() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let cache_dir = temp.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).expect("cache dir");
+
+        let live = temp.path().join("kept.ts");
+        std::fs::write(&live, b"export const kept = 1\n").expect("write");
+        let gone = temp.path().join("deleted.ts");
+
+        let store = cache_dir.join("plugin-transforms.json");
+        std::fs::write(
+            &store,
+            serde_json::to_string(&StoredPluginTransforms {
+                dependency_hash: "hash".to_string(),
+                modules: vec![live.display().to_string(), gone.display().to_string()],
+            })
+            .expect("serialize"),
+        )
+        .expect("write store");
+
+        let session = TypeScriptPluginBuildSession { bridge: None };
+        let remembered = session.remembered_transformed_modules(&cache_dir, "hash");
+
+        assert!(
+            remembered.contains(&live),
+            "a module that still exists stays remembered",
+        );
+        assert!(
+            !remembered.contains(&gone),
+            "a module the project no longer has must not be handed to the caller, \
+             which would read it and call the plugin hook twice for nothing",
+        );
+
+        let rewritten = std::fs::read_to_string(&store).expect("the record is rewritten");
+        assert!(
+            !rewritten.contains("deleted.ts"),
+            "and it must not be written back, or the next build pays for it again",
+        );
+        assert!(rewritten.contains("kept.ts"));
+    }
+
+    /// A record whose every entry is dead is pruned, not left to be re-read.
+    #[test]
+    fn a_record_of_only_deleted_modules_is_emptied() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let cache_dir = temp.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).expect("cache dir");
+        let store = cache_dir.join("plugin-transforms.json");
+        std::fs::write(
+            &store,
+            serde_json::to_string(&StoredPluginTransforms {
+                dependency_hash: "hash".to_string(),
+                modules: vec![temp.path().join("gone.ts").display().to_string()],
+            })
+            .expect("serialize"),
+        )
+        .expect("write store");
+
+        let session = TypeScriptPluginBuildSession { bridge: None };
+        assert!(
+            session
+                .remembered_transformed_modules(&cache_dir, "hash")
+                .is_empty()
+        );
+        let rewritten = std::fs::read_to_string(&store).expect("the record survives, emptied");
+        assert!(!rewritten.contains("gone.ts"));
+    }
+
+    /// A project that has never had a record does not get an empty one.
+    #[test]
+    fn no_record_is_created_for_a_project_with_no_transforms() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let cache_dir = temp.path().join("cache");
+        let session = TypeScriptPluginBuildSession { bridge: None };
+        assert!(
+            session
+                .remembered_transformed_modules(&cache_dir, "hash")
+                .is_empty()
+        );
+        assert!(!cache_dir.join("plugin-transforms.json").exists());
     }
 }

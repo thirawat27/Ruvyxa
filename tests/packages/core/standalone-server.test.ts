@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, it } from 'node:test'
 
+import { repoPath } from '../../repo-root.js'
 import { standaloneServerSource } from '../../../packages/@ruvyxa/core/dist/standalone-server.js'
 
 const generated = standaloneServerSource({ runtimePolicy: {} })
@@ -29,6 +30,16 @@ describe('generated standalone server', () => {
     for (const runtime of ['node', 'bun', 'deno'] as const) {
       const file = path.join(directory, `${runtime}.mjs`)
       writeFileSync(file, standaloneServerSource({ runtime, runtimePolicy: {} }), 'utf8')
+      // `isrCache: 'tmp'` emits an import and a cache-directory block the
+      // default never reaches, so the default alone would have parsed a
+      // program no adapter deploys.
+      const temporaryCache = path.join(directory, `${runtime}-tmp-isr.mjs`)
+      writeFileSync(
+        temporaryCache,
+        standaloneServerSource({ runtime, isrCache: 'tmp', buildId: 'abc123', runtimePolicy: {} }),
+        'utf8',
+      )
+      execFileSync(process.execPath, ['--check', temporaryCache], { stdio: 'pipe' })
       // Node parses all three: the Bun and Deno programs use no syntax it does
       // not have, and the runtime-specific part of each is an API call, not a
       // dialect. A program that did need one would fail here rather than after
@@ -82,6 +93,92 @@ describe('generated standalone server', () => {
         source,
         /MIME_TYPES\[[\s\S]{0,120}\]\s*\?\?[\s\S]{0,80}MIME_TYPES\[/,
         `${runtime} must look up a content type once`,
+      )
+    }
+  })
+
+  /**
+   * The body is read with a render slot in hand, never before one.
+   *
+   * The Node transport is the only one that buffers — `node:http` gives it a
+   * stream and `new Request` needs bytes — and it buffered ahead of admission,
+   * so the controller that exists to stop a burst becoming a heap did not bound
+   * the one path that allocates. The behaviour is measured in
+   * `standalone-server-conformance.test.ts`; this is what fails if the two
+   * lines are ever swapped back.
+   */
+  it('admits a request before reading its body', () => {
+    const node = standaloneServerSource({ runtime: 'node', runtimePolicy: {} })
+    const admitted = node.indexOf('handleAdmitted(async () =>')
+    const read = node.indexOf('await readRequestBody(req)')
+    assert.ok(admitted > 0, 'the node transport must run the handler through admission')
+    assert.ok(read > 0, 'the node transport still has to buffer a body for `new Request`')
+    assert.ok(
+      read > admitted,
+      'the body must be read inside the admitted work, not before the slot is asked for',
+    )
+  })
+
+  /**
+   * The buffered-body cap is the framework's own maximum, not the project's
+   * `security.apiLimit`.
+   *
+   * The policy lives in `requestBodyPolicy` in `serverless-handler.mjs` and is
+   * per endpoint: `/__ruvyxa/rsc` is bounded by `RSC_ACTION_BODY_LIMIT` however
+   * small a project's `apiLimit` is. This transport buffers before the handler
+   * runs, so its number has to cover every endpoint the handler may accept —
+   * anything lower refuses a legitimate call the endpoint never got to see.
+   *
+   * The 4 MiB itself cannot be imported: `serverless-handler.mjs` is copied
+   * into the function bundle and declares it locally, and this source is a
+   * template string. So the two are compared here, which is the only place the
+   * pair is visible at all.
+   */
+  it('bounds a buffered body by the largest limit any endpoint may allow', () => {
+    const handler = readFileSync(repoPath('packages/ruvyxa/runtime/serverless-handler.mjs'), 'utf8')
+    const declared = /\bconst RSC_ACTION_BODY_LIMIT = ([^\n]+)/.exec(handler)
+    assert.ok(declared, 'the handler must still declare the server-function body limit')
+    const expression = declared[1].trim().replace(/;$/, '')
+    assert.ok(
+      generated.includes(`const RSC_ACTION_BODY_LIMIT = ${expression};`),
+      `the emitted server must bound its read by the same limit the endpoint applies (${expression})`,
+    )
+    const cap = generated.slice(generated.indexOf('const REQUEST_BODY_LIMIT ='))
+    assert.match(
+      cap.slice(0, cap.indexOf(';') + 1),
+      /Math\.max\(/,
+      '`security.apiLimit` alone would put the transport under an endpoint limit the handler enforces',
+    )
+  })
+
+  /**
+   * The allow-list is a prefix regex, and `^text\/` swallows the one text type
+   * that must never be buffered. The refusal has to sit inside
+   * `isCompressibleType` rather than `compressionFor`, so the
+   * `Vary: accept-encoding` derived from the same predicate is suppressed with
+   * it: a response that cannot be encoded must not advertise a variance it does
+   * not have.
+   */
+  it('refuses to encode the payloads that must never be buffered', () => {
+    for (const runtime of ['node', 'bun', 'deno'] as const) {
+      const source = standaloneServerSource({ runtime, runtimePolicy: {} })
+      assert.ok(
+        source.includes('text\\/event-stream'),
+        `${runtime}: a server-sent-event stream must never be encoded`,
+      )
+      assert.ok(
+        source.includes('application\\/grpc'),
+        `${runtime}: excluded by tower-http's DefaultPredicate, so excluded here`,
+      )
+      assert.ok(
+        source.includes('no-transform'),
+        `${runtime}: the header an application says this with must be read`,
+      )
+      const predicate = source.slice(source.indexOf('function isCompressibleType('))
+      assert.match(
+        predicate.slice(0, predicate.indexOf('\n}')),
+        /NON_COMPRESSIBLE_TYPE/,
+        `${runtime}: the refusal must gate Vary as well as the encoder`,
       )
     }
   })
@@ -168,6 +265,57 @@ describe('generated standalone server', () => {
     assert.ok(
       generated.includes("res.on('close', () => body.destroy())"),
       'a client that leaves must stop the render still producing for it',
+    )
+  })
+
+  /**
+   * `isrCache: 'tmp'` writes rendered documents into the host's shared
+   * temporary directory, which is the only writable place an immutable server
+   * bundle has. A fixed name there is the same directory for every Ruvyxa
+   * deployment on the host and for every build of the same deployment — and it
+   * is read *before* the bundled prerender output, so a stale document wins.
+   * The name has to come from something that changes when the deployment does.
+   */
+  it('namespaces the temporary ISR cache to one build of one deployment', () => {
+    const source = standaloneServerSource({ isrCache: 'tmp', buildId: 'abc123', runtimePolicy: {} })
+    // Narrowed before it is asserted on, so a failure prints the one
+    // declaration under test rather than the whole emitted program.
+    const directory = /const isrCacheDir = ([\s\S]*?);\n/.exec(source)?.[1] ?? ''
+    assert.doesNotMatch(
+      directory,
+      /^path\.join\(\s*os\.tmpdir\(\),\s*'ruvyxa-isr-cache',?\s*\)$/,
+      'the shared temporary directory may not be entered by a name every deployment shares',
+    )
+    assert.ok(
+      directory.includes('abc123'),
+      `the build the bundle was emitted from has to reach the directory name: ${directory}`,
+    )
+    assert.ok(
+      directory.includes('here'),
+      `and so does where it was deployed, or two deployments share it: ${directory}`,
+    )
+    assert.match(
+      source,
+      /mkdirSync\(isrCacheDir, \{ recursive: true, mode: 0o700 \}\)/,
+      'the directory is created in a world-writable parent, so it has to be created owner-only',
+    )
+
+    // Two builds of the same deployment, and the same build deployed twice:
+    // the first pair must differ, or a redeploy reads the previous build's
+    // documents; the second must not, or an in-place restart loses its cache
+    // for no reason.
+    const other = standaloneServerSource({ isrCache: 'tmp', buildId: 'def456', runtimePolicy: {} })
+    assert.notEqual(source, other)
+    assert.equal(
+      source,
+      standaloneServerSource({ isrCache: 'tmp', buildId: 'abc123', runtimePolicy: {} }),
+    )
+
+    // And nothing changes for the bundled cache, which is per-deployment by
+    // construction: it is a directory inside the bundle.
+    assert.match(
+      standaloneServerSource({ buildId: 'abc123', runtimePolicy: {} }),
+      /const isrCacheDir = prerenderDir;/,
     )
   })
 })

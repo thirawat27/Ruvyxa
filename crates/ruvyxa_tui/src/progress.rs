@@ -271,7 +271,7 @@ pub fn runner_cells(
 
 /// A phase line: what ran, what it produced, how long it took.
 pub fn print_phase(name: &str, detail: String, duration: Duration) {
-    println!("{}", phase_line(name, detail, duration));
+    crate::stream::print_line(&phase_line(name, detail, duration));
 }
 
 pub fn phase_line(name: &str, detail: String, duration: Duration) -> String {

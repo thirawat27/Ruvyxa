@@ -31,7 +31,10 @@ function listAfter(source, marker) {
  */
 describe('static params export names', () => {
   it('are the same list in the route graph and the worker', async () => {
-    const rust = await readFile(path.join(workspaceRoot, 'crates/ruvyxa_graph/src/lib.rs'), 'utf8')
+    const rust = await readFile(
+      path.join(workspaceRoot, 'crates/ruvyxa_graph/src/exports.rs'),
+      'utf8',
+    )
     const worker = await readFile(
       path.join(workspaceRoot, 'packages/ruvyxa/runtime/worker-pool.mjs'),
       'utf8',

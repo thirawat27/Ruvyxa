@@ -122,6 +122,12 @@ struct DependencyCacheKey {
     /// Automatic JSX injects an extra `react/jsx-runtime` edge, so the same
     /// source resolves to a different dependency set per JSX runtime.
     jsx_automatic: bool,
+    /// Whether the importing module's extension lets the transform produce JSX
+    /// at all — `compiler::jsx_is_enabled(extension, true)`. A `.ts` and a
+    /// `.tsx` file holding the same bytes in the same directory resolve to
+    /// different dependency sets, because only one of them gets the injected
+    /// `react/jsx-runtime` import.
+    jsx_allowed_by_extension: bool,
 }
 
 /// Module the automatic JSX transform imports its factory helpers from.
@@ -130,6 +136,13 @@ const JSX_RUNTIME_SPECIFIER: &str = "react/jsx-runtime";
 /// Shared resolver cache for a batch of bundle jobs.
 ///
 /// Uses [`DashMap`] for lock-free concurrent access from multiple rayon
+/// Memoized `import.meta.glob` directory walks, keyed by
+/// `(absolute_pattern, watch_root)`.
+///
+/// Named rather than spelled inline so the field below reads as one idea, and
+/// because `clippy::type_complexity` refuses the nested form.
+type GlobMatchMemo = Arc<DashMap<(PathBuf, PathBuf), Arc<Vec<PathBuf>>>>;
+
 /// threads. This cache is designed to be shared across parallel route
 /// bundling workers — no mutex contention on hot paths.
 #[derive(Debug, Clone, Default)]
@@ -140,13 +153,37 @@ pub struct ResolveGraphCache {
     sources: Arc<DashMap<PathBuf, CachedSource>>,
     /// Parsed tsconfig/jsconfig cache, keyed by canonical project root.
     tsconfigs: Arc<DashMap<PathBuf, CachedTsConfig>>,
-    /// Fully resolved dependency lists for build-hook-free source snapshots.
-    dependencies: Arc<DashMap<DependencyCacheKey, Arc<[PathBuf]>>>,
+    /// Fully resolved dependencies for build-hook-free source snapshots.
+    ///
+    /// Stores the whole [`ResolvedDependencies`] — paths *and* the
+    /// specifier-to-path alias map — because the two are one answer. The linker
+    /// consults the alias map first and only then matches by path suffix, and an
+    /// alias like `~/components/Button` shares no suffix with its target, so
+    /// handing back the paths with an empty map makes a warm hit resolve
+    /// differently from a cold miss. The persistent cache states the same
+    /// contract on [`crate::incremental::CachedModuleEntry::aliases`].
+    dependencies: Arc<DashMap<DependencyCacheKey, Arc<ResolvedDependencies>>>,
     /// Parsed `package.json` entry-point fields, keyed by the package.json
     /// path. Avoids re-reading and re-parsing the same `node_modules`
     /// package.json for every importing module that resolves a bare specifier
     /// from it.
     package_json: Arc<DashMap<PathBuf, CachedPackageJson>>,
+    /// Files an `import.meta.glob` pattern matched, keyed by the resolved
+    /// absolute pattern and the directory the walk starts from.
+    ///
+    /// `collect_matches` is a directory-tree traversal and the expander runs
+    /// once per module per route, so a content site globbing
+    /// `./content/**/*.md` re-walked that whole tree for every route that
+    /// reached the module — and paid it again on every incremental rebuild,
+    /// because a non-empty `watch_roots` disables persistent dependency-edge
+    /// reuse.
+    ///
+    /// Keyed on this cache rather than on a process global, deliberately. Under
+    /// `dev` a file can appear between two routes, and this cache is what the
+    /// host recreates or invalidates when it does; a `BundleContext` is built
+    /// and dropped inside one bundle pass, so the memo lives exactly as long as
+    /// its answer is stable.
+    glob_matches: GlobMatchMemo,
     /// Production builds operate on one immutable input snapshot and can skip
     /// repeated metadata checks after the first source read.
     stable_snapshot: bool,
@@ -160,6 +197,7 @@ pub struct ResolveCacheStats {
     pub dependency_entries: usize,
     pub configuration_entries: usize,
     pub package_entries: usize,
+    pub glob_entries: usize,
     pub resident_bytes: u64,
     pub disposable_bytes: u64,
 }
@@ -209,6 +247,7 @@ impl ResolveGraphCache {
             tsconfigs: Arc::new(DashMap::with_capacity(1)),
             dependencies: Arc::new(DashMap::with_capacity(source_hint)),
             package_json: Arc::new(DashMap::new()),
+            glob_matches: Arc::new(DashMap::new()),
             stable_snapshot: false,
         }
     }
@@ -340,6 +379,28 @@ impl ResolveGraphCache {
         manifest
     }
 
+    /// Files matching one glob pattern, walked once per (pattern, watch root).
+    ///
+    /// `collect` runs only on a miss, and its answer is shared rather than
+    /// copied — every module that names the same pattern wants the same list.
+    /// An empty answer is cached too: it costs exactly the same walk to produce
+    /// as a full one, and a project globbing a directory it has not created yet
+    /// is the case that would otherwise re-walk hardest.
+    pub(crate) fn matched_glob_files(
+        &self,
+        pattern: &Path,
+        watch_root: &Path,
+        collect: impl FnOnce() -> Result<Vec<PathBuf>>,
+    ) -> Result<Arc<Vec<PathBuf>>> {
+        let key = (pattern.to_path_buf(), watch_root.to_path_buf());
+        if let Some(hit) = self.glob_matches.get(&key) {
+            return Ok(Arc::clone(hit.value()));
+        }
+        let matches = Arc::new(collect()?);
+        self.glob_matches.insert(key, Arc::clone(&matches));
+        Ok(matches)
+    }
+
     /// Number of cached resolution entries. Intended for diagnostics/tests.
     pub fn resolution_count(&self) -> usize {
         self.resolutions.len()
@@ -395,12 +456,22 @@ impl ResolveGraphCache {
             .dependencies
             .iter()
             .map(|entry| {
+                let dependencies = entry.value();
                 entry.key().base_dir.len() as u64
                     + 34
-                    + entry
-                        .value()
+                    + dependencies
+                        .paths
                         .iter()
                         .map(|path| path.as_os_str().len() as u64)
+                        .sum::<u64>()
+                    // The alias map is part of the cached answer, so it is part
+                    // of the budget this heuristic spends.
+                    + dependencies
+                        .aliases
+                        .iter()
+                        .map(|(specifier, path)| {
+                            specifier.len() as u64 + path.as_os_str().len() as u64
+                        })
                         .sum::<u64>()
             })
             .sum::<u64>();
@@ -430,21 +501,38 @@ impl ResolveGraphCache {
             .iter()
             .map(|entry| entry.key().as_os_str().len() as u64)
             .sum::<u64>();
+        let glob_bytes = self
+            .glob_matches
+            .iter()
+            .map(|entry| {
+                let (pattern, watch_root) = entry.key();
+                pattern.as_os_str().len() as u64
+                    + watch_root.as_os_str().len() as u64
+                    + entry
+                        .value()
+                        .iter()
+                        .map(|path| path.as_os_str().len() as u64)
+                        .sum::<u64>()
+            })
+            .sum::<u64>();
         ResolveCacheStats {
             resolution_entries: self.resolutions.len(),
             source_entries: self.sources.len(),
             dependency_entries: self.dependencies.len(),
             configuration_entries: self.tsconfigs.len(),
             package_entries: self.package_json.len(),
+            glob_entries: self.glob_matches.len(),
             resident_bytes: resolution_bytes
                 .saturating_add(source_bytes)
                 .saturating_add(dependency_bytes)
                 .saturating_add(configuration_bytes)
-                .saturating_add(package_bytes),
+                .saturating_add(package_bytes)
+                .saturating_add(glob_bytes),
             disposable_bytes: resolution_bytes
                 .saturating_add(dependency_bytes)
                 .saturating_add(configuration_bytes)
-                .saturating_add(package_bytes),
+                .saturating_add(package_bytes)
+                .saturating_add(glob_bytes),
         }
     }
 
@@ -456,11 +544,13 @@ impl ResolveGraphCache {
             .len()
             .saturating_add(self.dependencies.len())
             .saturating_add(self.tsconfigs.len())
-            .saturating_add(self.package_json.len()) as u64;
+            .saturating_add(self.package_json.len())
+            .saturating_add(self.glob_matches.len()) as u64;
         self.resolutions.clear();
         self.dependencies.clear();
         self.tsconfigs.clear();
         self.package_json.clear();
+        self.glob_matches.clear();
         evicted
     }
 
@@ -485,6 +575,12 @@ impl ResolveGraphCache {
             });
         }
         self.dependencies.clear();
+        // A glob answers with the files that exist, so the event this method
+        // reports — a file moved underneath a snapshot that skips metadata
+        // checks — is exactly the event that can add or remove a match. The
+        // path that changed need not be one the pattern matched (a new
+        // directory changes what the walk reaches), so the whole memo goes.
+        self.glob_matches.clear();
     }
 }
 
@@ -1668,6 +1764,10 @@ pub(crate) fn resolve_graph_with_incremental(
     // Phase 1: Resolve the entry module (always sequential — it's a single node).
     let entry_deps = collect_deps_cached(
         entry_source,
+        // The synthetic entry is generated JSX with no file behind it, so it has
+        // no extension to read. `tsx` names what it is; the seed still waits on
+        // the source guess, so an entry with no element seeds nothing.
+        "tsx",
         &project_root,
         &project_root,
         &tsconfig,
@@ -1766,6 +1866,7 @@ pub(crate) fn resolve_graph_with_incremental(
                         &source,
                         resolve_base,
                         &project_root,
+                        cache,
                         |pattern| tsconfig.resolve_glob_pattern(pattern),
                     )?
                 };
@@ -1831,6 +1932,14 @@ pub(crate) fn resolve_graph_with_incremental(
                         compiled_content.as_deref().unwrap_or(source.as_str());
                     collect_deps_cached(
                         dependency_source,
+                        // The real file's extension, even when the source being
+                        // scanned is a compiled stand-in: a `.md` module's
+                        // stand-in is JSX, and `.md` is one of the extensions
+                        // that leaves the answer to the source.
+                        dep_path
+                            .extension()
+                            .and_then(|extension| extension.to_str())
+                            .unwrap_or(""),
                         &resolve_base,
                         &project_root,
                         &tsconfig,
@@ -1902,6 +2011,7 @@ pub(crate) fn resolve_graph_with_incremental(
 #[allow(clippy::too_many_arguments)]
 fn collect_deps_cached(
     source: &str,
+    extension: &str,
     base_dir: &Path,
     project_root: &Path,
     tsconfig: &TsConfigPaths,
@@ -1921,15 +2031,22 @@ fn collect_deps_cached(
                 BundleTarget::ReactServer => 3,
             },
             jsx_automatic: matches!(jsx_runtime, JsxRuntime::Automatic),
+            // Asked with `true` because the seed below is already conditioned on
+            // the source guess; what is left for the extension to decide is
+            // whether the transform would honour it. Two files in one directory
+            // holding identical bytes under `.ts` and `.tsx` hash the same, and
+            // this is what keeps them apart.
+            jsx_allowed_by_extension: crate::compiler::jsx_is_enabled(extension, true),
         };
-        if let Some(dependencies) = cache.dependencies.get(&key) {
-            return Ok(ResolvedDependencies {
-                paths: dependencies.to_vec(),
-                aliases: BTreeMap::new(),
-            });
+        if let Some(cached) = cache.dependencies.get(&key) {
+            // Both halves, always. Returning the paths under an empty alias map
+            // would leave every `tsconfig` alias in this module unresolvable for
+            // every route after the first one to scan it.
+            return Ok(ResolvedDependencies::clone(cached.value()));
         }
-        let dependencies = collect_deps_uncached(
+        let dependencies = Arc::new(collect_deps_uncached(
             source,
+            extension,
             base_dir,
             project_root,
             tsconfig,
@@ -1937,15 +2054,14 @@ fn collect_deps_cached(
             build_hooks,
             target,
             jsx_runtime,
-        )?;
-        cache
-            .dependencies
-            .insert(key, Arc::from(dependencies.paths.as_slice()));
-        return Ok(dependencies);
+        )?);
+        cache.dependencies.insert(key, Arc::clone(&dependencies));
+        return Ok(ResolvedDependencies::clone(&dependencies));
     }
 
     collect_deps_uncached(
         source,
+        extension,
         base_dir,
         project_root,
         tsconfig,
@@ -1959,6 +2075,7 @@ fn collect_deps_cached(
 #[allow(clippy::too_many_arguments)]
 fn collect_deps_uncached(
     source: &str,
+    extension: &str,
     base_dir: &Path,
     project_root: &Path,
     tsconfig: &TsConfigPaths,
@@ -1975,8 +2092,17 @@ fn collect_deps_uncached(
     // appears in the source being scanned. Seed the edge here; without it the
     // linker treats the injected import as an external package and emits a bare
     // specifier that no browser can resolve.
+    //
+    // Both conditions, and neither alone. `has_jsx` is the scanner's
+    // `<`-heuristic, so `new Map<string, number>()` sets it — and gating on that
+    // alone seeded the edge for plain-TypeScript modules the transform gives no
+    // JSX to, because `jsx_is_enabled` refuses JSX for `.ts`/`.mts`/`.cts`
+    // outright. Gating on the extension alone would seed it for every `.tsx`
+    // module, element or not. The transform injects the import exactly when
+    // both are true, and this is the same rule read from the same function.
     if matches!(jsx_runtime, JsxRuntime::Automatic)
         && parsed.has_jsx
+        && crate::compiler::jsx_is_enabled(extension, parsed.has_jsx)
         && !specifiers.iter().any(|s| s == JSX_RUNTIME_SPECIFIER)
     {
         specifiers.push(JSX_RUNTIME_SPECIFIER.to_string());
@@ -2011,35 +2137,52 @@ fn collect_deps_uncached(
                 cache.insert_resolution(&base_dir_str, &specifier, result.clone());
                 result
             }
-        } else if specifier.starts_with('/') {
-            // Absolute path — framework-generated imports.
+        } else if specifier.starts_with('/') || Path::new(&specifier).is_absolute() {
+            // Absolute path — framework-generated imports. The `is_absolute`
+            // half is Windows: a generated entry names
+            // `D:/project/app/page.tsx`, which carries a drive prefix instead of
+            // a leading slash. `compiler.mjs` answers both through
+            // `path.isAbsolute`, and until this branch did too, a drive-prefixed
+            // path fell through to the package walk below and was only ever
+            // resolved by the project-root probe that walk used to end in.
             resolve_project_specifier(project_root, &specifier)
         } else {
-            // Non-relative specifier: try tsconfig paths/baseUrl first, then
-            // project-root-relative, then package.json exports.
-            let tsconfig_result = tsconfig.resolve(&specifier);
-            if tsconfig_result.is_some() {
-                tsconfig_result
-            } else {
-                let project_local = resolve_project_specifier(project_root, &specifier);
-                if project_local
-                    .as_ref()
-                    .is_some_and(|path| is_project_local(path, project_root))
-                {
-                    project_local
-                } else {
-                    match resolve_node_modules_specifier(
-                        cache,
-                        base_dir,
-                        project_root,
-                        &specifier,
-                        target,
-                    ) {
-                        PackageExportsResolution::Resolved(path) => Some(path),
-                        PackageExportsResolution::Blocked => None,
-                        PackageExportsResolution::Unavailable => project_local,
+            // Non-relative specifier: `tsconfig` mappings (`paths`, then
+            // `baseUrl`), then `node_modules`. Nothing sits between them — a
+            // bare specifier names a package, exactly as Node and `tsc` read
+            // it, and `baseUrl` is how a project asks for root-relative
+            // resolution out loud. This used to probe the project root with the
+            // bare specifier as well, which `compiler.mjs` never did: one
+            // import took `<root>/utils/index.ts` into the client bundle while
+            // the dev server and every prerender worker took
+            // `node_modules/utils`. See the `resolutionOrder` section of
+            // `tests/fixtures/module-resolution-conformance.json`.
+            match tsconfig.resolve(&specifier) {
+                Some(path) => Some(path),
+                None => match resolve_node_modules_specifier(
+                    cache,
+                    base_dir,
+                    project_root,
+                    &specifier,
+                    target,
+                ) {
+                    PackageExportsResolution::Resolved(path) => Some(path),
+                    // Nothing answered. Dropping the specifier here would make
+                    // removing the project-root probe a *silent* change for a
+                    // project that relied on it — an unresolved external that
+                    // no host reports and every host fails at run time. If a
+                    // file at the project root would have answered, say so.
+                    PackageExportsResolution::Blocked | PackageExportsResolution::Unavailable => {
+                        if let Some(shadow) = resolve_project_specifier(project_root, &specifier)
+                            && is_project_local(&shadow, project_root)
+                        {
+                            return Err(BundleError::Compiler(project_root_shadow_message(
+                                &specifier, base_dir, &shadow,
+                            )));
+                        }
+                        None
                     }
-                }
+                },
             }
         };
 
@@ -2131,6 +2274,25 @@ fn quoted_value(s: &str) -> Option<String> {
 pub fn resolve_specifier(base_dir: &Path, specifier: &str) -> Option<PathBuf> {
     let joined = base_dir.join(specifier);
     resolve_file_candidate(&joined)
+}
+
+/// RUV1808: a bare specifier nothing answered, with a project file behind it.
+///
+/// The message names the file on purpose. The author wrote a package specifier
+/// and meant a project file, and the two ways to say that — a relative import,
+/// or `baseUrl`/`paths` in `tsconfig.json` — are both understood by `tsc`, by
+/// the editor, and by both of Ruvyxa's module graphs. The
+/// `packages/ruvyxa/runtime/compiler.mjs` half is
+/// `unresolvedBareSpecifierMessage`.
+fn project_root_shadow_message(specifier: &str, importer: &Path, shadow: &Path) -> String {
+    format!(
+        "RUV1808 import {specifier:?} from {} names no package, but {} exists. A bare specifier \
+         names a package here, the way Node and TypeScript both read it. Import the project file \
+         relatively, or declare `compilerOptions.baseUrl` (or a `paths` entry) in tsconfig.json so \
+         the type checker and the bundler answer it the same way.",
+        importer.display(),
+        shadow.display()
+    )
 }
 
 fn resolve_project_specifier(project_root: &Path, specifier: &str) -> Option<PathBuf> {
@@ -2319,7 +2481,74 @@ fn is_project_local(path: &Path, project_root: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// The Rust half of the shared ordering table.
+    ///
+    /// Everything this side sorts into an artifact comes out in `str::cmp`
+    /// order, which compares UTF-8 bytes and is therefore code-point order.
+    /// `packages/ruvyxa/runtime/order.mjs` is the other side, and it used to
+    /// compare UTF-16 code units -- the same answer everywhere below U+10000
+    /// and the opposite one wherever a surrogate pair meets U+E000-U+FFFF. The
+    /// sites downstream are cache keys, content fingerprints, glob key order and
+    /// emitted bytes, so a disagreement is one project building to two outputs.
+    #[test]
+    fn string_ordering_matches_the_shared_cross_language_table() {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/ordering-conformance.json");
+        let fixture: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&fixture_path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", fixture_path.display())),
+        )
+        .expect("the ordering fixture is valid JSON");
+
+        let cases = fixture["cases"].as_array().expect("the fixture has cases");
+        assert!(!cases.is_empty(), "an empty table asserts nothing");
+        for case in cases {
+            let name = case["name"].as_str().expect("each case is named");
+            let left = case["left"].as_str().expect("each case has a left");
+            let right = case["right"].as_str().expect("each case has a right");
+            let expect = case["expect"].as_i64().expect("each case has an answer");
+            let expected = match expect {
+                -1 => std::cmp::Ordering::Less,
+                0 => std::cmp::Ordering::Equal,
+                1 => std::cmp::Ordering::Greater,
+                other => panic!("case {name}: expect must be -1, 0 or 1, not {other}"),
+            };
+            assert_eq!(left.cmp(right), expected, "ordering case: {name}");
+            assert_eq!(
+                right.cmp(left),
+                expected.reverse(),
+                "ordering case reversed: {name}",
+            );
+        }
+    }
+
     use super::*;
+
+    /// The rule `isProjectLocal` in `packages/ruvyxa/runtime/compiler.mjs`
+    /// mirrors, and which it did not: that half asked only whether the path was
+    /// under the root, so a browser bundle reported every file of every bundled
+    /// dependency as project input.
+    /// `tests/packages/ruvyxa/project-inputs.test.mjs` holds the other side.
+    #[test]
+    fn project_local_excludes_the_project_s_own_node_modules() {
+        let root = Path::new("/app");
+        assert!(is_project_local(Path::new("/app/src/page.tsx"), root));
+        assert!(!is_project_local(
+            Path::new("/app/node_modules/tiny/index.js"),
+            root
+        ));
+        assert!(!is_project_local(Path::new("/elsewhere/page.tsx"), root));
+        // Component-wise, so only the *first* segment disqualifies and a name
+        // that merely begins with the word does not.
+        assert!(is_project_local(
+            Path::new("/app/src/node_modules_notes.ts"),
+            root
+        ));
+        assert!(is_project_local(
+            Path::new("/app/src/node_modules/x.ts"),
+            root
+        ));
+    }
 
     #[test]
     fn extracts_import_specifiers() {
@@ -2483,6 +2712,7 @@ mod tests {
         let tsconfig = TsConfigPaths::load(&root);
         let deps = collect_deps_cached(
             &source,
+            "ts",
             &root,
             &root,
             &tsconfig,
@@ -2497,6 +2727,87 @@ mod tests {
         assert_eq!(
             deps.paths[0],
             ruvyxa_diagnostics::normalized_canonical_path(&page)
+        );
+    }
+
+    /// A project with a resolvable `react/jsx-runtime`, so the seeded edge is
+    /// something the resolver can actually answer. An unresolvable bare
+    /// specifier is dropped silently, which would make both halves of the test
+    /// below pass for the wrong reason.
+    fn project_with_jsx_runtime() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        let react = root.join("node_modules").join("react");
+        fs::create_dir_all(&react).unwrap();
+        fs::write(
+            react.join("package.json"),
+            r#"{ "name": "react", "version": "0.0.0", "main": "index.js" }"#,
+        )
+        .unwrap();
+        fs::write(react.join("index.js"), "export default {};\n").unwrap();
+        fs::write(
+            react.join("jsx-runtime.js"),
+            "export const jsx = () => {};\n",
+        )
+        .unwrap();
+        (temp, root, app)
+    }
+
+    /// The `react/jsx-runtime` edge is seeded for the module the transform will
+    /// actually give JSX to — not for every module whose source contains a `<`.
+    ///
+    /// `has_jsx` is the scanner's `<`-heuristic, and in a `.ts` file `<` opens a
+    /// type: `new Map<string, number>()` sets it. The transform refuses JSX for
+    /// `.ts`/`.mts`/`.cts` outright, so it injects no helper import there and
+    /// the seeded edge answered a question nobody asked — a phantom dependency
+    /// on every plain-TypeScript module mentioning a generic, inflating the
+    /// module graph, perturbing shared-chunk analysis (which keys on
+    /// `module.deps`), and pulling React into route bundles that render nothing.
+    ///
+    /// The JavaScript graph never had this: `compiler.mjs` scans the module
+    /// *after* the transform, so the helper import is there or it is not.
+    #[test]
+    fn only_a_module_the_transform_gives_jsx_to_seeds_the_jsx_runtime_edge() {
+        let (_temp, root, app) = project_with_jsx_runtime();
+        let tsconfig = TsConfigPaths::load(&root);
+        let seeds_the_edge = |source: &str, extension: &str| {
+            collect_deps_cached(
+                source,
+                extension,
+                &app,
+                &root,
+                &tsconfig,
+                &ResolveGraphCache::new(),
+                &BuildHookPipeline::empty(),
+                BundleTarget::Client,
+                JsxRuntime::Automatic,
+            )
+            .unwrap()
+            .aliases
+            .contains_key(JSX_RUNTIME_SPECIFIER)
+        };
+
+        for extension in ["ts", "mts", "cts", ".TS"] {
+            assert!(
+                !seeds_the_edge("export const m = new Map<string, number>();\n", extension),
+                "a generic type in a {extension} module seeded a JSX edge"
+            );
+        }
+        assert!(
+            seeds_the_edge("export const el = <main />;\n", "tsx"),
+            "a .tsx module with an element must keep the seeded edge"
+        );
+        // The `.js` family is where the extension decides nothing and the guess
+        // still answers — the one case `jsx_is_enabled` defers on.
+        assert!(
+            seeds_the_edge("export const el = <main />;\n", "js"),
+            "a .js module with an element must keep the seeded edge"
+        );
+        assert!(
+            !seeds_the_edge("export const n = 1;\n", "tsx"),
+            "a .tsx module with no element imports no helper to link"
         );
     }
 
@@ -2533,6 +2844,7 @@ mod tests {
         let tsconfig = TsConfigPaths::load(&root);
         let result = collect_deps_cached(
             "import Header from \"./Header\";",
+            "ts",
             &app,
             &root,
             &tsconfig,
@@ -2582,6 +2894,7 @@ mod tests {
         let tsconfig = TsConfigPaths::load(&root);
         let error = collect_deps_cached(
             "import Missing from \"./Missing\";",
+            "ts",
             &app,
             &root,
             &tsconfig,
@@ -2614,6 +2927,7 @@ mod tests {
         let tsconfig = TsConfigPaths::load(&root);
         let deps = collect_deps_cached(
             "import Header from \"./header\";",
+            "ts",
             &app,
             &root,
             &tsconfig,
@@ -2641,6 +2955,7 @@ mod tests {
 
         let deps = collect_deps_cached(
             "import \"./global.css\";",
+            "ts",
             &app,
             temp.path(),
             &tsconfig,
@@ -2654,28 +2969,70 @@ mod tests {
         assert!(deps.paths.is_empty());
     }
 
-    #[test]
-    fn shared_graph_cache_reuses_source_reads_across_routes() {
+    /// Two routes sharing one module that reaches its own dependency through a
+    /// `tsconfig` alias. The alias is the part a warm cache hit has to carry:
+    /// `~/lib/x` shares no path suffix with `lib/x.ts`, so the linker can only
+    /// resolve it through the alias map.
+    fn aliased_two_route_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, PathBuf) {
         let temp = tempfile::tempdir().unwrap();
         let app = temp.path().join("app");
+        let lib = temp.path().join("lib");
         fs::create_dir_all(&app).unwrap();
+        fs::create_dir_all(&lib).unwrap();
 
+        fs::write(
+            temp.path().join("tsconfig.json"),
+            r#"{"compilerOptions":{"baseUrl":".","paths":{"~/*":["./*"]}}}"#,
+        )
+        .unwrap();
+
+        let aliased = lib.join("x.ts");
         let shared = app.join("shared.ts");
         let page_a = app.join("a.tsx");
         let page_b = app.join("b.tsx");
 
-        fs::write(&shared, "export const label = \"shared\";").unwrap();
+        fs::write(&aliased, "export const x = 1;").unwrap();
+        fs::write(
+            &shared,
+            "import { x } from \"~/lib/x\";\nexport const label = x;",
+        )
+        .unwrap();
+        // Byte-identical on purpose: the two routes must collide on the
+        // dependency cache key, which is what puts the warm path under test.
         fs::write(&page_a, "import { label } from \"./shared\";").unwrap();
         fs::write(&page_b, "import { label } from \"./shared\";").unwrap();
 
+        (temp, app, shared, page_a, page_b)
+    }
+
+    fn virtual_entry_for(page: &Path) -> String {
+        format!(
+            "import Page from {};",
+            serde_json::to_string(&page.display().to_string().replace('\\', "/")).unwrap()
+        )
+    }
+
+    fn shared_module_aliases(
+        modules: &[ResolvedModule],
+        shared: &Path,
+    ) -> BTreeMap<String, PathBuf> {
+        let key = ruvyxa_diagnostics::normalized_canonical_path(shared);
+        modules
+            .iter()
+            .find(|module| module.path == key)
+            .expect("the shared module is part of every route's graph")
+            .dependency_aliases
+            .clone()
+    }
+
+    #[test]
+    fn shared_graph_cache_reuses_source_reads_across_routes() {
+        let (temp, app, shared, page_a, page_b) = aliased_two_route_project();
         let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
         let cache = ResolveGraphCache::new();
 
-        resolve_graph_with_cache(
-            &format!(
-                "import Page from {};",
-                serde_json::to_string(&page_a.display().to_string().replace('\\', "/")).unwrap()
-            ),
+        let route_a = resolve_graph_with_cache(
+            &virtual_entry_for(&page_a),
             "ruvyxa:test-a.tsx",
             &root,
             &app,
@@ -2683,11 +3040,8 @@ mod tests {
         )
         .unwrap();
         let dependencies_after_first_route = cache.dependency_count();
-        resolve_graph_with_cache(
-            &format!(
-                "import Page from {};",
-                serde_json::to_string(&page_b.display().to_string().replace('\\', "/")).unwrap()
-            ),
+        let route_b = resolve_graph_with_cache(
+            &virtual_entry_for(&page_b),
             "ruvyxa:test-b.tsx",
             &root,
             &app,
@@ -2695,12 +3049,63 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(cache.source_count(), 3);
+        assert_eq!(cache.source_count(), 4);
         assert!(cache.resolution_count() >= 1);
         assert_eq!(
             cache.dependency_count(),
             dependencies_after_first_route + 1,
             "only the second virtual entry is new; identical page and shared scans are reused"
+        );
+
+        let aliases_a = shared_module_aliases(&route_a, &shared);
+        let aliases_b = shared_module_aliases(&route_b, &shared);
+        assert!(
+            aliases_a.contains_key("~/lib/x"),
+            "the cold route records the tsconfig alias: {aliases_a:?}"
+        );
+        assert_eq!(
+            aliases_a, aliases_b,
+            "a warm dependency-cache hit must answer with both halves — paths and aliases — or \
+             the second route's linker cannot resolve `~/lib/x`"
+        );
+    }
+
+    #[test]
+    fn warm_cache_hits_persist_a_complete_alias_map() {
+        let (temp, app, shared, page_a, page_b) = aliased_two_route_project();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
+        let cache = ResolveGraphCache::new();
+        let cache_dir = temp.path().join(".ruvyxa-test-cache");
+        let incremental = IncrementalGraphCache::at_dir(&cache_dir, "test", true);
+
+        for (label, page) in [
+            ("ruvyxa:test-a.tsx", &page_a),
+            ("ruvyxa:test-b.tsx", &page_b),
+        ] {
+            resolve_graph_with_incremental(
+                &virtual_entry_for(page),
+                label,
+                &root,
+                &app,
+                &cache,
+                &BuildHookPipeline::empty(),
+                BundleTarget::Client,
+                JsxRuntime::Automatic,
+                Some(&incremental),
+            )
+            .unwrap();
+        }
+        incremental.save().unwrap();
+
+        let reloaded = IncrementalGraphCache::at_dir(&cache_dir, "test", true);
+        let shared_key = ruvyxa_diagnostics::normalized_canonical_path(&shared);
+        let persisted = reloaded
+            .cached_aliases(&shared_key)
+            .expect("the shared module was recorded with an alias map");
+        assert!(
+            persisted.contains_key("~/lib/x"),
+            "the last route to record the module must not overwrite the alias map with an empty \
+             one — `Some({{}})` passes the Option guard, so the next build reuses it: {persisted:?}"
         );
     }
 
@@ -3856,6 +4261,124 @@ export default function Card() { return <div className={cn("card")} /> }"#,
                 (Blocked, PackageExportsResolution::Blocked) => {}
                 (Unavailable, PackageExportsResolution::Unavailable) => {}
                 _ => panic!("{why}: unexpected resolution {got:?}"),
+            }
+        }
+    }
+
+    /// The `resolutionOrder` section of
+    /// `tests/fixtures/module-resolution-conformance.json`.
+    ///
+    /// Every other section of that table describes a rule that applies once a
+    /// package has been chosen. This one describes the walk that chooses it —
+    /// which source answers a non-relative specifier, and in what order — which
+    /// is the step the two graphs had drifted apart on. The JavaScript half is
+    /// `resolution order` in
+    /// `tests/packages/ruvyxa/module-resolution-contract.test.mjs`.
+    #[test]
+    fn resolution_order_matches_the_shared_table() {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Fixture {
+            resolution_order: Vec<Scenario>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Scenario {
+            name: String,
+            importer: String,
+            files: BTreeMap<String, String>,
+            cases: Vec<Case>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Case {
+            name: String,
+            specifier: String,
+            /// Prefix the temporary project root, forward-slashed: the form a
+            /// generated entry emits, and absolute on both hosts.
+            #[serde(default)]
+            absolute: bool,
+            expect: Expect,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "kind", rename_all = "lowercase")]
+        enum Expect {
+            Resolved { path: String },
+            Diagnostic { code: String, names: String },
+            External,
+        }
+
+        let fixture: Fixture = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/module-resolution-conformance.json"
+        ))
+        .unwrap();
+
+        for scenario in fixture.resolution_order {
+            let temp = tempfile::tempdir().unwrap();
+            let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
+            for (relative, source) in &scenario.files {
+                let file = root.join(relative);
+                fs::create_dir_all(file.parent().unwrap()).unwrap();
+                fs::write(file, source).unwrap();
+            }
+            let base_dir = root.join(&scenario.importer);
+            fs::create_dir_all(&base_dir).unwrap();
+            let tsconfig = TsConfigPaths::load(&root);
+
+            for case in &scenario.cases {
+                let why = format!("{}: {}", scenario.name, case.name);
+                let specifier = if case.absolute {
+                    format!(
+                        "{}/{}",
+                        root.to_string_lossy().replace('\\', "/"),
+                        case.specifier
+                    )
+                } else {
+                    case.specifier.clone()
+                };
+                let source = format!(
+                    "import * as module from {};\n",
+                    serde_json::to_string(&specifier).unwrap()
+                );
+                let result = collect_deps_cached(
+                    &source,
+                    "ts",
+                    &base_dir,
+                    &root,
+                    &tsconfig,
+                    &ResolveGraphCache::new(),
+                    &BuildHookPipeline::empty(),
+                    BundleTarget::Client,
+                    JsxRuntime::Automatic,
+                );
+
+                match &case.expect {
+                    Expect::Resolved { path } => {
+                        let deps = result.unwrap_or_else(|error| panic!("{why}: {error}"));
+                        let resolved = deps
+                            .aliases
+                            .get(&specifier)
+                            .unwrap_or_else(|| panic!("{why}: nothing answered the specifier"));
+                        let actual = resolved
+                            .strip_prefix(&root)
+                            .unwrap_or_else(|_| panic!("{why}: {resolved:?} is outside {root:?}"))
+                            .to_string_lossy()
+                            .replace('\\', "/");
+                        assert_eq!(&actual, path, "{why}");
+                    }
+                    Expect::Diagnostic { code, names } => {
+                        let message = result
+                            .err()
+                            .unwrap_or_else(|| {
+                                panic!("{why}: expected {code}, the build succeeded")
+                            })
+                            .to_string();
+                        assert!(message.contains(code), "{why}: {message}");
+                        assert!(message.contains(names), "{why}: {message}");
+                    }
+                    Expect::External => {
+                        let deps = result.unwrap_or_else(|error| panic!("{why}: {error}"));
+                        assert!(deps.aliases.is_empty(), "{why}: {:?}", deps.aliases);
+                    }
+                }
             }
         }
     }

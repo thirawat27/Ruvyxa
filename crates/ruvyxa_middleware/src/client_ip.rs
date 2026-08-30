@@ -151,12 +151,31 @@ pub fn is_trusted_proxy_ip(trusted: &TrustedProxies, ip: IpAddr) -> bool {
 /// Only hops that parse as an address are considered: the header is
 /// client-writable, and treating raw text as an identity lets one caller rotate
 /// arbitrary junk through a limiter that then counts to one, forever.
+///
+/// Every field line is read, last one first, and `get_all` rather than `get` is
+/// load-bearing. `get` returns only the first value stored under a name, while
+/// RFC 7230 §3.2.2 says repeated field lines are semantically the comma-joined
+/// list — so a proxy that *appends* its own line rather than extending the
+/// caller's, which is what HAProxy's `option forwardfor` does by default, put
+/// the caller's line first and handed the caller its own identity. Scanning
+/// right-to-left inside a value that was already the wrong one inverts the
+/// guarantee this function exists to make. The deployed host is accidentally
+/// right about this: the Fetch API's `Headers.get()` joins every instance with
+/// `", "`, which is the same order these two loops produce.
 pub fn forwarded_client_ip(trusted: &TrustedProxies, headers: &HeaderMap) -> Option<IpAddr> {
-    headers
-        .get("x-forwarded-for")
-        .or_else(|| headers.get("x-real-ip"))
-        .and_then(|value| value.to_str().ok())
-        .into_iter()
+    let forwarded = headers.get_all("x-forwarded-for");
+    // Fall back on *absence*, not on emptiness: a present-but-empty
+    // `X-Forwarded-For` suppresses `X-Real-IP` here exactly as `??` does on the
+    // deployed host, so one blank header cannot mean two different clients.
+    let values = if forwarded.iter().next().is_some() {
+        forwarded
+    } else {
+        headers.get_all("x-real-ip")
+    };
+    values
+        .iter()
+        .rev()
+        .filter_map(|value| value.to_str().ok())
         .flat_map(|value| value.split(',').rev())
         .filter_map(|value| value.trim().parse::<IpAddr>().ok())
         .find(|candidate| !is_trusted_proxy_ip(trusted, *candidate))
@@ -223,9 +242,26 @@ mod tests {
     use super::*;
     use axum::http::{HeaderName, HeaderValue};
 
-    fn headers_from(pairs: &serde_json::Map<String, serde_json::Value>) -> HeaderMap {
+    /// The headers one fixture case describes.
+    ///
+    /// A case carries either `headers` — a JSON object, which cannot express one
+    /// field name arriving twice — or `headerLines`, which can. The second form
+    /// must be built with `append`: `insert` replaces, which is why no case
+    /// could reach the duplicate-field-line path while that was the only helper.
+    fn headers_for(case: &serde_json::Value) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        for (field, value) in pairs {
+        if let Some(lines) = case["headerLines"].as_array() {
+            for line in lines {
+                let field = line[0].as_str().unwrap();
+                let value = line[1].as_str().unwrap();
+                headers.append(
+                    HeaderName::from_bytes(field.as_bytes()).unwrap(),
+                    HeaderValue::from_str(value).unwrap(),
+                );
+            }
+            return headers;
+        }
+        for (field, value) in case["headers"].as_object().unwrap() {
             headers.insert(
                 HeaderName::from_bytes(field.as_bytes()).unwrap(),
                 HeaderValue::from_str(value.as_str().unwrap()).unwrap(),
@@ -251,7 +287,7 @@ mod tests {
 
         for case in fixture["cases"].as_array().unwrap() {
             let name = case["name"].as_str().unwrap();
-            let headers = headers_from(case["headers"].as_object().unwrap());
+            let headers = headers_for(case);
             let trusted = TrustedProxies::parse_all(
                 case["trustedProxyIps"]
                     .as_array()
@@ -267,6 +303,51 @@ mod tests {
                 "client identity case disagrees with the shared fixture: {name}"
             );
         }
+    }
+
+    /// A duplicate field line is a second axis, and the caller owns the first.
+    ///
+    /// `HeaderMap::get` returns only the first value stored under a name, so a
+    /// proxy that *appends* its own line — HAProxy's `option forwardfor` does
+    /// this by default — handed the caller its own rate-limit identity: the
+    /// module scanned right-to-left inside a value it had already picked the
+    /// wrong one of. `append` here rather than `insert` is the whole test;
+    /// `insert` replaces, which is why this was unreachable from the helper the
+    /// fixture replay used.
+    #[test]
+    fn a_field_line_the_proxy_appended_outranks_the_one_the_client_sent() {
+        let mut headers = HeaderMap::new();
+        headers.append("x-forwarded-for", HeaderValue::from_static("198.51.100.1"));
+        headers.append("x-forwarded-for", HeaderValue::from_static("203.0.113.9"));
+        let trusted = TrustedProxies::default();
+
+        assert_eq!(
+            forwarded_client_ip(&trusted, &headers).map(|ip| ip.to_string()),
+            Some("203.0.113.9".to_string()),
+            "the last field line is the one the proxy wrote"
+        );
+
+        // A trusted hop in the last line is skipped back into the line before
+        // it, exactly as a trusted hop inside one value is.
+        let mut headers = HeaderMap::new();
+        headers.append("x-forwarded-for", HeaderValue::from_static("203.0.113.9"));
+        headers.append("x-forwarded-for", HeaderValue::from_static("10.0.0.9"));
+        let trusted = TrustedProxies::parse_all(["10.0.0.0/8"]).unwrap();
+        assert_eq!(
+            forwarded_client_ip(&trusted, &headers).map(|ip| ip.to_string()),
+            Some("203.0.113.9".to_string())
+        );
+
+        // `x-real-ip` is read only when no `x-forwarded-for` line arrived at
+        // all — a present-but-empty one still suppresses it, which is what
+        // `Headers.get() ?? …` does on the deployed host.
+        let mut headers = HeaderMap::new();
+        headers.append("x-real-ip", HeaderValue::from_static("198.51.100.1"));
+        headers.append("x-real-ip", HeaderValue::from_static("203.0.113.9"));
+        assert_eq!(
+            forwarded_client_ip(&TrustedProxies::default(), &headers).map(|ip| ip.to_string()),
+            Some("203.0.113.9".to_string())
+        );
     }
 
     /// The peer gate is this host's alone, and is why the shared table starts

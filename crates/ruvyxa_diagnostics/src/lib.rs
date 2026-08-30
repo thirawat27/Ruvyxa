@@ -154,6 +154,11 @@ pub fn diagnostics_to_sarif(
         rules.entry(diagnostic.code).or_insert(diagnostic);
     }
 
+    let normalized_root = normalized_canonical_path(project_root);
+    let redact = |text: &str, diagnostic: &Diagnostic| {
+        redact_report_text(text, diagnostic, project_root, &normalized_root)
+    };
+
     let rules = rules
         .into_iter()
         .map(|(code, diagnostic)| {
@@ -161,27 +166,24 @@ pub fn diagnostics_to_sarif(
                 "id": code,
                 "name": code,
                 "shortDescription": { "text": diagnostic.title },
-                "fullDescription": { "text": diagnostic.explanation },
+                // The rule carries the first diagnostic's explanation verbatim,
+                // so it discloses everything `message` does and had to be
+                // rewritten with it.
+                "fullDescription": { "text": redact(&diagnostic.explanation, diagnostic) },
                 "defaultConfiguration": { "level": "error" },
             });
             if let Some(fix) = &diagnostic.suggested_fix {
-                rule["help"] = serde_json::json!({ "text": fix });
+                rule["help"] = serde_json::json!({ "text": redact(fix, diagnostic) });
             }
             rule
         })
         .collect::<Vec<_>>();
 
-    let normalized_root = normalized_canonical_path(project_root);
     let results = diagnostics
         .iter()
         .map(|diagnostic| {
             let locations = diagnostic.span.as_ref().map_or_else(Vec::new, |span| {
-                let normalized_file = normalized_canonical_path(&span.file);
-                let file = normalized_file
-                    .strip_prefix(&normalized_root)
-                    .unwrap_or(&normalized_file)
-                    .to_string_lossy()
-                    .replace('\\', "/");
+                let file = report_path(&span.file, project_root, &normalized_root);
                 let mut region = serde_json::Map::new();
                 if let Some(line) = span.line {
                     region.insert("startLine".to_string(), line.into());
@@ -199,7 +201,11 @@ pub fn diagnostics_to_sarif(
             let message = if diagnostic.explanation.is_empty() {
                 diagnostic.title.clone()
             } else {
-                format!("{}: {}", diagnostic.title, diagnostic.explanation)
+                format!(
+                    "{}: {}",
+                    diagnostic.title,
+                    redact(&diagnostic.explanation, diagnostic)
+                )
             };
             serde_json::json!({
                 "ruleId": diagnostic.code,
@@ -207,9 +213,16 @@ pub fn diagnostics_to_sarif(
                 "message": { "text": message },
                 "locations": locations,
                 "properties": {
-                    "suggestedFix": diagnostic.suggested_fix,
+                    "suggestedFix": diagnostic
+                        .suggested_fix
+                        .as_deref()
+                        .map(|fix| redact(fix, diagnostic)),
                     "affectedRoutes": diagnostic.affected_routes,
-                    "importChain": diagnostic.import_chain.iter().map(|path| path.to_string_lossy()).collect::<Vec<_>>(),
+                    "importChain": diagnostic
+                        .import_chain
+                        .iter()
+                        .map(|path| report_path(path, project_root, &normalized_root))
+                        .collect::<Vec<_>>(),
                 },
             })
         })
@@ -228,6 +241,142 @@ pub fn diagnostics_to_sarif(
             "results": results,
         }],
     })
+}
+
+/// The placeholder for a file the project root cannot explain.
+///
+/// A module reached through a workspace `file:` link, a package store, or a
+/// sibling checkout is outside the root and cannot be relativised — and
+/// `normalized_canonical_path` resolves symlinks, so pnpm's linked packages
+/// land here routinely. Naming the file alone keeps the result pointing
+/// somewhere without describing the machine it was produced on.
+const OUTSIDE_PROJECT: &str = "<outside-project>";
+
+/// A path as it may appear in an uploaded SARIF report.
+///
+/// Relative to the project root where that is possible, by the raw spelling as
+/// well as the canonical one — a project that lives under a symlinked directory
+/// canonicalizes to somewhere the root does not prefix, and falling back to the
+/// absolute path is exactly the disclosure this avoids. A path that was already
+/// relative is left alone: it names no machine, and rewriting it to
+/// [`OUTSIDE_PROJECT`] would lose the only location the diagnostic had.
+fn report_path(path: &Path, project_root: &Path, normalized_root: &Path) -> String {
+    let normalized = normalized_canonical_path(path);
+    for (candidate, root) in [
+        (normalized.as_path(), normalized_root),
+        (path, project_root),
+    ] {
+        if let Ok(relative) = candidate.strip_prefix(root) {
+            return relative.to_string_lossy().replace('\\', "/");
+        }
+    }
+
+    if !path.is_absolute() {
+        return path.to_string_lossy().replace('\\', "/");
+    }
+
+    match path.file_name() {
+        Some(name) => format!("{OUTSIDE_PROJECT}/{}", name.to_string_lossy()),
+        None => OUTSIDE_PROJECT.to_string(),
+    }
+}
+
+/// Rewrite the paths written into report prose.
+///
+/// `message`, a rule's `fullDescription`, and its `help` are free text with
+/// paths interpolated into them — `RUV1003` names two files in one sentence,
+/// `RUV1013` one — so there is no field to relativise, and this rewrites the
+/// text instead. Two passes, because they can reach different things:
+///
+/// 1. Every path the diagnostic also carries **structurally** — its span, its
+///    import chain — is replaced by exactly the spelling
+///    [`report_path`] gives that field. This is the pass that reaches a path
+///    *outside* the project, which no root prefix can.
+/// 2. What is left has the project root taken off the front. Both spellings of
+///    the root are stripped, raw and canonical, and on Windows each with
+///    forward slashes as well — a path that came back from a Node worker is
+///    spelled `/` and one this process built is spelled `\`.
+///
+/// What neither pass reaches is an absolute path the prose names and no field
+/// records, from outside the project. Finding those would mean guessing which
+/// runs of text in a sentence are paths, and on a platform where `/` opens both
+/// an absolute path and every URL this framework prints, that guess is not
+/// available. A diagnostic that names a file should put it in `span` or
+/// `import_chain`, which is where the two other consumers of this type — the
+/// terminal renderer and the JSON report — read it from anyway.
+fn redact_report_text(
+    text: &str,
+    diagnostic: &Diagnostic,
+    project_root: &Path,
+    normalized_root: &Path,
+) -> String {
+    let mut redacted = text.to_string();
+
+    let mut known = diagnostic
+        .span
+        .iter()
+        .map(|span| span.file.clone())
+        .chain(diagnostic.import_chain.iter().cloned())
+        .collect::<Vec<_>>();
+    // Longest first: one known path may be a prefix of another, and rewriting
+    // the shorter one first would leave the tail of the longer one behind.
+    known.sort_by_key(|path| std::cmp::Reverse(path.as_os_str().len()));
+    known.dedup();
+    for path in known {
+        let replacement = report_path(&path, project_root, normalized_root);
+        for spelling in path_spellings(&path) {
+            redacted = redacted.replace(&spelling, &replacement);
+        }
+    }
+
+    for root in root_spellings(project_root, normalized_root) {
+        if root.is_empty() {
+            continue;
+        }
+        redacted = redacted.replace(&format!("{root}\\"), "");
+        redacted = redacted.replace(&format!("{root}/"), "");
+        // The root named on its own is the project directory itself.
+        redacted = redacted.replace(root.as_str(), ".");
+    }
+    redacted
+}
+
+/// Every way one path may be written in report prose, longest first.
+fn path_spellings(path: &Path) -> Vec<String> {
+    let mut spellings = Vec::new();
+    for candidate in [normalized_canonical_path(path), path.to_path_buf()] {
+        let text = candidate.to_string_lossy().into_owned();
+        if cfg!(windows) {
+            let slashed = text.replace('\\', "/");
+            if slashed != text {
+                spellings.push(slashed);
+            }
+        }
+        spellings.push(text);
+    }
+    spellings.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
+    spellings.dedup();
+    spellings
+}
+
+/// Every way the project root may be written in report prose, longest first.
+fn root_spellings(project_root: &Path, normalized_root: &Path) -> Vec<String> {
+    let mut spellings = Vec::new();
+    for root in [normalized_root, project_root] {
+        let text = root.to_string_lossy().into_owned();
+        // On Unix a backslash is an ordinary character in a file name, so only
+        // Windows has a second spelling of the same directory.
+        if cfg!(windows) {
+            let slashed = text.replace('\\', "/");
+            if slashed != text {
+                spellings.push(slashed);
+            }
+        }
+        spellings.push(text);
+    }
+    spellings.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
+    spellings.dedup();
+    spellings
 }
 
 /// Where a reader of a SARIF report is sent to find out what this tool is.
@@ -355,7 +504,7 @@ pub fn normalized_canonical_path(path: &std::path::Path) -> std::path::PathBuf {
 mod path_tests {
     use super::{
         Diagnostic, diagnostics_to_sarif, label_with_code, normalized_canonical_path,
-        worker_failure_message,
+        without_verbatim_prefix, worker_failure_message,
     };
 
     #[test]
@@ -422,6 +571,89 @@ mod path_tests {
             no_help["runs"][0]["tool"]["driver"]["rules"][0]
                 .get("help")
                 .is_none()
+        );
+    }
+
+    /// A SARIF report is written to be uploaded — to GitHub code scanning, to a
+    /// vendor dashboard — so nothing in it may spell out where the build ran.
+    ///
+    /// Three places used to. `locations` relativised but fell back to the
+    /// absolute path whenever `strip_prefix` failed, which it does for anything
+    /// reached through a symlink because the path is canonicalized first;
+    /// `message` was never relativised at all, and route diagnostics
+    /// interpolate absolute paths straight into `explanation`; and
+    /// `importChain` was serialized verbatim. Between them the uploaded report
+    /// carried the developer's or CI runner's directory layout, the username in
+    /// a home-directory path, and the names of sibling workspaces.
+    #[test]
+    fn an_uploaded_sarif_report_carries_no_absolute_developer_path() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixture-project");
+        let inside = root.join("app/page.tsx");
+        // A module outside the project: a workspace `file:` link, a package
+        // store, or simply a sibling checkout. `strip_prefix` cannot relativise
+        // it, and printing it anyway is the disclosure.
+        let outside = root
+            .parent()
+            .expect("the fixture root has a parent")
+            .join("private-sibling/lib/data.ts");
+
+        let mut inside_diagnostic = Diagnostic::new("RUV1003", "Conflicting route paths")
+            .explain(format!(
+                "{} and {} resolve to the same URL match shape.",
+                inside.display(),
+                root.join("app/(marketing)/page.tsx").display()
+            ))
+            .at_file_with_span(&inside, 1, 1);
+        inside_diagnostic.import_chain = vec![inside.clone(), outside.clone()];
+
+        let outside_diagnostic = Diagnostic::new("RUV1013", "Edge route reaches a Node built-in")
+            .explain(format!("{} imports `node:fs`.", outside.display()))
+            .at_file(&outside);
+
+        let sarif = diagnostics_to_sarif(
+            &[inside_diagnostic, outside_diagnostic],
+            "Ruvyxa",
+            "1.0.23",
+            &root,
+        );
+        let serialized = serde_json::to_string(&sarif).expect("sarif serializes");
+
+        for leaked in [
+            root.display().to_string(),
+            inside.display().to_string(),
+            outside.display().to_string(),
+        ] {
+            // The report is JSON, so a Windows separator arrives escaped.
+            let escaped = leaked.replace('\\', "\\\\");
+            assert!(
+                !serialized.contains(&leaked) && !serialized.contains(&escaped),
+                "an uploaded report must not spell `{leaked}`:\n{serialized}"
+            );
+        }
+
+        assert_eq!(
+            sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]
+                ["uri"],
+            "app/page.tsx"
+        );
+        // A path the project root cannot explain is named by its file alone, so
+        // the result still points somewhere without describing the machine.
+        assert_eq!(
+            sarif["runs"][0]["results"][1]["locations"][0]["physicalLocation"]["artifactLocation"]
+                ["uri"],
+            "<outside-project>/data.ts"
+        );
+        assert_eq!(
+            sarif["runs"][0]["results"][0]["properties"]["importChain"][1],
+            "<outside-project>/data.ts"
+        );
+        assert!(
+            sarif["runs"][0]["results"][0]["message"]["text"]
+                .as_str()
+                .expect("message text")
+                .contains("app/page.tsx"),
+            "the message must still say which file: {}",
+            sarif["runs"][0]["results"][0]["message"]["text"]
         );
     }
 
@@ -616,6 +848,298 @@ mod path_tests {
             offenders.is_empty(),
             "a worker's message usually already opens with its own code, so pasting one in \
              front prints both. Join through label_with_code instead:
+  {}",
+            offenders.join(
+                "
+  "
+            )
+        );
+    }
+
+    /// Skip ASCII whitespace, in place.
+    fn skip_whitespace(bytes: &[u8], cursor: &mut usize) {
+        while bytes.get(*cursor).is_some_and(u8::is_ascii_whitespace) {
+            *cursor += 1;
+        }
+    }
+
+    /// Read the Rust string literal at `cursor`, leading whitespace skipped,
+    /// and leave `cursor` just past its closing quote.
+    ///
+    /// `None` when what is there is not a plain literal — an expression, a raw
+    /// string, anything this deliberately does not understand. The caller drops
+    /// such a call site rather than guessing at it.
+    fn read_string_literal<'source>(
+        source: &'source str,
+        cursor: &mut usize,
+    ) -> Option<&'source str> {
+        let bytes = source.as_bytes();
+        skip_whitespace(bytes, cursor);
+        if bytes.get(*cursor) != Some(&b'"') {
+            return None;
+        }
+        let start = *cursor + 1;
+        let mut index = start;
+        while let Some(&byte) = bytes.get(index) {
+            match byte {
+                // Whatever is escaped, it is not the terminator.
+                b'\\' => index += 2,
+                b'"' => {
+                    *cursor = index + 1;
+                    return Some(&source[start..index]);
+                }
+                _ => index += 1,
+            }
+        }
+        None
+    }
+
+    /// Every `Diagnostic::new("RUV####", "title")` in one Rust source, with the
+    /// line each call starts on.
+    ///
+    /// This parses the call instead of matching a line. `RUV1011` spells each of
+    /// its three calls across three lines, so a single-line regex sees none of
+    /// them and a gate written that way would pass the exact defect it was
+    /// written for. A `format!` title counts as its format string: the shape is
+    /// the meaning, and the values only fill it in.
+    ///
+    /// Two things are skipped on purpose. A call whose code is an expression —
+    /// `Diagnostic::new(code, title)`, `Diagnostic::new(action_error_code(…), …)`
+    /// — picks its code at run time and has no one title to pin. And everything
+    /// from a top-level `#[cfg(test)]` immediately followed by a `mod` line to
+    /// the end of the file is test scaffolding, which invents codes freely.
+    ///
+    /// That last rule is matched on the *module*, not on the attribute. Cutting
+    /// at the first `#[cfg(test)]` is the obvious spelling and it is wrong here:
+    /// `ruvyxa_dev_server`'s `lib.rs` opens with a `#[cfg(test)] use` on line 1,
+    /// so that spelling silently discards a 4,900-line crate and reports it as
+    /// clean.
+    fn diagnostic_code_titles(source: &str) -> Vec<(usize, String, String)> {
+        let lines = source.lines().collect::<Vec<_>>();
+        let end = (0..lines.len())
+            .find(|index| {
+                lines[*index] == "#[cfg(test)]"
+                    && lines
+                        .get(index + 1)
+                        .is_some_and(|next| next.starts_with("mod "))
+            })
+            .unwrap_or(lines.len());
+        // Blanked rather than dropped, so a reported line still points at the
+        // real file — the same reason the join gate above blanks them.
+        let text = lines[..end]
+            .iter()
+            .map(|line| {
+                if line.trim_start().starts_with("//") {
+                    ""
+                } else {
+                    *line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        const CALL: &str = "Diagnostic::new(";
+        let mut found = Vec::new();
+        for (offset, _) in text.match_indices(CALL) {
+            let mut cursor = offset + CALL.len();
+            let Some(code) = read_string_literal(&text, &mut cursor) else {
+                continue;
+            };
+            if !code.starts_with("RUV") {
+                continue;
+            }
+            let bytes = text.as_bytes();
+            skip_whitespace(bytes, &mut cursor);
+            if bytes.get(cursor) != Some(&b',') {
+                continue;
+            }
+            cursor += 1;
+            skip_whitespace(bytes, &mut cursor);
+            if text[cursor..].starts_with("format!(") {
+                cursor += "format!(".len();
+            }
+            let code = code.to_string();
+            let Some(title) = read_string_literal(&text, &mut cursor) else {
+                continue;
+            };
+            found.push((
+                text[..offset].matches('\n').count() + 1,
+                code,
+                title.to_string(),
+            ));
+        }
+        found
+    }
+
+    /// One code, one meaning.
+    ///
+    /// `diagnostics_to_sarif` keys its rule table by code —
+    /// `rules.entry(diagnostic.code).or_insert(diagnostic)` — so the **first**
+    /// diagnostic carrying a code supplies the title and explanation that
+    /// describe *every* result carrying it. Three codes carried six meanings
+    /// between them, and an uploaded report labelled a missing interception
+    /// target as a marker climbing above the app root. A code is a search term
+    /// before it is anything else, and one that answers two questions answers
+    /// neither.
+    ///
+    /// Because the code is a `&'static str`, nothing at compile time and
+    /// nothing in CI could notice a fourth meaning joining `RUV1011`. That is
+    /// the reason this reads the source rather than a registry someone
+    /// maintains: a registry is only correct while somebody remembers it.
+    #[test]
+    fn one_diagnostic_code_carries_one_meaning() {
+        // Codes that still carry more than one title, with the exact set each
+        // carries and why it is still here. The *set* is pinned, not just the
+        // code, so a new meaning joining one of these fails, and so does an
+        // entry that is no longer needed. Nothing may be added to this list to
+        // make a new collision pass.
+        //
+        // `RUV1007`/`RUV1008`/`RUV1009` are one meaning in two spellings: the
+        // route graph says "graph" where the bundler says "bundle"/"SSR graph"
+        // for the same boundary violation. `RUV1402`/`RUV1403`/`RUV1500` are
+        // genuine collisions inside `ruvyxa_dev_server` and need the same split
+        // `RUV1002`/`RUV1006`/`RUV1011` just had.
+        const KNOWN_DIVERGENCES: [(&str, &[&str]); 6] = [
+            (
+                "RUV1007",
+                &[
+                    "Server-only module imported into client bundle",
+                    "Server-only module imported into client graph",
+                ],
+            ),
+            (
+                "RUV1008",
+                &[
+                    "Private environment variable used in client bundle",
+                    "Private environment variable used in client graph",
+                ],
+            ),
+            (
+                "RUV1009",
+                &[
+                    "Client-only module imported into SSR graph",
+                    "Client-only module imported into server graph",
+                ],
+            ),
+            (
+                "RUV1402",
+                &[
+                    "CSS preprocessor requires an explicit transform plugin",
+                    "Sass compilation failed",
+                ],
+            ),
+            (
+                "RUV1403",
+                &[
+                    "CSS @import could not be resolved",
+                    "Configured CSS entry was not found",
+                    "Stylesheet import could not be resolved",
+                ],
+            ),
+            (
+                "RUV1500",
+                &["SSG render failed", "Server-components render failed"],
+            ),
+        ];
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("workspace root");
+        // Discovered, not listed, for the same reason as the join gate above: a
+        // new crate would otherwise join uncovered and silent.
+        let mut crate_directories = std::fs::read_dir(root.join("crates"))
+            .expect("crates directory")
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>();
+        crate_directories.sort();
+
+        type Meanings =
+            std::collections::BTreeMap<String, std::collections::BTreeMap<String, Vec<String>>>;
+        let mut meanings = Meanings::new();
+        let mut sites = 0usize;
+        for crate_directory in crate_directories {
+            let Ok(entries) = std::fs::read_dir(crate_directory.join("src")) else {
+                continue;
+            };
+            let mut files = entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("rs"))
+                .collect::<Vec<_>>();
+            files.sort();
+            for path in files {
+                let Ok(source) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                for (line, code, title) in diagnostic_code_titles(&source) {
+                    sites += 1;
+                    meanings
+                        .entry(code)
+                        .or_default()
+                        .entry(title)
+                        .or_default()
+                        .push(format!(
+                            "{}:{line}",
+                            without_verbatim_prefix(&path).display()
+                        ));
+                }
+            }
+        }
+
+        // A floor, because the failure mode of a source-scanning gate is
+        // finding nothing and calling that a pass. The `#[cfg(test)]` cut above
+        // has already been wrong once in exactly that direction.
+        assert!(
+            sites >= 50,
+            "found only {sites} `Diagnostic::new` call sites; the scan stopped seeing the source"
+        );
+
+        let mut offenders = Vec::new();
+        for (code, titles) in &meanings {
+            let observed = titles.keys().map(String::as_str).collect::<Vec<_>>();
+            match KNOWN_DIVERGENCES
+                .iter()
+                .find(|(known, _)| known == code)
+                .map(|(_, expected)| *expected)
+            {
+                Some(expected) if observed.as_slice() == expected => {}
+                Some(expected) => offenders.push(format!(
+                    "{code} is listed as a known divergence carrying {expected:?}, but now carries \
+                     {observed:?}. Give the new meaning its own code, or — if the code has one \
+                     meaning again — delete its entry from KNOWN_DIVERGENCES."
+                )),
+                None if observed.len() > 1 => offenders.push(format!(
+                    "{code} carries {} meanings:\n      {}",
+                    observed.len(),
+                    titles
+                        .iter()
+                        .map(|(title, where_raised)| format!(
+                            "\"{title}\" at {}",
+                            where_raised.join(", ")
+                        ))
+                        .collect::<Vec<_>>()
+                        .join("\n      ")
+                )),
+                None => {}
+            }
+        }
+        for (code, _) in KNOWN_DIVERGENCES {
+            if !meanings.contains_key(code) {
+                offenders.push(format!(
+                    "{code} is listed as a known divergence but is no longer raised at all; \
+                     delete its entry"
+                ));
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "a diagnostic code is a search term, and SARIF describes every result carrying a code \
+             with the first one it saw. Give the rarer meaning its own code and document it in \
+             docs/*/16-troubleshooting-upgrades.md:
   {}",
             offenders.join(
                 "

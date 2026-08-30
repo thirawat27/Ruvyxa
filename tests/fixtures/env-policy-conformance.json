@@ -34,5 +34,159 @@
       "why": "a framework-looking name is not automatically public"
     },
     { "name": "", "private": true, "why": "an empty name is not an exemption" }
-  ]
+  ],
+  "extraction": {
+    "description": "Which name a `process.env` read *is*, before the rule above classifies it. The classification table alone left this half unheld, and the two graphs disagreed: `env_read_name` in `crates/ruvyxa_bundler/src/ast.rs` reads the name with `skip_identifier`, while `parsePrivateEnvName` in `packages/ruvyxa/runtime/compiler.mjs` matched `/^[A-Z_][A-Z0-9_]*/` — so a lower-case name was invisible to `ruvyxa dev` and refused by `ruvyxa build`, and a mixed-case name was reported under two different spellings by the two hosts. Two of the classification cases above (`node_env`, `ruvyxa_public_key`) were names the JavaScript extractor could not produce at all, so nothing tested them end to end.",
+    "rule": "After `process.env`, ASCII whitespace, then either `.` immediately followed by a non-empty run of `[A-Za-z0-9_$]`, or `[` `\"name\"` `]` whose closing quote must follow that run directly. The run is deliberately ASCII-only and has no identifier-*start* requirement, because that is exactly what `skip_identifier` reads: `process.env[\"1PASSWORD_TOKEN\"]` has a name and `process.env[\"café\"]` does not.",
+    "reports": "the private names only, in source order — what each host's boundary check actually acts on (`private_env_reads` in `boundary.rs`, `privateEnvReads` in `compiler.mjs`)",
+    "cases": [
+      {
+        "source": "export const db = process.env.databaseUrl\n",
+        "privateNames": ["databaseUrl"],
+        "why": "the headline divergence: a lower-case name passed `dev` and was refused by `build`"
+      },
+      {
+        "source": "export const value = process.env.MIXED_case\n",
+        "privateNames": ["MIXED_case"],
+        "why": "a character class truncated at the first lower-case letter, so the two hosts named different variables in the same diagnostic"
+      },
+      {
+        "source": "export const value = process.env.NODE_ENVx\n",
+        "privateNames": ["NODE_ENVx"],
+        "why": "truncating to `NODE_ENV` made one graph read the public exemption where the other read a private name"
+      },
+      {
+        "source": "export const value = process.env[\"lowerCase\"]\n",
+        "privateNames": ["lowerCase"],
+        "why": "the bracket branch is the second occurrence of the same rule; fixing only the dot branch is the classic half-fix"
+      },
+      {
+        "source": "export const value = process.env.$weird\n",
+        "privateNames": ["$weird"],
+        "why": "`$` is an identifier character, so a name that starts with one is still a name"
+      },
+      {
+        "source": "export const value = process.env[\"1PASSWORD_TOKEN\"]\n",
+        "privateNames": ["1PASSWORD_TOKEN"],
+        "why": "`skip_identifier` reads continue-bytes without requiring a start byte, and a bracket access makes a leading digit legal source. `/^[A-Za-z_$][\\w$]*/` would miss this one"
+      },
+      {
+        "source": "export const value = process.env.node_env\n",
+        "privateNames": ["node_env"],
+        "why": "makes the case-sensitivity case in the classification table above reachable from real source for the first time"
+      },
+      {
+        "source": "export const value = process.env[\"ruvyxa_public_key\"]\n",
+        "privateNames": ["ruvyxa_public_key"],
+        "why": "the other classification case the JavaScript extractor could not produce"
+      },
+      {
+        "source": "export const url = process.env.RUVYXA_PUBLIC_apiUrl\n",
+        "privateNames": [],
+        "why": "the whole name carries the public prefix; truncating it to `RUVYXA_PUBLIC_` happened to agree here and would not have if the prefix were shorter"
+      },
+      {
+        "source": "export const mode = process.env.NODE_ENV\n",
+        "privateNames": [],
+        "why": "the exemption, extracted whole"
+      },
+      {
+        "source": "export const value = process.env.café\n",
+        "privateNames": ["caf"],
+        "why": "the run is ASCII, so it stops at the first non-ASCII byte and the read is still private under the truncated name. A Unicode identifier pattern would report `café` and diverge from Rust"
+      },
+      {
+        "source": "export const value = process.env[\"café\"]\n",
+        "privateNames": [],
+        "why": "the same ASCII stop leaves a non-quote character where the closing quote must be, so the bracket branch yields no name at all — the mirror of the case above, and why the two branches cannot use different patterns"
+      },
+      {
+        "source": "export const value = process.env[key]\n",
+        "privateNames": [],
+        "why": "a computed access has no statically-known name"
+      },
+      {
+        "source": "export const value = process.env .SPACED_SECRET\n",
+        "privateNames": ["SPACED_SECRET"],
+        "why": "whitespace before the `.` is skipped"
+      },
+      {
+        "source": "export const value = process.env. SPACED_NAME\n",
+        "privateNames": [],
+        "why": "no whitespace is skipped after the `.`, so the name run is empty and there is no read"
+      },
+      {
+        "source": "export const value = myprocess.env.SECRET\n",
+        "privateNames": [],
+        "why": "the marker must not be preceded by an identifier character"
+      },
+      {
+        "source": "export const note = 'process.env.SECRET'\n",
+        "privateNames": [],
+        "why": "the scanner asks the masked source, so a name inside a string is text"
+      },
+      {
+        "source": "export const value = `${process.env.INTERPOLATED_SECRET}`\n",
+        "privateNames": ["INTERPOLATED_SECRET"],
+        "why": "a template interpolation is code, and the mask says so in both graphs"
+      }
+    ]
+  },
+  "importMetaEnv": {
+    "description": "Which module kinds get `import.meta.env` replaced by the frozen public-environment literal. The Rust compiler (`compile_module` in `crates/ruvyxa_bundler/src/compiler.rs`) and the Node compiler (`transformModuleSource` in `packages/ruvyxa/runtime/compiler.mjs`) each decide this independently, so both replay this table. The Rust half returned early for `.js`, `.mjs` and `.cjs` before the oxc transform, and the substitution lived inside that transform — so a plain-JavaScript module, an app file or any client-bundled Vite-authored dependency, reached the browser with the expression verbatim. `import.meta` carries no `env` in a browser, so the module threw `TypeError` at evaluation and killed the whole bundle rather than one expression.",
+    "rule": "Every extension the bundler compiles a JavaScript module from substitutes `import.meta.env`, whichever internal path produced that module — including a `ruvyxa:` virtual entry, which the Node graph has always substituted. A mention inside a string or a comment is text and is left alone.",
+    "marker": "import.meta.env",
+    "literalPrefix": "Object.freeze(",
+    "notCoveredHere": {
+      ".json": "a JSON document is data; its text is never read as code",
+      ".css/.scss/.sass": "compiled by the style pipeline, not by the JavaScript compiler",
+      ".md/.mdx": "lowered to JavaScript first and then compiled as `.ts`, which this table already covers"
+    },
+    "extensions": [
+      { "extension": ".ts", "why": "the ordinary application module" },
+      { "extension": ".tsx", "why": "the ordinary component module" },
+      { "extension": ".js", "why": "plain JavaScript app code, and most shipped dependencies" },
+      { "extension": ".jsx", "why": "plain JavaScript with elements" },
+      {
+        "extension": ".mjs",
+        "why": "what a Vite-authored dependency ships, and for the Client target `node_modules` is not external"
+      },
+      { "extension": ".cjs", "why": "the CommonJS spelling of the same dependency" },
+      { "extension": ".mts", "why": "TypeScript's explicit-ESM spelling" },
+      { "extension": ".cts", "why": "TypeScript's explicit-CommonJS spelling" }
+    ],
+    "cases": [
+      {
+        "name": "a read of a public value",
+        "source": "export const url = import.meta.env.RUVYXA_PUBLIC_API_URL\n",
+        "substituted": true,
+        "why": "the documented way to read a public value in a browser bundle"
+      },
+      {
+        "name": "a guard on a member that is absent",
+        "source": "export const dev = import.meta.env.DEV === true\n",
+        "substituted": true,
+        "why": "the Vite idiom shipped inside real dependencies; unsubstituted it throws before the guard can be false"
+      },
+      {
+        "name": "the whole object",
+        "source": "export const all = { ...import.meta.env }\n",
+        "substituted": true,
+        "why": "the marker is the object, not the member access after it"
+      },
+      {
+        "name": "a mention inside a string",
+        "source": "export const note = 'import.meta.env'\n",
+        "substituted": false,
+        "markerSurvives": true,
+        "why": "both halves ask the masked code, so text stays the text it is"
+      },
+      {
+        "name": "a mention inside a comment",
+        "source": "// read import.meta.env here\nexport const value = 1\n",
+        "substituted": false,
+        "why": "same masking rule, and a comment is not code. `markerSurvives` is not asserted: codegen drops comments, so the mention is gone entirely on every extension that is re-printed and present on every extension that is passed through"
+      }
+    ]
+  }
 }

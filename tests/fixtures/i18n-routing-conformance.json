@@ -53,9 +53,32 @@
   "$routesNote": [
     "The page routes a case is matched against. Both replays build these two and",
     "nothing else, so a case expecting `null` because no page exists is distinct",
-    "from one expecting `null` because the request was excluded."
+    "from one expecting `null` because the request was excluded.",
+    "",
+    "A bare `/[lang]` is deliberately absent. One dynamic segment matches any",
+    "one-segment path, so with it in the table `/about` would match the route",
+    "`[lang]=about` and never reach the redirect at all — in the deployed replay,",
+    "which drives the whole handler, but not in the native one, which calls",
+    "`locale_redirect_path` directly. The two replays would then disagree about",
+    "every case here for a reason that has nothing to do with locales."
   ],
   "routes": ["/[lang]/about", "/[lang]/__ruvyxa-notes"],
+
+  "$queryNote": [
+    "`query` is the request's query string without its leading `?`, and is absent",
+    "on a case that sends none. Routing never consults it — it exists here only",
+    "because the redirect target must reproduce it.",
+    "",
+    "Both hosts used to build `Location` from the path alone: the native server",
+    "redirects from `canonical_request_path(uri.path())`, which by construction",
+    "carries no query, and the deployed handler built its candidate from",
+    "`pathname`. A 307 preserves the method and the body and says nothing about",
+    "the query, so `GET /about?q=hello` answered `Location: /en/about` and every",
+    "query-bearing entry point on an i18n site — search, pagination, UTM tags, an",
+    "OAuth `?code=`/`?state=` callback landing unprefixed — lost its parameters on",
+    "the first hit. The query is part of the target URI and is reproduced",
+    "verbatim, after the locale prefix is applied to the path."
+  ],
 
   "cases": [
     {
@@ -121,6 +144,60 @@
       "headers": {},
       "detectLocale": true,
       "redirect": null
+    },
+    {
+      "$why": "The query survives the locale prefix. A search or a paginated deep link shared without the prefix keeps its parameters.",
+      "method": "GET",
+      "path": "/about",
+      "query": "q=hello&page=2",
+      "headers": {},
+      "detectLocale": true,
+      "redirect": "/en/about?q=hello&page=2"
+    },
+    {
+      "$why": "An OAuth callback landing on an unprefixed path keeps `code` and `state`, and the query does not change which locale is chosen.",
+      "method": "GET",
+      "path": "/about",
+      "query": "code=abc123&state=xyz",
+      "headers": { "cookie": "RUVYXA_LOCALE=th" },
+      "detectLocale": true,
+      "redirect": "/th/about?code=abc123&state=xyz"
+    },
+    {
+      "$why": "The segment rule and the query rule compose: a project page that merely shares a byte prefix with the reserved namespace is redirected, and keeps its UTM attribution.",
+      "method": "GET",
+      "path": "/__ruvyxa-notes",
+      "query": "utm_source=newsletter&utm_medium=email",
+      "headers": {},
+      "detectLocale": true,
+      "redirect": "/en/__ruvyxa-notes?utm_source=newsletter&utm_medium=email"
+    },
+    {
+      "$why": "A query does not make an excluded request redirectable; a POST is still the request it says it is.",
+      "method": "POST",
+      "path": "/about",
+      "query": "q=hello",
+      "headers": {},
+      "detectLocale": true,
+      "redirect": null
+    },
+    {
+      "$why": "An already-prefixed path is left alone, query and all, so nothing appends the query twice.",
+      "method": "GET",
+      "path": "/th/about",
+      "query": "q=hello",
+      "headers": {},
+      "detectLocale": true,
+      "redirect": null
+    },
+    {
+      "$why": "An empty query is not a query. `/about?` redirects without a trailing `?`, which is what `URL.search` and a raw target split disagree about if either side keeps it.",
+      "method": "GET",
+      "path": "/about",
+      "query": "",
+      "headers": {},
+      "detectLocale": true,
+      "redirect": "/en/about"
     }
   ]
 }

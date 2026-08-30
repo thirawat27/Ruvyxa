@@ -991,14 +991,11 @@ pub(crate) async fn build_with_cache_override(
         print_build_phase(None, "assets prepared", detail, preparation_duration);
     }
 
-    // The client manifest is machine-read (the server resolves per-route scripts
-    // and preloads from it) and never hand-edited, so emit compact JSON: it is
-    // part of the deployed artifact and is parsed on the render path.
+    // The client build report is machine-read (the pre-renderer and every
+    // deployed function resolve per-route scripts and preloads from it) and
+    // never hand-edited, so emit compact JSON: it is parsed on the render path.
     if !args.server_only {
-        fs::write(
-            client_dir.join("manifest.json"),
-            serde_json::to_string(&client_manifest)?,
-        )?;
+        write_client_build_report(&staging_dir, &client_manifest)?;
         attach_client_artifacts(&staging_dir.join("manifest.json"), &client_manifest)?;
         write_render_manifests(&staging_dir, &manifest, &client_manifest)?;
     }
@@ -1079,7 +1076,7 @@ pub(crate) async fn build_with_cache_override(
             &app_dir,
             &manifest,
             &prerender_dir,
-            &client_dir,
+            &client_build_report_path(&staging_dir),
             document_head.clone(),
             &config.build,
             RuvyxaBuildCache {
@@ -1266,9 +1263,17 @@ pub(crate) async fn build_with_cache_override(
         build_info["adapterArtifacts"] = artifacts;
     }
     build_info["timing"]["totalMs"] = serde_json::json!(duration_ms(started.elapsed()));
-    fs::write(
-        out_dir.join("build.json"),
-        serde_json::to_string_pretty(&build_info)?,
+    // The one write that lands in the output directory rather than being
+    // committed into it, because two of its fields — `totalMs` and
+    // `adapterArtifacts` — are only knowable after the commit and the adapter
+    // stage have run. It replaces a file the commit already published, and
+    // `ruvyxa start` and every adapter parse that file, so a truncated
+    // `build.json` fails an otherwise complete build with nothing to say the
+    // build itself was fine. `write_atomic` renames a temporary over it, so a
+    // reader sees the previous complete document or the new one.
+    ruvyxa_bundler::atomic_file::write_atomic(
+        &out_dir.join("build.json"),
+        serde_json::to_string_pretty(&build_info)?.as_bytes(),
     )?;
 
     info!(
@@ -1884,6 +1889,40 @@ fn report_inert_hydration(routes: &[String]) {
     );
 }
 
+/// The client build report, written at the build root rather than inside
+/// `client/`.
+///
+/// `client/` is public by contract: the native server maps any flat name under
+/// `/__ruvyxa/client/` into it, and every static deployment copies the whole
+/// directory to the CDN. This file is not a browser asset — it is a build
+/// report carrying absolute source paths from the build machine, the module
+/// graph of every shared chunk and route, the bundler cache location, the
+/// plugin list, and per-route byte counts. It sat beside the lean
+/// `route-manifest.json` that exists precisely so none of that has to ship, and
+/// was served at `/__ruvyxa/client/manifest.json` by all three hosts.
+///
+/// Excluding it from the copy instead would have left two hosts to keep in
+/// step; a file outside the published directory cannot be published by either.
+pub(crate) const CLIENT_BUILD_REPORT_FILE: &str = "client-report.json";
+
+/// Where this build's client report lives, given its staging or output root.
+///
+/// The pre-renderer reads it here, and so does `adapter-runner.mjs` when it
+/// freezes each route's browser assets into the function it emits.
+pub(crate) fn client_build_report_path(build_dir: &Path) -> PathBuf {
+    build_dir.join(CLIENT_BUILD_REPORT_FILE)
+}
+
+/// Write the client build report for this build.
+pub(crate) fn write_client_build_report(
+    build_dir: &Path,
+    client_manifest: &serde_json::Value,
+) -> anyhow::Result<PathBuf> {
+    let path = client_build_report_path(build_dir);
+    fs::write(&path, serde_json::to_string(client_manifest)?)?;
+    Ok(path)
+}
+
 /// Add the deployment description to the route manifest.
 ///
 /// Written into `manifest.json` under one key rather than beside it as a second
@@ -1967,7 +2006,8 @@ pub(crate) const BUILD_OUTPUT_DIRS: [&str; 6] = [
     "deploy",
     "static",
 ];
-pub(crate) const BUILD_OUTPUT_FILES: [&str; 2] = ["manifest.json", "build.json"];
+pub(crate) const BUILD_OUTPUT_FILES: [&str; 3] =
+    ["manifest.json", "build.json", CLIENT_BUILD_REPORT_FILE];
 // Default cap balances Node process memory against prerender throughput; an
 // explicit `build.parallelism` config value may raise it up to the pool limit.
 

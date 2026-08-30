@@ -136,7 +136,8 @@ export function createAuth(options: AuthOptions): AuthRuntime {
   ): Promise<AuthResult> {
     const provider = settings.providers[providerName]
     if (!provider || provider.type !== 'credentials') throw notConfigured(providerName)
-    await consumeRateLimit(request, loginRateKey(providerName, input), settings)
+    const limit = loginRateLimit(providerName, input)
+    await consumeRateLimit(request, limit.scope, settings, limit.budget)
     const user = await provider.authorize(input, request)
     if (!user) throw invalidCredentials()
     validateUser(user)
@@ -304,7 +305,7 @@ async function startMagicLink(
   if (!/^\S+@\S+\.\S+$/.test(email) || email.length > 254) {
     throw new AuthError('RUV3101', 'A valid email address is required', 400)
   }
-  await consumeRateLimit(request, `magic:${email}`, settings)
+  await consumeRateLimit(request, `magic:${email}`, settings, IDENTITY_MAIL_BUDGET)
   const token = randomToken(32)
   const tokenStoreKey = await tokenKey('magic', token, settings.hmacKey)
   await settings.store.set(tokenStoreKey, email, MAGIC_LINK_TTL_SECONDS)
@@ -397,23 +398,84 @@ async function readCallbackToken(request: Request): Promise<string | null> {
 }
 
 /**
- * Requests one client may make across every identity in a window, as a multiple
- * of `rateLimitMax`.
+ * Requests one client may make across every scope in a window, as a multiple of
+ * `rateLimitMax`.
  *
- * The per-identity bucket alone let one source try `rateLimitMax` passwords
+ * The scope-and-client bucket alone let one source try `rateLimitMax` passwords
  * against each of an unlimited number of accounts, because the bucket key
  * contains the email. Credential stuffing and account enumeration need exactly
- * that shape, so a second bucket keyed only by the client caps the total. The
- * multiple keeps shared egress (offices, mobile carriers, CGNAT) working: a
- * legitimate client rarely signs in for many distinct identities, while an
- * attacker needs orders of magnitude more.
+ * that shape, so a bucket keyed only by the client caps the total. The multiple
+ * keeps shared egress (offices, mobile carriers, CGNAT) working: a legitimate
+ * client rarely signs in for many distinct identities, while an attacker needs
+ * orders of magnitude more.
+ *
+ * This ceiling is shared by every scope, so it is never scaled per endpoint: a
+ * key whose limit changed with whichever request happened to arrive would have
+ * no single meaning.
  */
 const CLIENT_RATE_LIMIT_MULTIPLIER = 5
+
+/**
+ * The window of the identity-wide bucket, in seconds, capped independently of
+ * `rateLimit.windowSeconds`.
+ *
+ * A bucket with no client in its key is a lockout primitive: whoever spends an
+ * account's budget denies that account until the window rolls. Its ceiling is
+ * therefore high and its window short, so the worst an attacker buys is a minute
+ * — while `rateLimit.windowSeconds` (up to an hour) stays free to be as long as
+ * the operator wants for the client-keyed buckets, where a long window is the
+ * whole point.
+ */
+const IDENTITY_RATE_LIMIT_MAX_WINDOW_SECONDS = 60
+
+/** The ceilings one request consumes, as multiples of `rateLimitMax`. */
+interface RateLimitBudget {
+  /** Requests one client may make within this scope. */
+  perClient: number
+  /**
+   * Requests every client together may make within this scope, or `null` for a
+   * scope that names no single account.
+   *
+   * `null` is not a shortcut. `webauthn` and `oauth:<provider>` name a
+   * mechanism, not an identity, and a bucket keyed on one of those alone would
+   * be a single global ceiling shared by every user of the endpoint — a
+   * denial-of-service primitive, not a defence.
+   */
+  perIdentity: number | null
+}
+
+/** A scope naming a mechanism rather than an account: no identity ceiling. */
+const SHARED_SCOPE_BUDGET: RateLimitBudget = { perClient: 1, perIdentity: null }
+
+/**
+ * A credential check against one named account.
+ *
+ * The identity ceiling is twenty times the per-client one, and the per-client
+ * bucket is consumed first, so a client that has already spent its own budget
+ * stops contributing: it takes at least twenty distinct clients to reach the
+ * ceiling, and reaching it costs the account at most
+ * `IDENTITY_RATE_LIMIT_MAX_WINDOW_SECONDS`. That is the trade — a bounded,
+ * short, expensive lockout in exchange for a bound on the one axis that
+ * previously had none.
+ */
+const IDENTITY_ATTEMPT_BUDGET: RateLimitBudget = { perClient: 1, perIdentity: 20 }
+
+/**
+ * A magic-link send to one address.
+ *
+ * Sending mail is not the same cost as checking a password: it spends sender
+ * reputation, provider quota, and money, and `startMagicLink` deliberately
+ * sends before any user exists so as not to leak enumeration. So this budget is
+ * a fraction of a credential attempt's in both dimensions — one fifth per
+ * client, and a twentieth of the attempt ceiling across all clients.
+ */
+const IDENTITY_MAIL_BUDGET: RateLimitBudget = { perClient: 0.2, perIdentity: 1 }
 
 async function consumeRateLimit(
   request: Request,
   scope: string,
   settings: NormalizedOptions,
+  budget: RateLimitBudget = SHARED_SCOPE_BUDGET,
 ): Promise<void> {
   // Bind the bucket to the client IP whenever the deployment can vouch for
   // one; the user-agent fallback is client-rotatable and only used when no
@@ -425,24 +487,53 @@ async function consumeRateLimit(
   const clientKey =
     clientIp ?? `ua:${request.headers.get('user-agent')?.slice(0, 128) ?? 'unknown'}`
 
-  // Two independent buckets. The per-identity one keeps a single account from
-  // being hammered; the client-only one caps how much one source can attempt in
-  // total, across every identity it tries. Neither dimension is limited by the
-  // other, which is what the combined key used to get wrong.
+  // Three independent buckets, in ascending order of how many parties one
+  // refusal affects, so a request that has already exhausted a narrow ceiling
+  // never charges a wider one.
+  //
+  // The first is keyed on the scope AND the client: it stops one source from
+  // hammering one account. The second is keyed on the client alone: it caps how
+  // much that source can attempt in total, across every scope it tries. Neither
+  // of those bounds the transposed case — one account swept from arbitrarily
+  // many clients — because both fold the client into the key, which is why the
+  // third is keyed on the scope alone.
   await consumeBucket(
     await tokenKey('rate', `${scope}:${clientKey}`, settings.hmacKey),
-    settings.rateLimitMax,
+    ceiling(settings, budget.perClient),
+    settings.rateLimitWindowSeconds,
     settings,
   )
   await consumeBucket(
     await tokenKey('rate-client', clientKey, settings.hmacKey),
-    settings.rateLimitMax * CLIENT_RATE_LIMIT_MULTIPLIER,
+    ceiling(settings, CLIENT_RATE_LIMIT_MULTIPLIER),
+    settings.rateLimitWindowSeconds,
+    settings,
+  )
+  if (budget.perIdentity === null) return
+  await consumeBucket(
+    await tokenKey('rate-identity', scope, settings.hmacKey),
+    ceiling(settings, budget.perIdentity),
+    Math.min(settings.rateLimitWindowSeconds, IDENTITY_RATE_LIMIT_MAX_WINDOW_SECONDS),
     settings,
   )
 }
 
-async function consumeBucket(key: string, max: number, settings: NormalizedOptions): Promise<void> {
-  const decision = await settings.rateLimitStore.consume(key, max, settings.rateLimitWindowSeconds)
+/**
+ * A bucket ceiling from its multiple of `rateLimitMax`, never below 1 — a
+ * fractional budget on a small `rateLimit.max` must still admit one request, or
+ * the endpoint is simply off.
+ */
+function ceiling(settings: NormalizedOptions, multiplier: number): number {
+  return Math.max(1, Math.round(settings.rateLimitMax * multiplier))
+}
+
+async function consumeBucket(
+  key: string,
+  max: number,
+  windowSeconds: number,
+  settings: NormalizedOptions,
+): Promise<void> {
+  const decision = await settings.rateLimitStore.consume(key, max, windowSeconds)
   if (!decision.allowed) {
     throw new AuthError(
       'RUV3102',
@@ -660,8 +751,15 @@ function htmlPage(status: number, title: string, body: string): Response {
   const html =
     '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n' +
     '<meta name="viewport" content="width=device-width, initial-scale=1">\n' +
-    // Sign-in URLs carry tokens: keep them out of search indexes and referrers.
-    '<meta name="robots" content="noindex">\n<meta name="referrer" content="no-referrer">\n' +
+    // Sign-in URLs carry tokens: keep them out of search indexes, and out of
+    // every cross-origin referrer. `same-origin` rather than `no-referrer`,
+    // because these pages carry a POST form back to this server and WHATWG
+    // Fetch (_Append a request `Origin` header_, step 3.1) replaces the
+    // serialized origin with the literal `null` for a non-GET navigation from a
+    // `no-referrer` document — which `assertSameOrigin` refuses, so the page
+    // could not submit its own form. A same-origin `Referer` exposes nothing
+    // new: the token is already in this server's own URL bar.
+    '<meta name="robots" content="noindex">\n<meta name="referrer" content="same-origin">\n' +
     `<title>${escapedTitle}</title>\n` +
     '<style>body{font-family:system-ui,sans-serif;display:grid;place-items:center;min-height:100vh;margin:0}' +
     'main{max-width:24rem;padding:2rem;text-align:center}' +
@@ -953,9 +1051,24 @@ function safeReturnTo(value: string | null): string {
   }
 }
 
-function loginRateKey(provider: string, input: Record<string, unknown>): string {
-  const identity = typeof input.email === 'string' ? input.email.trim().toLowerCase() : 'anonymous'
-  return `login:${provider}:${identity.slice(0, 254)}`
+/**
+ * The rate-limit scope and budget for one login attempt.
+ *
+ * The budget travels with the scope because only this function knows whether
+ * the scope names an account. A credentials provider keyed on something other
+ * than `email` collapses every attempt onto `anonymous`; charging those to an
+ * identity-wide bucket would put one global ceiling on the whole provider, so
+ * an attempt naming no account gets client-keyed ceilings only.
+ */
+function loginRateLimit(
+  provider: string,
+  input: Record<string, unknown>,
+): { scope: string; budget: RateLimitBudget } {
+  const identity = typeof input.email === 'string' ? input.email.trim().toLowerCase() : ''
+  return {
+    scope: `login:${provider}:${identity === '' ? 'anonymous' : identity.slice(0, 254)}`,
+    budget: identity === '' ? SHARED_SCOPE_BUDGET : IDENTITY_ATTEMPT_BUDGET,
+  }
 }
 
 function boundedInteger(value: number, min: number, max: number, name: string): number {

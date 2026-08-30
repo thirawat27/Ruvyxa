@@ -3,9 +3,12 @@ import { describe, it } from 'node:test'
 
 import {
   createAuth,
+  github,
+  google,
   memoryAuthStore,
   memoryRateLimitStore,
   type AuthUser,
+  type OAuthProvider,
 } from '../../../packages/@ruvyxa/auth/dist/index.js'
 import { createAuthPlugin } from '../../../packages/@ruvyxa/auth/dist/plugin.js'
 
@@ -30,6 +33,49 @@ function runtime(overrides: Record<string, unknown> = {}) {
     },
     ...overrides,
   } as Parameters<typeof createAuth>[0])
+}
+
+function magicLinkRuntime(
+  user: AuthUser,
+  onSend: (url: string) => void,
+  overrides: Record<string, unknown> = {},
+) {
+  return runtime({
+    providers: {
+      magic: {
+        type: 'magic-link',
+        async send(message: { url: string }) {
+          onSend(message.url)
+        },
+        async resolveUser(email: string) {
+          return email === user.email ? user : null
+        },
+      },
+    },
+    ...overrides,
+  })
+}
+
+/**
+ * The `Origin` a browser puts on a form-POST navigation submitted from
+ * `pageHtml`. WHATWG Fetch, _Append a request `Origin` header_, step 3.1: for a
+ * request whose mode is not `cors` and whose method is neither `GET` nor `HEAD`
+ * — exactly a form-POST navigation — the serialized origin is replaced by the
+ * literal `null` under `no-referrer`, and under `same-origin` only when the
+ * request's origin differs from the target's. Every remaining policy nulls it
+ * only on an https-to-http downgrade, which does not apply between two https
+ * origins, so they all send the origin unchanged.
+ */
+function formPostOrigin(pageHtml: string, pageOrigin: string, targetOrigin: string): string {
+  const policy = /<meta name="referrer" content="([^"]*)"/.exec(pageHtml)?.[1] ?? ''
+  switch (policy) {
+    case 'no-referrer':
+      return 'null'
+    case 'same-origin':
+      return pageOrigin === targetOrigin ? pageOrigin : 'null'
+    default:
+      return pageOrigin
+  }
 }
 
 describe('@ruvyxa/auth', () => {
@@ -281,6 +327,146 @@ describe('@ruvyxa/auth', () => {
     assert.equal((await attempt())!.status, 429)
   })
 
+  it('caps how many clients may sweep one identity, not just attempts per client', async () => {
+    // The transposed case of the test above, and the one neither of the two
+    // original buckets could see: both fold the client into the key, so one
+    // identity swept from arbitrarily many clients had no ceiling at all. A
+    // third bucket keyed on the scope alone is the only thing that bounds it.
+    const auth = runtime({
+      rateLimit: { max: 1, windowSeconds: 60 },
+      clientIp: (request: Request) => request.headers.get('x-test-ip'),
+    })
+    const attempt = (email: string, ip: string) =>
+      auth.handle(
+        new Request(`${origin}/__ruvyxa/auth/login/email`, {
+          method: 'POST',
+          headers: { origin, 'x-test-ip': ip },
+          body: JSON.stringify({ email, password: 'wrong' }),
+        }),
+      )
+
+    // max = 1, identity multiplier = 20, so one account absorbs 20 attempts in
+    // a window however many distinct clients they arrive from. Without the
+    // third bucket all 24 of these pass: each client is fresh for both of the
+    // client-keyed buckets.
+    const statuses: number[] = []
+    for (let index = 0; index < 24; index += 1) {
+      statuses.push((await attempt('ada@example.com', `198.51.100.${index}`))!.status)
+    }
+
+    assert.deepEqual(
+      statuses,
+      [...Array.from({ length: 20 }, () => 401), 429, 429, 429, 429],
+      'the identity bucket must stop a distributed sweep of one account',
+    )
+
+    // The ceiling is per identity, not global: a fresh client attempting a
+    // different account is unaffected, so burning one account's budget cannot
+    // take the whole login endpoint down.
+    assert.equal((await attempt('grace@example.com', '198.51.100.200'))!.status, 401)
+  })
+
+  it('gives a magic-link send a tighter identity budget than a credential attempt', async () => {
+    // `startMagicLink` sends mail before any user exists, deliberately, so as
+    // not to leak enumeration — which makes the endpoint an outbound-mail
+    // amplifier unless its own budget is smaller than a password check's.
+    const sent: string[] = []
+    const auth = magicLinkRuntime(
+      { id: 'magic-flood', email: 'flood@example.com' },
+      (url) => sent.push(url),
+      { clientIp: (request: Request) => request.headers.get('x-test-ip') },
+    )
+    const request = (ip: string) =>
+      auth.handle(
+        new Request(`${origin}/__ruvyxa/auth/magic-link`, {
+          method: 'POST',
+          headers: { origin, 'x-test-ip': ip },
+          body: JSON.stringify({ email: 'flood@example.com' }),
+        }),
+      )
+
+    // Default max = 10, so a credential attempt gets an identity ceiling of
+    // 200; mail gets 10. Each request here comes from a distinct client, so
+    // nothing but the identity bucket can refuse them.
+    const statuses: number[] = []
+    for (let index = 0; index < 14; index += 1) {
+      statuses.push((await request(`198.51.100.${index}`))!.status)
+    }
+
+    assert.deepEqual(
+      statuses,
+      [...Array.from({ length: 10 }, () => 200), 429, 429, 429, 429],
+      'one address must not be mailable from an unbounded number of clients',
+    )
+    assert.equal(sent.length, 10, 'a refused request must not have sent mail')
+  })
+
+  it('spends one client magic-link budget faster than its login budget', async () => {
+    const sent: string[] = []
+    const auth = magicLinkRuntime(
+      { id: 'magic-single', email: 'single@example.com' },
+      (url) => sent.push(url),
+      { clientIp: (request: Request) => request.headers.get('x-test-ip') },
+    )
+    const request = () =>
+      auth.handle(
+        new Request(`${origin}/__ruvyxa/auth/magic-link`, {
+          method: 'POST',
+          headers: { origin, 'x-test-ip': '198.51.100.50' },
+          body: JSON.stringify({ email: 'single@example.com' }),
+        }),
+      )
+
+    // Default max = 10 buys ten wrong passwords from one client, but only two
+    // emails: sending mail is not the same cost as checking a password.
+    const statuses: number[] = []
+    for (let index = 0; index < 3; index += 1) {
+      statuses.push((await request())!.status)
+    }
+    assert.deepEqual(statuses, [200, 200, 429])
+    assert.equal(sent.length, 2)
+  })
+
+  it('keeps a scope that names no account free of any shared ceiling', async () => {
+    // `webauthn` and `oauth:<provider>` are mechanisms, not identities. A
+    // bucket keyed on one of those alone would be a single global ceiling for
+    // every user of the endpoint — a denial-of-service primitive, not a
+    // defence — so the identity bucket must not be applied to them.
+    const auth = runtime({
+      rateLimit: { max: 1, windowSeconds: 60 },
+      clientIp: (request: Request) => request.headers.get('x-test-ip'),
+      providers: {
+        passkey: {
+          type: 'webauthn',
+          async options() {
+            return { challenge: 'adapter-owned' }
+          },
+          async verify() {
+            return { id: 'passkey-1' }
+          },
+        },
+      },
+    })
+    const request = (ip: string) =>
+      auth.handle(
+        new Request(`${origin}/__ruvyxa/auth/webauthn/options`, {
+          method: 'POST',
+          headers: { origin, 'x-test-ip': ip },
+          body: '{}',
+        }),
+      )
+
+    const statuses: number[] = []
+    for (let index = 0; index < 40; index += 1) {
+      statuses.push((await request(`198.51.100.${index}`))!.status)
+    }
+    assert.deepEqual(
+      statuses.filter((status) => status !== 200),
+      [],
+      'a shared mechanism scope must stay reachable from any number of clients',
+    )
+  })
+
   it('expires logout cookies and deletes the stored session', async () => {
     const auth = runtime()
     const result = await auth.login('email', { email: 'ada@example.com', password: 'correct' })
@@ -297,18 +483,8 @@ describe('@ruvyxa/auth', () => {
   it('consumes magic links exactly once', async () => {
     let sentUrl = ''
     const user: AuthUser = { id: 'magic-1', email: 'magic@example.com' }
-    const auth = runtime({
-      providers: {
-        magic: {
-          type: 'magic-link',
-          async send(message: { url: string }) {
-            sentUrl = message.url
-          },
-          async resolveUser(email: string) {
-            return email === user.email ? user : null
-          },
-        },
-      },
+    const auth = magicLinkRuntime(user, (url) => {
+      sentUrl = url
     })
     const start = await auth.handle(
       new Request(`${origin}/__ruvyxa/auth/magic-link`, {
@@ -326,14 +502,22 @@ describe('@ruvyxa/auth', () => {
     assert.match(await scannerVisit!.text(), /method="post"/)
     const userVisit = await auth.handle(new Request(sentUrl))
     assert.equal(userVisit?.status, 200)
+    const confirmPage = await userVisit!.text()
 
-    // The page's form POST consumes the token exactly once.
+    // The page's form POST consumes the token exactly once. The `Origin` is the
+    // one a real browser derives from the page's own referrer policy, not one
+    // the test hands the endpoint: under `no-referrer` that is the literal
+    // `null` and the endpoint's `assertSameOrigin` refuses the page's own form.
     const token = new URL(sentUrl).searchParams.get('token')!
+    const browserOrigin = formPostOrigin(confirmPage, origin, origin)
     const confirm = () =>
       auth.handle(
         new Request(`${origin}/__ruvyxa/auth/magic-link/callback`, {
           method: 'POST',
-          headers: { origin, 'content-type': 'application/x-www-form-urlencoded' },
+          headers: {
+            origin: browserOrigin,
+            'content-type': 'application/x-www-form-urlencoded',
+          },
           body: new URLSearchParams({ token }).toString(),
         }),
       )
@@ -346,6 +530,51 @@ describe('@ruvyxa/auth', () => {
     // A consumed token renders the expired page instead of a fresh form.
     const staleVisit = await auth.handle(new Request(sentUrl))
     assert.equal(staleVisit?.status, 400)
+  })
+
+  it('never pairs a rendered form with a referrer policy that nulls its own Origin', async () => {
+    // Two correct decisions that must not meet on one page: keep the sign-in
+    // token out of referrers, and require `Origin` on a state-changing POST.
+    // A `no-referrer` document makes the browser send `Origin: null` on its own
+    // form submission, which `assertSameOrigin` then refuses. This walks every
+    // page `htmlPage` renders so the pair cannot be reintroduced silently.
+    let sentUrl = ''
+    const user: AuthUser = { id: 'magic-2', email: 'referrer@example.com' }
+    const auth = magicLinkRuntime(user, (url) => {
+      sentUrl = url
+    })
+    const callback = `${origin}/__ruvyxa/auth/magic-link/callback`
+    await auth.handle(
+      new Request(`${origin}/__ruvyxa/auth/magic-link`, {
+        method: 'POST',
+        headers: { origin },
+        body: JSON.stringify({ email: user.email }),
+      }),
+    )
+
+    const rendered = [
+      // Malformed token: the "invalid link" page.
+      await auth.handle(new Request(`${callback}?token=not+a+token`)),
+      // Well-formed token that no longer exists: the "expired link" page.
+      await auth.handle(new Request(`${callback}?token=${'A'.repeat(32)}`)),
+      // The live token: the confirmation page, which carries the form.
+      await auth.handle(new Request(sentUrl)),
+    ]
+
+    let formsWalked = 0
+    for (const page of rendered) {
+      assert.ok(page)
+      const html = await page.text()
+      assert.match(html, /<meta name="referrer" content="/)
+      if (!html.includes('<form')) continue
+      formsWalked += 1
+      assert.equal(
+        formPostOrigin(html, origin, origin),
+        origin,
+        'a page rendering a form must not declare a referrer policy that nulls its own Origin',
+      )
+    }
+    assert.ok(formsWalked > 0, 'no form page was walked, so the guard proved nothing')
   })
 
   it('delegates WebAuthn verification and applies the shared session policy', async () => {
@@ -622,5 +851,82 @@ describe('@ruvyxa/auth', () => {
     assert.equal((await first.getSession(request()))?.user.email, 'ada@example.com')
     // Different secret over the same store: must not resolve.
     assert.equal(await second.getSession(request()), null)
+  })
+
+  it('records whether the identity provider verified the address it returned', async () => {
+    // OIDC Core §5.7: `email` is not a verified identifier unless
+    // `email_verified` is true. Account identity here is keyed on `id`, so this
+    // is not a takeover by itself — but an application that links an OAuth
+    // login to an existing credentials account by address has no way to ask the
+    // question unless the mapping carries the answer forward.
+    const tokens = { accessToken: 'token', raw: {} }
+    const map = async (provider: OAuthProvider, profile: unknown): Promise<AuthUser> =>
+      provider.mapProfile(profile, tokens)
+    const provider = google({ clientId: 'id', clientSecret: 'secret' })
+    assert.equal(
+      (await map(provider, { sub: '1', email: 'ada@example.com', email_verified: true }))
+        .emailVerified,
+      true,
+    )
+    assert.equal(
+      (await map(provider, { sub: '1', email: 'ada@example.com', email_verified: false }))
+        .emailVerified,
+      false,
+    )
+    // Absent is not verified. A provider that says nothing has not vouched.
+    assert.equal((await map(provider, { sub: '1', email: 'ada@example.com' })).emailVerified, false)
+    // No address, no claim about one.
+    assert.equal((await map(provider, { sub: '1' })).emailVerified, undefined)
+    // GitHub's `/user` email is selected from the account's verified addresses.
+    assert.equal(
+      (
+        await map(github({ clientId: 'id', clientSecret: 'secret' }), {
+          id: 7,
+          email: 'ada@example.com',
+        })
+      ).emailVerified,
+      true,
+    )
+  })
+
+  it('carries emailVerified through the session it stores', async () => {
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      if (String(input) === 'https://oauth2.googleapis.com/token') {
+        return Response.json({ access_token: 'provider-secret-token', token_type: 'Bearer' })
+      }
+      return Response.json({ sub: 'g-1', email: 'ada@example.com', email_verified: false })
+    }) as typeof fetch
+    try {
+      const auth = runtime({
+        providers: { google: google({ clientId: 'client-id', clientSecret: 'client-secret' }) },
+      })
+      const start = await auth.handle(
+        new Request(`${origin}/__ruvyxa/auth/oauth/google/start`, {
+          headers: { 'user-agent': 'oauth-email-verified' },
+        }),
+      )
+      const state = new URL(start?.headers.get('location') ?? '').searchParams.get('state')!
+      const stateCookie = start?.headers.get('set-cookie')?.split(';')[0]
+      const completed = await auth.handle(
+        new Request(`${origin}/__ruvyxa/auth/oauth/google/callback?code=one&state=${state}`, {
+          headers: { cookie: stateCookie! },
+        }),
+      )
+      assert.equal(completed?.status, 303)
+      const sessionCookie = completed?.headers
+        .get('set-cookie')
+        ?.split(',')
+        .map((value) => value.trim().split(';')[0])
+        .find((value) => value.startsWith('__Host-ruvyxa.session='))
+      assert.ok(sessionCookie, 'the callback must issue a session cookie')
+      const session = await auth.getSession(
+        new Request(`${origin}/dashboard`, { headers: { cookie: sessionCookie } }),
+      )
+      assert.equal(session?.user.email, 'ada@example.com')
+      assert.equal(session?.user.emailVerified, false)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 })

@@ -313,6 +313,26 @@ pub enum WorkerRequest {
     },
     #[serde(rename = "ping")]
     Ping { id: String },
+    /// Withdraw a request the host is no longer listening to.
+    ///
+    /// It names the id of the work being abandoned rather than carrying one of
+    /// its own, and the worker answers it with nothing at all: the host has no
+    /// pending entry for a cancel, so any frame written for one would be
+    /// delivered to — and read as — a response to the request it names.
+    ///
+    /// Without it a disconnect was a statement about the host's own bookkeeping
+    /// and nothing more. The worker's stream loop is bounded only by *idle* time
+    /// between chunks, which an SSE or long-poll response never reaches, so an
+    /// abandoned stream ran forever. The worker aborts the request's
+    /// `AbortController`, which reaches both the `Request.signal` the route
+    /// handler holds and the reader draining its response body.
+    ///
+    /// A cancel for an id the worker has already answered is a no-op: the
+    /// worker drops its entry when the terminal frame is written. Ids come from
+    /// [`next_request_id`], a monotonic counter, so a later request can never
+    /// reuse a cancelled one's id and inherit its abort.
+    #[serde(rename = "cancel")]
+    Cancel { id: String },
     #[serde(rename = "warmup")]
     Warmup {
         id: String,
@@ -372,6 +392,7 @@ impl WorkerRequest {
             | Self::Client { id, .. }
             | Self::Invalidate { id, .. }
             | Self::Ping { id, .. }
+            | Self::Cancel { id, .. }
             | Self::Warmup { id, .. }
             | Self::Ssg { id, .. }
             | Self::ClientVendor { id, .. }
@@ -689,6 +710,48 @@ mod tests {
         // error: that worker rendered the route the way it always did.
         let legacy: WorkerResponse = serde_json::from_str(r#"{"id":"1","ok":true}"#).unwrap();
         assert_eq!(legacy.rsc_payload, None);
+    }
+
+    /// A cancel names the request it withdraws, under the id field every other
+    /// frame uses, because that is the only id the worker has to abort by.
+    #[test]
+    fn a_cancel_carries_the_id_of_the_request_it_withdraws() {
+        let request = WorkerRequest::Cancel {
+            id: "412".to_string(),
+        };
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["type"], "cancel");
+        assert_eq!(value["id"], "412");
+        assert_eq!(request.id(), "412");
+
+        // Never retried: a retry would re-cancel a request that is already gone,
+        // and the pool has nothing to wait for on this frame in the first place.
+        assert!(!request.is_idempotent());
+    }
+
+    /// Cancellation aborts by id, so an id must never name two requests.
+    ///
+    /// The abort reaching a *retried* request that reused an id would cancel
+    /// work the host is still waiting for, and it would do so only under the
+    /// load that produces retries. The counter is monotonic, which makes reuse
+    /// impossible — this pins that property rather than trusting it, because it
+    /// is the whole reason cancellation can be keyed on the id alone.
+    #[test]
+    fn request_ids_are_never_reused() {
+        let ids: Vec<u64> = (0..1_000)
+            .map(|_| {
+                next_request_id()
+                    .parse()
+                    .expect("request ids are decimal counter values")
+            })
+            .collect();
+
+        // Strictly increasing, so no id this process ever issues can repeat —
+        // including across the interleaving of other tests sharing the counter.
+        assert!(
+            ids.windows(2).all(|pair| pair[1] > pair[0]),
+            "request ids must increase strictly: {ids:?}"
+        );
     }
 
     #[test]

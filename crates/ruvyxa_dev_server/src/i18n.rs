@@ -4,11 +4,27 @@ use ruvyxa_graph::{I18nRouting, RouteKind, RouteManifest, RouteParams};
 use crate::RadixRouter;
 use crate::html_document::escape_html;
 
+/// The prefixed URL an unprefixed request belongs at, or `None` to leave it
+/// alone.
+///
+/// `request_path` is the canonical path and carries no query by construction;
+/// `query` is the request target's query string without its leading `?`, and is
+/// `None` for a caller that has no request URI at all — the build's prerenderer
+/// is one. Both hosts built the `Location` from the path alone, so
+/// `GET /about?q=hello` answered `/en/about` and every query-bearing entry
+/// point on an i18n site lost its parameters on the first, unprefixed hit. A
+/// 307 preserves the method and the body and says nothing about the query: the
+/// query belongs to the target URI and has to be reproduced explicitly.
+///
+/// Mirrored by `localeRedirect` in
+/// `packages/ruvyxa/runtime/serverless-handler.mjs`; both replay
+/// `tests/fixtures/i18n-routing-conformance.json`.
 pub(crate) fn locale_redirect_path(
     config: Option<&I18nRouting>,
     manifest: &RouteManifest,
     router: &RadixRouter,
     request_path: &str,
+    query: Option<&str>,
     method: &str,
     headers: &HeaderMap,
 ) -> Option<String> {
@@ -42,6 +58,19 @@ pub(crate) fn locale_redirect_path(
                 .filter(|matched| matched.route.kind == RouteKind::Page)
                 .map(|_| fallback)
         })
+        .map(|location| with_query(location, query))
+}
+
+/// Reattach the request's query to a redirect target.
+///
+/// An empty query is not a query: a bare `/about?` redirects to `/en/about`
+/// rather than `/en/about?`, which is also what `URL.search` reports on the
+/// deployed host.
+fn with_query(location: String, query: Option<&str>) -> String {
+    match query.filter(|query| !query.is_empty()) {
+        Some(query) => format!("{location}?{query}"),
+        None => location,
+    }
 }
 
 pub(crate) fn localized_head(
@@ -252,6 +281,7 @@ mod tests {
                     &manifest,
                     &router,
                     case["path"].as_str().expect("path"),
+                    case["query"].as_str(),
                     case["method"].as_str().expect("method"),
                     &headers,
                 ),

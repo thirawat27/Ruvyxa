@@ -55,6 +55,13 @@ pub(crate) struct StreamedDocument<S, T> {
     head: Option<HeadInjection>,
     /// Bytes seen but not yet emitted: the head prefix, then the tail window.
     held: Vec<u8>,
+    /// How much of `held` has already been searched for `</head>`.
+    ///
+    /// Without it each chunk rescanned the whole prefix, so holding a large head
+    /// cost O(prefix^2 / chunk) on the request path. The next scan resumes six
+    /// bytes early -- `"</head>".len() - 1` -- because the needle may straddle
+    /// the boundary between what was scanned and what just arrived.
+    scanned: usize,
     tail: Option<T>,
     finished: bool,
 }
@@ -81,6 +88,7 @@ impl<S, T> StreamedDocument<S, T> {
                 compose: Box::new(compose),
             }),
             held: Vec::new(),
+            scanned: 0,
             tail: Some(tail),
             finished: false,
         }
@@ -98,11 +106,16 @@ where
     fn take_head(&mut self) -> Option<Bytes> {
         let injection = self.head.as_ref()?;
         let _ = injection;
-        let end = find_ascii_case(&self.held, b"</head>").map(|at| at + b"</head>".len());
+        const NEEDLE: &[u8] = b"</head>";
+        let from = self.scanned.saturating_sub(NEEDLE.len() - 1);
+        let end = find_ascii_case(&self.held[from..], NEEDLE).map(|at| from + at + NEEDLE.len());
         let split = match end {
             Some(split) => split,
             None if self.held.len() >= MAX_HEAD_PREFIX => self.held.len(),
-            None => return None,
+            None => {
+                self.scanned = self.held.len();
+                return None;
+            }
         };
         // Only on a character boundary: a chunk may cut a multi-byte sequence in
         // half, and composing over half of one would corrupt it.
@@ -111,6 +124,7 @@ where
         let prefix = String::from_utf8_lossy(&self.held[..split]).into_owned();
         let rest = self.held.split_off(split);
         self.held = rest;
+        self.scanned = 0;
         let composed = if end.is_some() {
             (head.compose)(&prefix)
         } else {
@@ -234,6 +248,30 @@ mod tests {
             out.extend_from_slice(&chunk.unwrap());
         }
         String::from_utf8(out).unwrap()
+    }
+
+    /// `take_head` resumes its search instead of restarting it, so the needle
+    /// can land across the boundary between one scan and the next. Every split
+    /// of `</head>` is exercised, because an off-by-one in the resume overlap
+    /// loses exactly one of them and nothing else would notice.
+    #[tokio::test]
+    async fn finds_a_head_split_across_two_chunks_at_every_offset() {
+        const NEEDLE: &str = "</head>";
+        for split in 0..=NEEDLE.len() {
+            let first = format!("<html><head><title>x</title>{}", &NEEDLE[..split]);
+            let second = format!("{}<body><p>hi</p></body></html>", &NEEDLE[split..]);
+            let parts: [&str; 2] = [&first, &second];
+            let document = StreamedDocument::new(
+                chunks(&parts),
+                |prefix| prefix.replace("</head>", "<link rel=stylesheet></head>"),
+                String::new,
+            );
+            assert_eq!(
+                collect(document).await,
+                "<html><head><title>x</title><link rel=stylesheet></head><body><p>hi</p></body></html>",
+                "`</head>` split after {split} byte(s) was not composed",
+            );
+        }
     }
 
     #[tokio::test]

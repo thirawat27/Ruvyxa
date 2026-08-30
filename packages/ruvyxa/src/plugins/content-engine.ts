@@ -170,23 +170,37 @@ export function contentEngine(options: ContentEngineOptions): RuvyxaPlugin {
   return definePlugin({
     name: 'ruvyxa:content-engine',
     ...(localeDiagnostic ? { diagnostics: localeDiagnostic } : {}),
-    register({ http, build }) {
-      http.onRequest({
-        match: outputPaths,
-        handler({ request, root }) {
-          if (request.method !== 'GET' && request.method !== 'HEAD') return undefined
-          const appRoot = path.resolve(root, normalized.appDir)
-          if (!isDirectory(appRoot)) return undefined
-          const artifact = developmentArtifacts(root).get(new URL(request.url).pathname)
-          if (!artifact) return undefined
-          return new Response(request.method === 'HEAD' ? null : artifact.body, {
-            headers: {
-              'cache-control': 'no-cache',
-              'content-type': artifact.contentType,
-            },
-          })
-        },
-      })
+    register({ environment, http, build }) {
+      // Same rule as `feed()` and `searchIndex()`: the live re-derivation
+      // answers in development only. `developmentArtifacts` recursively walks
+      // the whole content tree and stats every page it finds *to compute the
+      // key its own cache is checked against*, so those syscalls are per
+      // request whether the cache hits or not — on `/sitemap.xml`, `/rss.xml`,
+      // `/content.json`, `/search-index.json`, and `/llms.txt`, which are what
+      // crawlers poll, behind a `cache-control: no-cache` no CDN absorbs.
+      //
+      // In production the build has already written every one of these under
+      // `assets/`, so answering here also made the built artifact a second
+      // source of truth that silently drifted from what was built and
+      // prerendered whenever the source tree changed after the build.
+      if (environment === 'development') {
+        http.onRequest({
+          match: outputPaths,
+          handler({ request, root }) {
+            if (request.method !== 'GET' && request.method !== 'HEAD') return undefined
+            const appRoot = path.resolve(root, normalized.appDir)
+            if (!isDirectory(appRoot)) return undefined
+            const artifact = developmentArtifacts(root).get(new URL(request.url).pathname)
+            if (!artifact) return undefined
+            return new Response(request.method === 'HEAD' ? null : artifact.body, {
+              headers: {
+                'cache-control': 'no-cache',
+                'content-type': artifact.contentType,
+              },
+            })
+          },
+        })
+      }
       build.onComplete((context) => {
         for (const [outputPath, artifact] of createContentEngineArtifacts(
           context.root,

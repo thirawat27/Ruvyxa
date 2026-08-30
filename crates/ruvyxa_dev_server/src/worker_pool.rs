@@ -52,8 +52,58 @@ const BUILD_WORKER_TIMEOUT_MS: u64 = 300_000;
 /// Node timers coerce larger delays to 1 ms instead of waiting longer.
 const MAX_NODE_TIMEOUT_MS: u64 = 2_147_483_647;
 
-/// Maximum time a worker receives to exit after its stdin closes before it is killed.
-const WORKER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// How much longer the host waits than the budget it hands the worker.
+///
+/// Both deadlines come from the same number, but the clocks that consume it do
+/// not start together: the host's starts when the request line is queued to the
+/// stdin writer, while the worker's starts only after the line has been read,
+/// parsed, and admitted through its concurrency gate. The host interval
+/// therefore strictly *contains* the worker's, so `WORKER_REQUEST_TIMEOUT_MS`
+/// in `packages/ruvyxa/runtime/worker-pool.mjs` could never fire first and the
+/// worker's own watchdog — whose entire purpose is to answer a wedged render
+/// with an ordinary `ok: false` / `RUV1700` frame instead of dying — was
+/// unreachable on the pooled path.
+///
+/// The grace only has to cover queueing, parsing, and admission, all of which
+/// are bounded by the worker's own queue rather than by render cost.
+const WORKER_TIMEOUT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Consecutive host-side timeouts on one worker before the pool stops treating
+/// it as merely slow and replaces the process.
+///
+/// The grace above buys a healthy-but-slow worker the chance to answer for
+/// itself, and any answer — including an `ok: false` timeout frame — resets
+/// this count. A worker whose event loop is blocked never runs its own
+/// `setTimeout` either, so nothing but the host will ever notice it; this is
+/// the bound on how long that state can persist while the worker holds its
+/// pending entries.
+const MAX_CONSECUTIVE_WORKER_TIMEOUTS: usize = 3;
+
+const WORKER_SHUTDOWN_ENV: &str = "RUVYXA_WORKER_SHUTDOWN_MS";
+
+/// How long a worker may keep running after its stdin closes, so the requests
+/// it already holds can finish instead of dying mid-response.
+///
+/// Held to `DEFAULT_WORKER_SHUTDOWN_GRACE_MS` in
+/// `packages/ruvyxa/runtime/worker-pool.mjs`, which is where the window is
+/// actually spent: the worker exits immediately once its last request settles
+/// and otherwise gives up after this long. The two numbers used to be written
+/// independently — 5 s in the worker against a 2 s host wait — so a shutdown
+/// that arrived while the worker was busy always took the kill branch, and the
+/// grace the worker was written to take could never be used. `ruvyxa dev` and
+/// `ruvyxa build` normalize this into the child's environment the way
+/// `RUVYXA_WORKER_TIMEOUT_MS` already is, so raising it raises both halves.
+const DEFAULT_WORKER_SHUTDOWN_GRACE_MS: u64 = 5_000;
+
+/// How much longer than the worker's own grace the host waits before killing.
+///
+/// The worker's deadline is a `setTimeout`, so it fires no earlier than the
+/// window and the host must not be the one to expire first — otherwise the
+/// grace is unreachable however large it is made. This costs nothing on a
+/// normal shutdown: an idle worker exits the moment its stdin closes and the
+/// wait ends with it, so the ceiling is only ever reached by a worker that is
+/// genuinely wedged.
+const WORKER_SHUTDOWN_MARGIN: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Maximum time a retired worker is given to finish the requests it already
 /// holds before it is shut down anyway.
@@ -188,6 +238,74 @@ pub(crate) struct WorkerApiResponse {
 /// Shared slot the body stream fills from the frame that ends it.
 pub(crate) type WorkerStreamTrailer = Arc<OnceLock<WorkerResponse>>;
 
+/// A cloned handle to one worker's stdin queue, used to withdraw a request.
+///
+/// Cancellation is queued with `try_send` — the same non-blocking path
+/// `try_queue_invalidation` uses — because it is sent from `Drop`, where there
+/// is nothing to await on and where blocking would charge the cost of one
+/// disconnected client to whatever task happened to be running.
+#[derive(Clone)]
+struct WorkerCancelHandle {
+    stdin_tx: mpsc::Sender<String>,
+}
+
+impl WorkerCancelHandle {
+    /// Tell the worker to stop working on `id`.
+    ///
+    /// Best effort by construction: a full queue or a worker already shutting
+    /// down leaves the request to the worker's own watchdog, which is where it
+    /// was before cancellation existed. Failing here must never propagate,
+    /// because every caller is a value being dropped.
+    fn withdraw(&self, id: &str) {
+        let request = WorkerRequest::Cancel { id: id.to_string() };
+        let line = match serde_json::to_string(&request) {
+            Ok(line) => line,
+            Err(error) => {
+                warn!(%error, id, "worker cancellation failed to serialize");
+                return;
+            }
+        };
+        if let Err(error) = self.stdin_tx.try_send(format!("{line}\n")) {
+            debug!(%error, id, "worker cancellation could not be queued");
+        }
+    }
+}
+
+/// Withdraws a request whose host-side await did not survive to an answer.
+///
+/// A non-streamed request is abandoned two ways: the host deadline expires, or
+/// the task awaiting it is dropped because the client disconnected. In both the
+/// worker was left rendering a response that would be discarded on arrival —
+/// work that costs a slot in the worker's admission gate exactly when the
+/// server is already overloaded. `answered` disarms the guard, so a request
+/// that completed is never withdrawn.
+struct CancelOnDrop {
+    id: String,
+    handle: Option<WorkerCancelHandle>,
+}
+
+impl CancelOnDrop {
+    fn new(id: &str, handle: Option<WorkerCancelHandle>) -> Self {
+        Self {
+            id: id.to_string(),
+            handle,
+        }
+    }
+
+    /// The request reached a terminal frame; there is nothing left to withdraw.
+    fn answered(mut self) {
+        self.handle = None;
+    }
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.handle {
+            handle.withdraw(&self.id);
+        }
+    }
+}
+
 struct WorkerBodyStream {
     id: String,
     receiver: mpsc::Receiver<WorkerResponse>,
@@ -196,6 +314,9 @@ struct WorkerBodyStream {
     deadline: Pin<Box<tokio::time::Sleep>>,
     finished: bool,
     trailer: WorkerStreamTrailer,
+    /// How this stream tells the worker its reader has gone. `None` only when
+    /// the worker is already shutting down, which answers the same question.
+    cancel: Option<WorkerCancelHandle>,
 }
 
 impl WorkerBodyStream {
@@ -204,6 +325,7 @@ impl WorkerBodyStream {
         pending: PendingResponses,
         idle_timeout: std::time::Duration,
         trailer: WorkerStreamTrailer,
+        cancel: Option<WorkerCancelHandle>,
     ) -> Self {
         Self {
             id: channel.id,
@@ -213,6 +335,7 @@ impl WorkerBodyStream {
             deadline: Box::pin(tokio::time::sleep(idle_timeout)),
             finished: false,
             trailer,
+            cancel,
         }
     }
 
@@ -224,6 +347,52 @@ impl WorkerBodyStream {
                 pending.remove(&id).await;
             });
         }
+    }
+
+    /// A consumer walked away mid-stream.
+    ///
+    /// Two things have to happen here, and dropping the stream used to do
+    /// neither. The worker has to be told, because its stream loop is bounded
+    /// only by *idle* time between chunks and an actively producing response —
+    /// SSE, a long poll, a streamed document — is never idle. And the pending
+    /// entry has to stay until the worker's terminal frame, because `in_flight`
+    /// is that map's length: removing it here reported the busiest process in
+    /// the pool as the idlest, so `select_worker` sent it more work and
+    /// `drain_then_shutdown` believed it was done.
+    ///
+    /// The receiver moves into the drain task rather than being dropped with the
+    /// stream. The stdout reader `await`s on this bounded channel, so a full
+    /// queue nobody reads would stall every other request on the same worker;
+    /// and a send that fails makes the reader remove the entry, which is exactly
+    /// the bookkeeping this is trying to keep. The drain discards frames until
+    /// the worker ends the request, and gives up after the same idle budget a
+    /// live stream gets, so a worker that does not understand `cancel` cannot
+    /// strand the entry.
+    fn cancel_abandoned_stream(&mut self) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        if let Some(cancel) = &self.cancel {
+            cancel.withdraw(&self.id);
+        }
+
+        let (_closed, placeholder) = mpsc::channel(1);
+        let mut receiver = std::mem::replace(&mut self.receiver, placeholder);
+        let pending = Arc::clone(&self.pending);
+        let id = self.id.clone();
+        let grace = self.idle_timeout;
+        runtime.spawn(async move {
+            let ended =
+                tokio::time::timeout(grace, async { while receiver.recv().await.is_some() {} })
+                    .await;
+            if ended.is_err() {
+                warn!(
+                    id,
+                    "worker did not end a cancelled response stream within its idle budget"
+                );
+            }
+            pending.remove(&id).await;
+        });
     }
 }
 
@@ -321,7 +490,7 @@ impl Stream for WorkerBodyStream {
 impl Drop for WorkerBodyStream {
     fn drop(&mut self) {
         if !self.finished {
-            self.remove_pending();
+            self.cancel_abandoned_stream();
         }
     }
 }
@@ -361,6 +530,60 @@ fn parse_worker_stderr_tag(line: &str) -> Option<(&str, &str)> {
     Some((level, message.strip_prefix(' ').unwrap_or(message)))
 }
 
+/// Why a worker request produced no response.
+///
+/// The two arms are different events and must not lead to the same reaction.
+/// `Transport` says the pipe to that process is gone, so nothing already
+/// admitted to it can still complete and the process has to be replaced.
+/// `Timeout` says only that *this* request outlived the host deadline while the
+/// channel is still open — the worker may well be mid-render for a sibling.
+///
+/// Collapsing them made every concurrent request on a worker collateral damage
+/// for one slow route: any `Err` replaced the worker, replacement shuts the
+/// process down, and shutting it down drops every sibling request's sender.
+/// Idempotent requests were then re-rendered on a fresh process, adding load
+/// exactly when the server was already overloaded.
+#[derive(Debug)]
+enum WorkerSendFailure {
+    /// stdin closed, stdout ended, or the process had already exited.
+    Transport(RuvyxaError),
+    /// The host deadline expired with the channel still open.
+    Timeout {
+        error: RuvyxaError,
+        /// Host deadlines this worker has missed in a row, including this one.
+        consecutive: usize,
+    },
+}
+
+impl WorkerSendFailure {
+    /// Whether the process itself has to go, rather than just this request.
+    fn warrants_replacement(&self) -> bool {
+        match self {
+            Self::Transport(_) => true,
+            // A worker whose event loop is blocked never runs its own watchdog
+            // either, so the host is the only thing that can ever notice it.
+            // This is the bound on how long that state may persist.
+            Self::Timeout { consecutive, .. } => *consecutive >= MAX_CONSECUTIVE_WORKER_TIMEOUTS,
+        }
+    }
+}
+
+impl std::fmt::Display for WorkerSendFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transport(error) | Self::Timeout { error, .. } => error.fmt(formatter),
+        }
+    }
+}
+
+impl From<WorkerSendFailure> for RuvyxaError {
+    fn from(failure: WorkerSendFailure) -> Self {
+        match failure {
+            WorkerSendFailure::Transport(error) | WorkerSendFailure::Timeout { error, .. } => error,
+        }
+    }
+}
+
 struct Worker {
     stdin_tx: StdMutex<Option<mpsc::Sender<String>>>,
     pending: PendingResponses,
@@ -370,6 +593,14 @@ struct Worker {
     /// worker scripts do not report telemetry, so isolated prerenders use this
     /// as a compatibility counter too.
     retained_module_urls: AtomicUsize,
+    /// Host deadlines this process has missed with nothing answered in
+    /// between. Any frame from the worker — including its own `RUV1700`
+    /// timeout frame, which is a perfectly ordinary response — resets it.
+    consecutive_timeouts: AtomicUsize,
+    /// How long this process is given to exit on its own after its stdin
+    /// closes. Derived from the same environment value the child reads, plus
+    /// [`WORKER_SHUTDOWN_MARGIN`], so the host is never the first to give up.
+    shutdown_timeout: std::time::Duration,
 }
 
 impl Worker {
@@ -539,6 +770,8 @@ impl Worker {
             child: Mutex::new(Some(child)),
             alive,
             retained_module_urls: AtomicUsize::new(0),
+            consecutive_timeouts: AtomicUsize::new(0),
+            shutdown_timeout: worker_shutdown_timeout(env),
         })
     }
 
@@ -551,6 +784,17 @@ impl Worker {
     /// pool uses this to route new work to the least-busy worker.
     fn in_flight(&self) -> usize {
         self.pending.len()
+    }
+
+    /// A handle that can withdraw a request from this worker later.
+    ///
+    /// Taken before the wait rather than during the drop that needs it: the
+    /// drop paths hold no lock and cannot fail, and a worker already shutting
+    /// down answers `None` because closing its stdin has withdrawn everything
+    /// it holds anyway.
+    fn cancel_handle(&self) -> Option<WorkerCancelHandle> {
+        let stdin_tx = self.stdin_tx.lock().ok()?.clone()?;
+        Some(WorkerCancelHandle { stdin_tx })
     }
 
     // Twenty-four lines with one `match` and two `if let`s, which Clippy scores at
@@ -568,7 +812,7 @@ impl Worker {
             return;
         };
 
-        match tokio::time::timeout(WORKER_SHUTDOWN_TIMEOUT, child.wait()).await {
+        match tokio::time::timeout(self.shutdown_timeout, child.wait()).await {
             Ok(Ok(status)) => debug!(?status, "Node worker stopped gracefully"),
             Ok(Err(error)) => warn!(%error, "failed while waiting for Node worker shutdown"),
             Err(_) => {
@@ -583,13 +827,42 @@ impl Worker {
         }
     }
 
+    /// Count one missed host deadline against this process and describe it.
+    ///
+    /// Only deadlines the worker failed to answer for itself reach here: a live
+    /// worker whose own watchdog fired replies with an ordinary `ok: false`
+    /// frame, which is a response and clears the streak.
+    fn record_timeout(&self, response_timeout: std::time::Duration) -> WorkerSendFailure {
+        let consecutive = self.consecutive_timeouts.fetch_add(1, Ordering::AcqRel) + 1;
+        WorkerSendFailure::Timeout {
+            error: RuvyxaError::Message(format!(
+                "Worker request timed out after {}ms",
+                response_timeout.as_millis()
+            )),
+            consecutive,
+        }
+    }
+
     async fn send(
         &self,
         request: &WorkerRequest,
         response_timeout: std::time::Duration,
-    ) -> Result<WorkerResponse> {
-        let mut channel = self.open_response(request).await?;
+    ) -> std::result::Result<WorkerResponse, WorkerSendFailure> {
+        // A request that never reached the worker is a transport failure: the
+        // process is unreachable rather than slow. The two remaining cases —
+        // a poisoned lock and a request that will not serialize — are neither,
+        // but both are unreachable in practice and replacing the process is a
+        // safe answer to them.
+        let mut channel = self
+            .open_response(request, response_timeout)
+            .await
+            .map_err(WorkerSendFailure::Transport)?;
 
+        // Armed for the whole wait, so the worker is told both when the deadline
+        // expires and when this future is dropped because the client
+        // disconnected. Without it a request the host had given up on kept
+        // rendering to completion with its response discarded on arrival.
+        let cancel = CancelOnDrop::new(&channel.id, self.cancel_handle());
         let received = tokio::time::timeout(response_timeout, channel.receiver.recv()).await;
         // Unconditionally, on every path. This request has exactly one frame,
         // so the entry is the stdout reader's to remove when that frame is
@@ -601,14 +874,20 @@ impl Worker {
         self.pending.remove(&channel.id).await;
 
         match received {
-            Ok(Some(response)) => Ok(response),
-            Ok(None) => Err(RuvyxaError::Message(
-                "Worker response channel closed unexpectedly".to_string(),
-            )),
-            Err(_) => Err(RuvyxaError::Message(format!(
-                "Worker request timed out after {}ms",
-                response_timeout.as_millis()
-            ))),
+            Ok(Some(response)) => {
+                self.consecutive_timeouts.store(0, Ordering::Release);
+                cancel.answered();
+                Ok(response)
+            }
+            Ok(None) => {
+                // The channel is gone with the process behind it; there is no
+                // longer any work to withdraw.
+                cancel.answered();
+                Err(WorkerSendFailure::Transport(RuvyxaError::Message(
+                    "Worker response channel closed unexpectedly".to_string(),
+                )))
+            }
+            Err(_) => Err(self.record_timeout(response_timeout)),
         }
     }
 
@@ -616,26 +895,34 @@ impl Worker {
         &self,
         request: &WorkerRequest,
         response_timeout: std::time::Duration,
-    ) -> Result<WorkerApiResponse> {
-        let mut channel = self.open_response(request).await?;
+    ) -> std::result::Result<WorkerApiResponse, WorkerSendFailure> {
+        let mut channel = self
+            .open_response(request, response_timeout)
+            .await
+            .map_err(WorkerSendFailure::Transport)?;
+        // Covers the wait for the *first* frame only. Once the body exists,
+        // `WorkerBodyStream` owns cancellation for the rest of the response.
+        let cancel = CancelOnDrop::new(&channel.id, self.cancel_handle());
         let response = match tokio::time::timeout(response_timeout, channel.receiver.recv()).await {
-            Ok(Some(response)) => response,
+            Ok(Some(response)) => {
+                self.consecutive_timeouts.store(0, Ordering::Release);
+                response
+            }
             Ok(None) => {
-                return Err(RuvyxaError::Message(
+                cancel.answered();
+                return Err(WorkerSendFailure::Transport(RuvyxaError::Message(
                     "Worker response channel closed unexpectedly".to_string(),
-                ));
+                )));
             }
             Err(_) => {
                 self.pending.remove(&channel.id).await;
-                return Err(RuvyxaError::Message(format!(
-                    "Worker request timed out after {}ms",
-                    response_timeout.as_millis()
-                )));
+                return Err(self.record_timeout(response_timeout));
             }
         };
 
         match response.frame.as_deref() {
             Some("api-start") => {
+                cancel.answered();
                 // The stdout reader already flagged this request as streaming;
                 // repeat it here so the flag holds for any caller that builds a
                 // body stream without going through that reader.
@@ -648,20 +935,29 @@ impl Worker {
                         Arc::clone(&self.pending),
                         response_timeout,
                         Arc::clone(&trailer),
+                        self.cancel_handle(),
                     ))),
                     trailer,
                 })
             }
-            None => Ok(WorkerApiResponse {
-                response,
-                body: None,
-                trailer: Arc::new(OnceLock::new()),
-            }),
+            None => {
+                // A legacy one-message response: complete on arrival, so there
+                // is nothing left for the guard to withdraw.
+                cancel.answered();
+                Ok(WorkerApiResponse {
+                    response,
+                    body: None,
+                    trailer: Arc::new(OnceLock::new()),
+                })
+            }
             frame => {
                 self.pending.remove(&channel.id).await;
-                Err(RuvyxaError::Message(format!(
+                // A live worker that opens with a frame this side cannot
+                // interpret has lost the protocol, not merely this request:
+                // treat it the way a broken pipe is treated.
+                Err(WorkerSendFailure::Transport(RuvyxaError::Message(format!(
                     "Worker returned an unexpected first API response frame: {frame:?}"
-                )))
+                ))))
             }
         }
     }
@@ -693,7 +989,24 @@ impl Worker {
             .map_err(|error| format!("invalidation queue rejected the update: {error}"))
     }
 
-    async fn open_response(&self, request: &WorkerRequest) -> Result<ResponseChannel> {
+    /// Register a request and queue its line to the worker's stdin writer.
+    ///
+    /// `response_timeout` covers the *enqueue*, not just the wait that follows
+    /// it. The stdin channel is bounded and its writer awaits
+    /// `stdin.write_all(...)`, so a worker that stops draining its stdin — a
+    /// blocked event loop, a child that paused the stream — backs pressure all
+    /// the way here, and `send(...).await` on a full channel waits forever. The
+    /// caller believed it had a deadline, so the request hung past every one of
+    /// them with no error surfaced: the same unbounded wait `process.rs` exists
+    /// to prevent, on the asynchronous side. The host's budget already carries
+    /// [`WORKER_TIMEOUT_GRACE`] precisely because its clock starts at the
+    /// enqueue, so covering the enqueue costs the render nothing it was
+    /// promised.
+    async fn open_response(
+        &self,
+        request: &WorkerRequest,
+        response_timeout: std::time::Duration,
+    ) -> Result<ResponseChannel> {
         if !self.alive.load(Ordering::Acquire) {
             return Err(RuvyxaError::Message(
                 "Worker process has exited".to_string(),
@@ -729,11 +1042,21 @@ impl Worker {
             ));
         }
 
-        if stdin_tx.send(line).await.is_err() {
-            self.pending.remove(&id).await;
-            return Err(RuvyxaError::Message(
-                "Worker process stdin closed".to_string(),
-            ));
+        match tokio::time::timeout(response_timeout, stdin_tx.send(line)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                self.pending.remove(&id).await;
+                return Err(RuvyxaError::Message(
+                    "Worker process stdin closed".to_string(),
+                ));
+            }
+            Err(_) => {
+                self.pending.remove(&id).await;
+                return Err(RuvyxaError::Message(format!(
+                    "Worker did not accept a request within {}ms; its input queue is full",
+                    response_timeout.as_millis()
+                )));
+            }
         }
 
         Ok(ResponseChannel {
@@ -768,6 +1091,13 @@ pub struct NodeWorkerPool {
     /// dropped that `Child` — so `kill_on_drop` never ran and the `node`
     /// process was orphaned, still holding its handles on the build directory.
     retiring: Arc<StdMutex<Vec<Arc<Worker>>>>,
+    /// Serializes [`NodeWorkerPool::recycle`] so overlapping callers install one
+    /// generation between them.
+    recycle_gate: Mutex<()>,
+    /// How many generations have been installed. Read before the gate and again
+    /// after it: a caller that finds it moved was waiting on a recycle that has
+    /// already done its work, and joins that instead of starting another.
+    recycle_generation: AtomicU64,
 }
 
 /// One server-side page render.
@@ -870,6 +1200,7 @@ impl NodeWorkerPool {
         runtime: JavaScriptRuntime,
     ) -> Result<Self> {
         let response_timeout = configure_worker_timeout(&mut env, DEFAULT_WORKER_TIMEOUT_MS);
+        configure_worker_shutdown_grace(&mut env);
         // Normal HMR rebuilds import changed bundles under content-addressed
         // URLs that Node cannot unload. Bound those graphs in long-lived dev
         // sessions by recycling only after the worker reports the real count.
@@ -897,6 +1228,7 @@ impl NodeWorkerPool {
         runtime: JavaScriptRuntime,
     ) -> Result<Self> {
         let response_timeout = configure_worker_timeout(&mut env, BUILD_WORKER_TIMEOUT_MS);
+        configure_worker_shutdown_grace(&mut env);
         let recycle_after = isolated_renders_per_worker();
         Self::start_with_timeout(
             root,
@@ -999,6 +1331,8 @@ impl NodeWorkerPool {
             response_timeout,
             retained_module_urls_per_worker,
             retiring: Arc::new(StdMutex::new(Vec::new())),
+            recycle_gate: Mutex::new(()),
+            recycle_generation: AtomicU64::new(0),
         })
     }
 
@@ -1039,10 +1373,12 @@ impl NodeWorkerPool {
             }
         };
 
-        // Concurrently. Each worker closes its stdin and then waits up to
-        // `WORKER_SHUTDOWN_TIMEOUT` for the process to exit; one at a time that
-        // is `2s × pool size` between Ctrl-C and the terminal coming back, and
-        // the waits are independent.
+        // Concurrently. Each worker closes its stdin and then waits out its own
+        // shutdown grace for the process to exit; one at a time that would be
+        // the whole grace times the pool size between Ctrl-C and the terminal
+        // coming back, and the waits are independent. An idle worker exits as
+        // soon as its stdin closes, so the grace is only ever spent on a worker
+        // still finishing a request.
         let mut stopping = tokio::task::JoinSet::new();
         for worker in live.into_iter().chain(retiring) {
             stopping.spawn(async move { worker.shutdown().await });
@@ -1050,20 +1386,15 @@ impl NodeWorkerPool {
         while stopping.join_next().await.is_some() {}
     }
 
-    /// Retire a worker the pool has already replaced, keeping it owned.
+    /// Drain a worker the pool has already replaced, keeping it owned.
     ///
-    /// The worker is registered before the drain task starts and deregistered
-    /// after it finishes, so `shutdown` sees exactly the processes that are
-    /// still alive.
-    fn retire_in_background(&self, worker: Arc<Worker>, index: usize) {
+    /// The caller registers the worker in [`NodeWorkerPool::retiring`] under the
+    /// same guard that removed it from `workers`; this deregisters it once the
+    /// drain finishes, so `shutdown` sees exactly the processes that are still
+    /// alive. Registering here instead — after the swap — is what left the
+    /// window described on [`NodeWorkerPool::install_replacement`].
+    fn drain_registered_in_background(&self, worker: Arc<Worker>, index: usize) {
         let register = Arc::clone(&self.retiring);
-        match register.lock() {
-            Ok(mut retiring) => retiring.push(Arc::clone(&worker)),
-            Err(_) => warn!(
-                worker = index,
-                "retiring worker list poisoned; the drain task still owns this process"
-            ),
-        }
         tokio::spawn(async move {
             drain_then_shutdown(Arc::clone(&worker), index).await;
             if let Ok(mut retiring) = register.lock() {
@@ -1079,7 +1410,15 @@ impl NodeWorkerPool {
         let mut active_worker = Arc::clone(&worker);
         let mut response = worker.send(&request, self.response_timeout).await;
 
-        if response.is_err()
+        // Only a failure that says the *process* is unusable may replace it.
+        // A single missed deadline is this request's failure alone: the worker
+        // is very likely still rendering for siblings, and replacing it shuts
+        // the process down, which drops every one of their senders.
+        let replace = response
+            .as_ref()
+            .err()
+            .is_some_and(WorkerSendFailure::warrants_replacement);
+        if replace
             && let Some(replacement) = self.replace_failed_worker(index, &worker).await
             && request.is_idempotent()
         {
@@ -1101,7 +1440,7 @@ impl NodeWorkerPool {
             .await;
         }
 
-        response
+        response.map_err(RuvyxaError::from)
     }
 
     /// Replace a worker that has retained its budgeted number of module graphs.
@@ -1163,32 +1502,69 @@ impl NodeWorkerPool {
             }
         };
 
-        let replaced = {
-            let Ok(mut workers) = self.workers.write() else {
-                warn!(
-                    worker = index,
-                    "worker pool lock poisoned during retirement"
-                );
-                replacement.shutdown().await;
-                return false;
-            };
-            if workers
-                .get(index)
-                .is_some_and(|worker| Arc::ptr_eq(worker, saturated))
-            {
-                workers[index] = Arc::clone(&replacement);
-                true
-            } else {
-                false
-            }
-        };
-
-        if !replaced {
+        if !self.install_replacement(index, saturated, &replacement) {
             replacement.shutdown().await;
             return true;
         }
 
-        self.retire_in_background(Arc::clone(saturated), index);
+        self.drain_registered_in_background(Arc::clone(saturated), index);
+        true
+    }
+
+    /// Swap `replacement` into slot `index` and register `saturated` as
+    /// retiring, in one critical section.
+    ///
+    /// The two used to be separate lock acquisitions in the other order — the
+    /// pool swap first, the registration afterwards — and `shutdown` samples
+    /// `workers` and then `retiring`. That leaves an interleaving in which the
+    /// retired process is in neither list: the swap lands, `shutdown` reads
+    /// `workers` without it, `shutdown` takes an empty `retiring`, and only then
+    /// is it registered. Nothing then unwinds its detached drain task, nothing
+    /// drops the `Child`, `kill_on_drop` never runs, and a `node` process is
+    /// left holding handles on the build directory — exactly the orphan
+    /// `retiring` was added to prevent. Taking both locks together removes the
+    /// window rather than narrowing it, and registering under the same guard
+    /// that performs the swap also means the worker is never in both lists, so
+    /// `shutdown` cannot be called on it twice.
+    ///
+    /// Returns whether the slot still held `saturated`; a caller told `false`
+    /// still owns `replacement` and must shut it down.
+    fn install_replacement(
+        &self,
+        index: usize,
+        saturated: &Arc<Worker>,
+        replacement: &Arc<Worker>,
+    ) -> bool {
+        // A poisoned register is not a reason to keep a saturated process in
+        // selection: the swap proceeds and the drain task keeps owning the
+        // child, which is the same position the old code took.
+        let mut retiring = match self.retiring.lock() {
+            Ok(guard) => Some(guard),
+            Err(_) => {
+                warn!(
+                    worker = index,
+                    "retiring worker list poisoned; the drain task still owns this process"
+                );
+                None
+            }
+        };
+        let Ok(mut workers) = self.workers.write() else {
+            warn!(
+                worker = index,
+                "worker pool lock poisoned during retirement"
+            );
+            return false;
+        };
+        if !workers
+            .get(index)
+            .is_some_and(|worker| Arc::ptr_eq(worker, saturated))
+        {
+            return false;
+        }
+        if let Some(retiring) = retiring.as_mut() {
+            retiring.push(Arc::clone(saturated));
+        }
+        workers[index] = Arc::clone(replacement);
         true
     }
 
@@ -1198,7 +1574,25 @@ impl NodeWorkerPool {
     /// it in a live worker would duplicate that state, while ordinary bundle invalidation
     /// cannot undo registrations from a deleted file. Build every replacement first, swap
     /// the pool atomically, then let requests already admitted by the old generation drain.
+    ///
+    /// Overlapping callers install one generation. One editor save reports an
+    /// instrumentation file two or three times, and each report used to run this
+    /// in full: every call read `workers.len()`, spawned that many processes,
+    /// and retired the generation the call beside it had just installed. Three
+    /// generations were started and two left draining — for up to
+    /// `WORKER_DRAIN_TIMEOUT` — for one Ctrl-S. A caller that arrives while a
+    /// recycle is running now waits for it and reports its result; one that
+    /// arrives after a recycle finished starts a new one, because its reason for
+    /// asking is newer than that generation.
     pub(crate) async fn recycle(&self) -> Result<usize> {
+        let requested_at = self.recycle_generation.load(Ordering::Acquire);
+        let _gate = self.recycle_gate.lock().await;
+        if self.recycle_generation.load(Ordering::Acquire) != requested_at {
+            // A recycle that started no earlier than this request has already
+            // replaced every process, which is all this call wanted.
+            return Ok(self.size());
+        }
+
         let worker_count = self
             .workers
             .read()
@@ -1219,15 +1613,34 @@ impl NodeWorkerPool {
             }
         }
 
-        let swapped = match self.workers.write() {
-            Ok(mut workers) if workers.len() == replacements.len() => {
-                Ok(std::mem::replace(&mut *workers, replacements))
+        // The whole generation is registered as retiring under the same guard
+        // that removes it from the pool, for the reason spelled out on
+        // `install_replacement`: a worker in neither list is an orphaned
+        // process, and this path retires every worker at once.
+        let swapped = {
+            let mut retiring = match self.retiring.lock() {
+                Ok(guard) => Some(guard),
+                Err(_) => {
+                    warn!(
+                        "retiring worker list poisoned; the drain tasks still own these processes"
+                    );
+                    None
+                }
+            };
+            match self.workers.write() {
+                Ok(mut workers) if workers.len() == replacements.len() => {
+                    let retired = std::mem::replace(&mut *workers, replacements);
+                    if let Some(retiring) = retiring.as_mut() {
+                        retiring.extend(retired.iter().map(Arc::clone));
+                    }
+                    Ok(retired)
+                }
+                Ok(_) => Err((
+                    "Worker pool size changed during recycle".to_string(),
+                    replacements,
+                )),
+                Err(_) => Err(("Worker pool lock poisoned".to_string(), replacements)),
             }
-            Ok(_) => Err((
-                "Worker pool size changed during recycle".to_string(),
-                replacements,
-            )),
-            Err(_) => Err(("Worker pool lock poisoned".to_string(), replacements)),
         };
         let old_workers = match swapped {
             Ok(workers) => workers,
@@ -1239,8 +1652,12 @@ impl NodeWorkerPool {
             }
         };
 
+        // Published before the gate is released, so a caller that read the
+        // previous value and is blocked on the gate sees the change and joins.
+        self.recycle_generation.fetch_add(1, Ordering::Release);
+
         for (index, worker) in old_workers.into_iter().enumerate() {
-            self.retire_in_background(worker, index);
+            self.drain_registered_in_background(worker, index);
         }
         Ok(worker_count)
     }
@@ -1547,22 +1964,28 @@ impl NodeWorkerPool {
         let response = worker
             .start_api_response(&request, self.response_timeout)
             .await;
-        if response.is_err() {
-            self.replace_failed_worker(index, &worker).await;
-        } else if let Ok(api_response) = &response {
-            // Importing the route module is complete before `api-start`, so its
-            // retention telemetry is final for this request. Remove a saturated
-            // worker from selection now; the retirement path keeps it alive
-            // until the framed body reaches api-end or is dropped.
-            self.retire_worker_if_saturated(
-                index,
-                &worker,
-                api_response.response.retained_module_urls,
-                false,
-            )
-            .await;
+        match &response {
+            // A timed-out route handler is not a dead process; killing it here
+            // would take every concurrent request on this worker with it.
+            Err(failure) if failure.warrants_replacement() => {
+                self.replace_failed_worker(index, &worker).await;
+            }
+            Err(_) => {}
+            Ok(api_response) => {
+                // Importing the route module is complete before `api-start`, so
+                // its retention telemetry is final for this request. Remove a
+                // saturated worker from selection now; the retirement path keeps
+                // it alive until the framed body reaches api-end or is dropped.
+                self.retire_worker_if_saturated(
+                    index,
+                    &worker,
+                    api_response.response.retained_module_urls,
+                    false,
+                )
+                .await;
+            }
         }
-        response
+        response.map_err(RuvyxaError::from)
     }
 
     /// Render a server-components document as a stream.
@@ -1593,18 +2016,22 @@ impl NodeWorkerPool {
         let response = worker
             .start_api_response(&request, self.response_timeout)
             .await;
-        if response.is_err() {
-            self.replace_failed_worker(index, &worker).await;
-        } else if let Ok(streamed) = &response {
-            self.retire_worker_if_saturated(
-                index,
-                &worker,
-                streamed.response.retained_module_urls,
-                false,
-            )
-            .await;
+        match &response {
+            Err(failure) if failure.warrants_replacement() => {
+                self.replace_failed_worker(index, &worker).await;
+            }
+            Err(_) => {}
+            Ok(streamed) => {
+                self.retire_worker_if_saturated(
+                    index,
+                    &worker,
+                    streamed.response.retained_module_urls,
+                    false,
+                )
+                .await;
+            }
         }
-        response
+        response.map_err(RuvyxaError::from)
     }
 
     pub(crate) async fn render_action(
@@ -1824,7 +2251,9 @@ fn configure_worker_timeout(
     // Explicitly pass the normalized value so Node and Rust cannot apply
     // different parsing or fallback behavior to the same worker request.
     env.insert(WORKER_TIMEOUT_ENV.to_string(), timeout_ms.to_string());
-    std::time::Duration::from_millis(timeout_ms)
+    // The worker keeps the budget it was given; the host waits longer, because
+    // its clock starts earlier. See `WORKER_TIMEOUT_GRACE`.
+    std::time::Duration::from_millis(timeout_ms) + WORKER_TIMEOUT_GRACE
 }
 
 /// How many isolated prerenders a build worker may serve before retirement.
@@ -1840,6 +2269,42 @@ fn isolated_renders_per_worker() -> Option<usize> {
         Some(budget) => Some(budget),
         None => Some(DEFAULT_ISOLATED_RENDERS_PER_WORKER),
     }
+}
+
+/// Normalize the shutdown grace into the worker's environment and return the
+/// host's matching ceiling.
+///
+/// The same shape as [`configure_worker_timeout`], and for the same reason: the
+/// number is spent by the worker but enforced by the host, so writing it down
+/// twice is writing down a disagreement. Passing the normalized value means an
+/// operator who raises `RUVYXA_WORKER_SHUTDOWN_MS` raises both deadlines, and
+/// the host's stays the larger of the two by construction.
+fn configure_worker_shutdown_grace(env: &mut BTreeMap<String, String>) -> std::time::Duration {
+    let inherited = std::env::var(WORKER_SHUTDOWN_ENV).ok();
+    let configured = env
+        .get(WORKER_SHUTDOWN_ENV)
+        .map(String::as_str)
+        .or(inherited.as_deref());
+    let grace_ms = configured
+        .and_then(positive_worker_timeout_ms)
+        .unwrap_or(DEFAULT_WORKER_SHUTDOWN_GRACE_MS);
+    env.insert(WORKER_SHUTDOWN_ENV.to_string(), grace_ms.to_string());
+    std::time::Duration::from_millis(grace_ms) + WORKER_SHUTDOWN_MARGIN
+}
+
+/// The host ceiling implied by a worker environment that has already been
+/// normalized by [`configure_worker_shutdown_grace`].
+///
+/// Read at spawn rather than passed down, so every path that starts a worker —
+/// the initial pool, a replacement, a whole recycled generation — gets the same
+/// answer without another argument to forget.
+fn worker_shutdown_timeout(env: &BTreeMap<String, String>) -> std::time::Duration {
+    let grace_ms = env
+        .get(WORKER_SHUTDOWN_ENV)
+        .map(String::as_str)
+        .and_then(positive_worker_timeout_ms)
+        .unwrap_or(DEFAULT_WORKER_SHUTDOWN_GRACE_MS);
+    std::time::Duration::from_millis(grace_ms) + WORKER_SHUTDOWN_MARGIN
 }
 
 fn positive_worker_timeout_ms(value: &str) -> Option<u64> {
@@ -2066,6 +2531,8 @@ mod tests {
             child: Mutex::new(None),
             alive: Arc::new(AtomicBool::new(true)),
             retained_module_urls: AtomicUsize::new(0),
+            consecutive_timeouts: AtomicUsize::new(0),
+            shutdown_timeout: worker_shutdown_timeout(&BTreeMap::new()),
         })
     }
 
@@ -2089,6 +2556,8 @@ mod tests {
             response_timeout,
             retained_module_urls_per_worker,
             retiring: Arc::new(StdMutex::new(Vec::new())),
+            recycle_gate: Mutex::new(()),
+            recycle_generation: AtomicU64::new(0),
         }
     }
 
@@ -2114,6 +2583,92 @@ mod tests {
             fresh,
             server_components: false,
         }
+    }
+
+    /// A retired worker is never in neither list, not even for an instant.
+    ///
+    /// `shutdown` reads `workers` and then `retiring`. If the pool swap and the
+    /// registration are two separate acquisitions in that order, the process can
+    /// be missing from both samples and is then owned only by a detached drain
+    /// task the exiting CLI never unwinds — an orphaned `node` holding handles on
+    /// the build directory. The observable form of "one critical section" is
+    /// that holding the register blocks the swap: while `retiring` is locked,
+    /// the pool must still be holding the worker it is about to retire.
+    #[test]
+    fn a_retired_worker_is_registered_before_it_leaves_the_pool() {
+        let saturated = stub_worker(None);
+        let replacement = stub_worker(None);
+        let pool = Arc::new(stub_pool(vec![Arc::clone(&saturated)]));
+
+        let held = pool
+            .retiring
+            .lock()
+            .expect("the register starts unpoisoned");
+        let ready = Arc::new(std::sync::Barrier::new(2));
+        let installer = {
+            let pool = Arc::clone(&pool);
+            let saturated = Arc::clone(&saturated);
+            let replacement = Arc::clone(&replacement);
+            let ready = Arc::clone(&ready);
+            std::thread::spawn(move || {
+                ready.wait();
+                pool.install_replacement(0, &saturated, &replacement)
+            })
+        };
+
+        ready.wait();
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        assert!(
+            Arc::ptr_eq(&pool.workers.read().unwrap()[0], &saturated),
+            "the pool let go of a worker it had not yet registered as retiring"
+        );
+
+        // Released: the swap must have been waiting on the register and nothing
+        // else, so it completes now and both lists agree.
+        drop(held);
+        assert!(installer.join().expect("the installing thread finished"));
+        assert!(Arc::ptr_eq(&pool.workers.read().unwrap()[0], &replacement));
+        let retiring = pool.retiring.lock().unwrap();
+        assert_eq!(retiring.len(), 1);
+        assert!(Arc::ptr_eq(&retiring[0], &saturated));
+    }
+
+    /// A worker that stops draining its stdin must fail the request, not hold it.
+    ///
+    /// The stdin channel is bounded and the writer task awaits the pipe, so a
+    /// child whose event loop is blocked eventually leaves `send` waiting with
+    /// nothing to time it out. Here the receiver is simply never polled, which
+    /// is the same condition one queue slot earlier: the second request has to
+    /// come back as an error inside the response timeout rather than hanging.
+    #[tokio::test]
+    async fn a_full_stdin_queue_fails_within_the_response_timeout() {
+        // Held, never read: the writer task's exact behaviour when the worker
+        // has stopped consuming lines.
+        let (stdin_tx, _stdin_rx) = mpsc::channel::<String>(1);
+        let worker = stub_worker(Some(stdin_tx));
+        let response_timeout = std::time::Duration::from_millis(200);
+
+        worker
+            .open_response(&ssg_request(true), response_timeout)
+            .await
+            .expect("the first request takes the one free queue slot");
+
+        let blocked = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            worker.open_response(&ssg_request(true), response_timeout),
+        )
+        .await
+        .expect("a queued request must not outlive the response timeout it was given");
+        let Err(error) = blocked else {
+            panic!("a queue that cannot accept the line is a failure");
+        };
+        assert!(
+            error.to_string().contains("input queue is full"),
+            "the error must name the cause: {error}"
+        );
+        // The request that could not be queued leaves no pending entry behind,
+        // so retiring this worker still reaches idle.
+        assert_eq!(worker.pending.len(), 1);
     }
 
     /// Only the isolated form mints a new module URL, so only it should count
@@ -2347,13 +2902,128 @@ mod tests {
         pool.shutdown().await;
     }
 
+    /// A recycle that arrives while one is already running joins it instead of
+    /// starting a second generation.
+    ///
+    /// The watcher calls `recycle` on every accepted instrumentation change, and
+    /// one editor save reports that file two or three times. `recycle` had no
+    /// mutual exclusion: each call read `workers.len()`, spawned that many
+    /// processes, and retired the generation the call beside it had just
+    /// installed — three generations started and two left draining, for up to
+    /// `WORKER_DRAIN_TIMEOUT`, for one Ctrl-S.
+    ///
+    /// The overlap is staged rather than raced: the test holds the gate and
+    /// publishes the generation exactly as a winning caller does, so the joining
+    /// caller is guaranteed to be the one that arrived while a recycle was in
+    /// flight. Counting the worker processes is what proves it joined — a caller
+    /// that recycled on its own would have spawned one.
+    #[tokio::test]
+    async fn a_recycle_arriving_during_another_joins_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let spawns = temp.path().join("spawns");
+        std::fs::create_dir_all(&spawns).unwrap();
+        let worker_script = temp.path().join("worker.mjs");
+        std::fs::write(
+            &worker_script,
+            "import { writeFileSync } from 'node:fs'; import { createInterface } from 'node:readline'; writeFileSync(new URL(`./spawns/${process.pid}.marker`, import.meta.url), ''); createInterface({ input: process.stdin }).on('line', (line) => { const { id } = JSON.parse(line); process.stdout.write(JSON.stringify({ id, ok: true, pong: true }) + '\\n'); });",
+        )
+        .unwrap();
+
+        let original = Arc::new(
+            Worker::spawn(&worker_script, &BTreeMap::new(), JavaScriptRuntime::Node)
+                .await
+                .unwrap(),
+        );
+        let pool = Arc::new(pool_over(
+            vec![Arc::clone(&original)],
+            worker_script,
+            std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
+            None,
+        ));
+
+        // Stand in for a recycle that is under way: the gate is held and the
+        // generation moves before it is released.
+        let in_flight = pool.recycle_gate.lock().await;
+        let joining = tokio::spawn({
+            let pool = Arc::clone(&pool);
+            async move { pool.recycle().await }
+        });
+        // Hand the scheduler over until the spawned caller has read the
+        // generation and parked on the held gate. Without this the generation
+        // could move first, and the test would be describing a caller that
+        // arrived after the recycle rather than during it.
+        tokio::task::yield_now().await;
+        pool.recycle_generation.fetch_add(1, Ordering::Release);
+        drop(in_flight);
+
+        assert_eq!(
+            joining
+                .await
+                .unwrap()
+                .expect("a joining recycle must not report failure"),
+            1,
+            "the joining caller learns the size of the generation now serving"
+        );
+
+        // Every process the pool ever owned — live or retired — has exited by
+        // the time `shutdown` returns, so each one has run its startup code and
+        // left its marker behind.
+        pool.shutdown().await;
+        assert_eq!(
+            std::fs::read_dir(&spawns).unwrap().count(),
+            1,
+            "a joining recycle must spawn no worker of its own"
+        );
+    }
+
+    /// The join is bounded to recycles that overlap. An instrumentation change
+    /// after a completed recycle has a reason the finished generation cannot
+    /// answer, so it starts one of its own.
+    #[tokio::test]
+    async fn a_recycle_after_another_finished_starts_its_own_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let worker_script = temp.path().join("worker.mjs");
+        std::fs::write(
+            &worker_script,
+            "process.stdin.on('end', () => process.exit(0)); process.stdin.resume();",
+        )
+        .unwrap();
+
+        let original = Arc::new(
+            Worker::spawn(&worker_script, &BTreeMap::new(), JavaScriptRuntime::Node)
+                .await
+                .unwrap(),
+        );
+        let pool = pool_over(
+            vec![Arc::clone(&original)],
+            worker_script,
+            std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
+            None,
+        );
+
+        pool.recycle().await.unwrap();
+        let first = pool.workers.read().unwrap()[0].clone();
+        pool.recycle().await.unwrap();
+        let second = pool.workers.read().unwrap()[0].clone();
+
+        assert!(!Arc::ptr_eq(&original, &first));
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "a later instrumentation change must replace the generation again"
+        );
+        pool.shutdown().await;
+    }
+
     #[test]
     fn worker_timeout_normalizes_valid_project_configuration() {
         let mut env = BTreeMap::from([(WORKER_TIMEOUT_ENV.to_string(), " 45000 ".to_string())]);
 
         let timeout = configure_worker_timeout(&mut env, DEFAULT_WORKER_TIMEOUT_MS);
 
-        assert_eq!(timeout, std::time::Duration::from_millis(45_000));
+        assert_eq!(
+            timeout,
+            std::time::Duration::from_millis(45_000) + WORKER_TIMEOUT_GRACE
+        );
         assert_eq!(env[WORKER_TIMEOUT_ENV], "45000");
     }
 
@@ -2370,9 +3040,250 @@ mod tests {
 
             let timeout = configure_worker_timeout(&mut env, fallback_ms);
 
-            assert_eq!(timeout, std::time::Duration::from_millis(fallback_ms));
+            assert_eq!(
+                timeout,
+                std::time::Duration::from_millis(fallback_ms) + WORKER_TIMEOUT_GRACE
+            );
             assert_eq!(env[WORKER_TIMEOUT_ENV], fallback_ms.to_string());
         }
+    }
+
+    /// The two deadlines are derived from one number, and the clocks that
+    /// consume it start at different moments: the host's when the line is
+    /// queued to the writer task, the worker's only after it has read, parsed,
+    /// and admitted the request through its concurrency gate. Waiting the same
+    /// duration made the host interval strictly contain the worker's, so the
+    /// worker's own watchdog — whose whole purpose is to answer a wedged render
+    /// with an ordinary `RUV1700` frame — could never fire first.
+    #[test]
+    fn the_host_deadline_leaves_the_worker_watchdog_room_to_answer_first() {
+        let mut env = BTreeMap::from([(WORKER_TIMEOUT_ENV.to_string(), "45000".to_string())]);
+
+        let host_deadline = configure_worker_timeout(&mut env, DEFAULT_WORKER_TIMEOUT_MS);
+
+        let worker_budget = std::time::Duration::from_millis(
+            env[WORKER_TIMEOUT_ENV]
+                .parse::<u64>()
+                .expect("the worker budget must stay a plain millisecond count"),
+        );
+        assert_eq!(
+            worker_budget,
+            std::time::Duration::from_millis(45_000),
+            "the value handed to the worker must not change"
+        );
+        assert!(
+            host_deadline > worker_budget,
+            "the host waited {host_deadline:?} for a worker budgeted {worker_budget:?}; \
+             the worker's watchdog can never answer first"
+        );
+    }
+
+    /// The host must outlast the grace it hands the worker, or the grace is a
+    /// number nothing can ever spend.
+    ///
+    /// The worker's self-exit deadline was 5 s and the host killed it after 2 s,
+    /// so any shutdown reaching a worker that still held a request went straight
+    /// to the kill branch — the one mechanism by which an in-flight request
+    /// survives a replacement was unreachable. Both deadlines now come from the
+    /// value normalized into the child's environment.
+    #[test]
+    fn the_host_outlasts_the_shutdown_grace_it_gives_the_worker() {
+        for configured in ["5000", "45000", "0", "invalid", "2147483648"] {
+            let mut env =
+                BTreeMap::from([(WORKER_SHUTDOWN_ENV.to_string(), configured.to_string())]);
+
+            let host_ceiling = configure_worker_shutdown_grace(&mut env);
+
+            let worker_grace = std::time::Duration::from_millis(
+                env[WORKER_SHUTDOWN_ENV]
+                    .parse::<u64>()
+                    .expect("the grace handed to the worker must stay a millisecond count"),
+            );
+            assert!(
+                host_ceiling > worker_grace,
+                "configured {configured:?}: the host waited {host_ceiling:?} for a worker \
+                 given {worker_grace:?}; its grace can never be spent"
+            );
+            // A worker spawned from this environment reaches the same ceiling,
+            // so a replacement and a recycled generation agree with the pool.
+            assert_eq!(worker_shutdown_timeout(&env), host_ceiling);
+        }
+        // A worker started without the variable falls back to the same number
+        // the worker script falls back to.
+        assert_eq!(
+            worker_shutdown_timeout(&BTreeMap::new()),
+            std::time::Duration::from_millis(DEFAULT_WORKER_SHUTDOWN_GRACE_MS)
+                + WORKER_SHUTDOWN_MARGIN
+        );
+    }
+
+    fn ssg_request_for_path(request_path: &str) -> WorkerRequest {
+        WorkerRequest::Ssg {
+            id: next_request_id(),
+            project_root: "/project".to_string(),
+            app_dir: "/project/app".to_string(),
+            page_file: "/project/app/page.tsx".to_string(),
+            request_path: request_path.to_string(),
+            route_path: request_path.to_string(),
+            params: BTreeMap::new(),
+            mode: "full".to_string(),
+            fresh: false,
+            server_components: false,
+        }
+    }
+
+    /// A worker script that answers `/slow` far past any deadline in this test
+    /// and everything else after a short, bounded delay.
+    ///
+    /// The delay on the fast path is what makes the assertion meaningful: the
+    /// sibling has to still be waiting at the instant the slow request's host
+    /// deadline expires, because that is when the pool used to shut the whole
+    /// process down underneath it.
+    fn write_slow_and_fast_worker_script(path: &Path, fast_delay_ms: u64) {
+        std::fs::write(
+            path,
+            format!(
+                "import {{ createInterface }} from 'node:readline';\n\
+                 const rl = createInterface({{ input: process.stdin }});\n\
+                 rl.on('line', (line) => {{\n\
+                 const request = JSON.parse(line);\n\
+                 const answer = () => process.stdout.write(JSON.stringify({{ id: request.id, ok: true, html: request.requestPath }}) + '\\n');\n\
+                 const delay = request.requestPath === '/slow' ? 60000 : {fast_delay_ms};\n\
+                 setTimeout(answer, delay).unref();\n\
+                 }});\n\
+                 rl.on('close', () => process.exit(0));\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    /// A slow render is not a dead process, and treating the two as one
+    /// condition made every concurrent request on that worker collateral
+    /// damage: any `Err` replaced the worker, and replacement shuts the process
+    /// down, which drops every sibling request's sender.
+    #[tokio::test]
+    async fn a_timed_out_request_does_not_kill_its_siblings_or_the_worker() {
+        let temp = tempfile::tempdir().unwrap();
+        let worker_script = temp.path().join("worker.mjs");
+        write_slow_and_fast_worker_script(&worker_script, 2_200);
+
+        let worker = Arc::new(
+            Worker::spawn(&worker_script, &BTreeMap::new(), JavaScriptRuntime::Node)
+                .await
+                .unwrap(),
+        );
+        let pool = Arc::new(pool_over(
+            vec![Arc::clone(&worker)],
+            worker_script,
+            std::time::Duration::from_millis(3_000),
+            None,
+        ));
+
+        let slow_pool = Arc::clone(&pool);
+        let slow = tokio::spawn(async move { slow_pool.send(ssg_request_for_path("/slow")).await });
+
+        // The sibling has to be admitted well before the slow request's
+        // deadline and still be waiting when it expires: it is sent at 1.5s,
+        // answers at 3.7s, and its own deadline is 4.5s, while the slow
+        // request's expires at 3s.
+        tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+        let sibling = pool.send(ssg_request_for_path("/fast")).await;
+
+        let slow = slow.await.expect("the slow request task panicked");
+        let error = slow.expect_err("the slow request must fail its own deadline");
+        assert!(
+            error.to_string().contains("timed out"),
+            "a slow render must be reported as a timeout, got: {error}"
+        );
+
+        let sibling = sibling.expect("a sibling request must survive its neighbour's timeout");
+        assert_eq!(sibling.html.as_deref(), Some("/fast"));
+        assert!(
+            Arc::ptr_eq(&pool.workers.read().unwrap()[0], &worker),
+            "one timed-out request must not replace a worker that is still answering"
+        );
+
+        pool.shutdown().await;
+    }
+
+    /// The leniency above has to be bounded: a worker whose event loop is
+    /// blocked never runs its own `setTimeout` either, so nothing but the host
+    /// will ever notice. Consecutive timeouts are the signal, and the count
+    /// resets the moment the worker answers anything.
+    #[tokio::test]
+    async fn a_worker_that_only_ever_times_out_is_replaced_after_the_bound() {
+        let temp = tempfile::tempdir().unwrap();
+        let worker_script = temp.path().join("worker.mjs");
+        // Answers nothing at all: the shape of a blocked event loop from the
+        // host's side, since a live worker would have answered `RUV1700`.
+        std::fs::write(
+            &worker_script,
+            "process.stdin.on('end', () => process.exit(0)); process.stdin.resume();",
+        )
+        .unwrap();
+
+        let worker = Arc::new(
+            Worker::spawn(&worker_script, &BTreeMap::new(), JavaScriptRuntime::Node)
+                .await
+                .unwrap(),
+        );
+        let pool = pool_over(
+            vec![Arc::clone(&worker)],
+            worker_script,
+            std::time::Duration::from_millis(100),
+            None,
+        );
+
+        for attempt in 1..MAX_CONSECUTIVE_WORKER_TIMEOUTS {
+            let _ = pool.send(ssg_request_for_path("/wedged")).await;
+            assert!(
+                Arc::ptr_eq(&pool.workers.read().unwrap()[0], &worker),
+                "timeout {attempt} of {MAX_CONSECUTIVE_WORKER_TIMEOUTS} must not replace the worker"
+            );
+        }
+
+        let _ = pool.send(ssg_request_for_path("/wedged")).await;
+        assert!(
+            !Arc::ptr_eq(&pool.workers.read().unwrap()[0], &worker),
+            "a worker that missed {MAX_CONSECUTIVE_WORKER_TIMEOUTS} consecutive deadlines must be replaced"
+        );
+
+        pool.shutdown().await;
+    }
+
+    /// A worker that answers between timeouts is slow, not wedged, so the
+    /// consecutive count must start again rather than accumulate over a long
+    /// session until an unrelated request happens to be the one that trips it.
+    #[tokio::test]
+    async fn an_answer_resets_the_consecutive_timeout_count() {
+        let temp = tempfile::tempdir().unwrap();
+        let worker_script = temp.path().join("worker.mjs");
+        write_slow_and_fast_worker_script(&worker_script, 0);
+
+        let worker = Arc::new(
+            Worker::spawn(&worker_script, &BTreeMap::new(), JavaScriptRuntime::Node)
+                .await
+                .unwrap(),
+        );
+        let pool = pool_over(
+            vec![Arc::clone(&worker)],
+            worker_script,
+            std::time::Duration::from_millis(300),
+            None,
+        );
+
+        for _ in 0..(MAX_CONSECUTIVE_WORKER_TIMEOUTS * 3) {
+            let _ = pool.send(ssg_request_for_path("/slow")).await;
+            pool.send(ssg_request_for_path("/fast"))
+                .await
+                .expect("the worker is answering; it must not be replaced");
+            assert!(
+                Arc::ptr_eq(&pool.workers.read().unwrap()[0], &worker),
+                "an answered request must clear the worker's timeout streak"
+            );
+        }
+
+        pool.shutdown().await;
     }
 
     #[tokio::test]
@@ -2408,6 +3319,7 @@ mod tests {
             Arc::new(PendingResponseSet::default()),
             std::time::Duration::from_secs(1),
             Arc::new(OnceLock::new()),
+            None,
         ));
         let bytes = axum::body::to_bytes(body, 1024).await.unwrap();
 
@@ -2460,6 +3372,7 @@ mod tests {
             Arc::clone(&pending),
             std::time::Duration::from_secs(1),
             Arc::new(OnceLock::new()),
+            None,
         ));
         let error = axum::body::to_bytes(body, 1024).await.unwrap_err();
         assert!(error.to_string().contains("Unexpected worker API stream"));
@@ -2499,6 +3412,7 @@ mod tests {
             Arc::new(PendingResponseSet::default()),
             std::time::Duration::from_secs(1),
             Arc::new(OnceLock::new()),
+            None,
         ));
         let error = axum::body::to_bytes(body, 1024).await.unwrap_err();
 
@@ -2526,6 +3440,7 @@ mod tests {
             Arc::new(PendingResponseSet::default()),
             std::time::Duration::from_secs(1),
             Arc::new(OnceLock::new()),
+            None,
         ));
         let error = axum::body::to_bytes(body, 1024).await.unwrap_err();
 
@@ -2544,6 +3459,7 @@ mod tests {
             Arc::new(PendingResponseSet::default()),
             std::time::Duration::from_millis(20),
             Arc::new(OnceLock::new()),
+            None,
         ));
         let error = axum::body::to_bytes(body, 1024).await.unwrap_err();
 
@@ -3283,5 +4199,295 @@ process.stdin.resume()
             .await
             .unwrap_or_else(|_| panic!("frame {frame:?} left the worker undrainable"));
         }
+    }
+
+    /// Register one streamed request on a worker the way `open_response` does,
+    /// and hand back the body the host would serve plus the sender the stdout
+    /// reader would write frames to.
+    async fn streamed_body(
+        worker: &Arc<Worker>,
+        id: &str,
+        idle_timeout: std::time::Duration,
+    ) -> (Body, mpsc::Sender<WorkerResponse>) {
+        let (sender, receiver) = mpsc::channel(MAX_PENDING_RESPONSE_FRAMES);
+        let streaming = Arc::new(AtomicBool::new(true));
+        worker
+            .pending
+            .insert(
+                id.to_string(),
+                PendingResponse {
+                    sender: sender.clone(),
+                    streaming: Arc::clone(&streaming),
+                },
+            )
+            .await;
+        let body = Body::from_stream(WorkerBodyStream::new(
+            ResponseChannel {
+                id: id.to_string(),
+                receiver,
+                streaming,
+            },
+            Arc::clone(&worker.pending),
+            idle_timeout,
+            Arc::new(OnceLock::new()),
+            worker.cancel_handle(),
+        ));
+        (body, sender)
+    }
+
+    fn stream_chunk(id: &str) -> WorkerResponse {
+        WorkerResponse {
+            id: id.to_string(),
+            ok: true,
+            frame: Some("api-chunk".to_string()),
+            body_base64: Some("AA==".to_string()),
+            ..WorkerResponse::default()
+        }
+    }
+
+    fn parse_frame(line: &str) -> serde_json::Value {
+        serde_json::from_str(line.trim()).expect("worker frames are JSON")
+    }
+
+    /// A reader that walked away has to reach the worker, and until the worker
+    /// says the request is over it is still work in flight.
+    ///
+    /// Dropping the body used to remove the host's pending entry and do nothing
+    /// else. The worker's stream loop is bounded only by *idle* time between
+    /// chunks, so an SSE route kept producing forever — and because
+    /// `in_flight` is that same map's length, `select_worker` saw the busiest
+    /// process in the pool as the idlest and routed more work onto it.
+    #[tokio::test]
+    async fn an_abandoned_stream_is_cancelled_and_stays_in_flight_until_the_worker_ends_it() {
+        let (stdin_tx, mut stdin_rx) = mpsc::channel::<String>(8);
+        let worker = stub_worker(Some(stdin_tx));
+        let (body, sender) =
+            streamed_body(&worker, "stream", std::time::Duration::from_secs(30)).await;
+
+        // A worker mid-produce: a chunk is already queued and unread, which is
+        // exactly the state a disconnect leaves an SSE response in.
+        sender.send(stream_chunk("stream")).await.unwrap();
+        drop(body);
+
+        let line = tokio::time::timeout(std::time::Duration::from_secs(2), stdin_rx.recv())
+            .await
+            .expect("the drop must queue a cancel without waiting on the worker")
+            .expect("the cancel reaches the worker's stdin");
+        let cancel = parse_frame(&line);
+        assert_eq!(cancel["type"], "cancel");
+        assert_eq!(cancel["id"], "stream");
+
+        assert_eq!(
+            worker.in_flight(),
+            1,
+            "an abandoned stream is still work until the worker ends it"
+        );
+
+        // The stdout reader's terminal frame is what releases it.
+        let pending = worker
+            .pending
+            .response("stream", true)
+            .await
+            .expect("the entry survives the drop");
+        drop(pending);
+        assert_eq!(worker.in_flight(), 0);
+    }
+
+    /// The retained entry is bounded: a worker that does not understand
+    /// `cancel` — an older `packages/ruvyxa` beside a newer CLI — must not be
+    /// able to strand one, because `wait_until_idle` would then sit out the full
+    /// `WORKER_DRAIN_TIMEOUT` and `select_worker` would avoid the process for
+    /// the life of the server.
+    #[tokio::test]
+    async fn a_cancelled_stream_the_worker_never_ends_is_released_after_its_idle_budget() {
+        let (stdin_tx, _stdin_rx) = mpsc::channel::<String>(8);
+        let worker = stub_worker(Some(stdin_tx));
+        // `_sender` is held: the channel staying open is what makes this the
+        // silent-worker case rather than the closed-channel one.
+        let (body, _sender) =
+            streamed_body(&worker, "stream", std::time::Duration::from_millis(50)).await;
+        drop(body);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            worker.pending.wait_until_idle(),
+        )
+        .await
+        .expect("a silent worker must not strand the cancelled entry");
+    }
+
+    /// A host deadline that expires leaves the worker rendering a response
+    /// nothing will read. Withdrawing it is what stops that work.
+    #[tokio::test]
+    async fn a_timed_out_request_is_withdrawn_from_the_worker() {
+        let (stdin_tx, mut stdin_rx) = mpsc::channel::<String>(8);
+        let worker = stub_worker(Some(stdin_tx));
+        let request = ssg_request(false);
+
+        let failure = worker
+            .send(&request, std::time::Duration::from_millis(50))
+            .await
+            .expect_err("a worker that never answers times out");
+        assert!(matches!(failure, WorkerSendFailure::Timeout { .. }));
+
+        let queued = stdin_rx.recv().await.expect("the request reaches stdin");
+        assert_eq!(request_id_of(&queued), request.id());
+        let cancel = parse_frame(&stdin_rx.recv().await.expect("the cancel follows it"));
+        assert_eq!(cancel["type"], "cancel");
+        assert_eq!(cancel["id"], request.id());
+    }
+
+    /// The other way a host abandons a request: the task awaiting it is dropped
+    /// because the client disconnected, long before any deadline.
+    #[tokio::test]
+    async fn abandoning_a_request_mid_flight_withdraws_it_from_the_worker() {
+        let (stdin_tx, mut stdin_rx) = mpsc::channel::<String>(8);
+        let worker = stub_worker(Some(stdin_tx));
+        let request = ssg_request(false);
+
+        let abandoned = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            worker.send(&request, std::time::Duration::from_secs(30)),
+        )
+        .await;
+        assert!(abandoned.is_err(), "the send future must still be waiting");
+
+        let queued = stdin_rx.recv().await.expect("the request reaches stdin");
+        assert_eq!(request_id_of(&queued), request.id());
+        let cancel = parse_frame(&stdin_rx.recv().await.expect("dropping it cancels it"));
+        assert_eq!(cancel["type"], "cancel");
+        assert_eq!(cancel["id"], request.id());
+    }
+
+    /// A worker script whose API responses stream until they are cancelled.
+    ///
+    /// The shape of the finding: chunks arrive faster than any idle timeout, so
+    /// nothing but an explicit `cancel` can end the response. It reads the frame
+    /// the way `packages/ruvyxa/runtime/worker-pool.mjs` does — by `type` and
+    /// the `id` of the request being withdrawn — so this test fails if the two
+    /// sides ever stop agreeing on that shape.
+    fn write_streaming_worker_script(path: &Path) {
+        std::fs::write(
+            path,
+            "import { createInterface } from 'node:readline';\n\
+             const producing = new Map();\n\
+             const write = (frame) => process.stdout.write(JSON.stringify(frame) + '\\n');\n\
+             const rl = createInterface({ input: process.stdin });\n\
+             rl.on('line', (line) => {\n\
+             const request = JSON.parse(line);\n\
+             if (request.type === 'cancel') {\n\
+             const timer = producing.get(request.id);\n\
+             if (!timer) return;\n\
+             clearInterval(timer);\n\
+             producing.delete(request.id);\n\
+             write({ id: request.id, frame: 'api-error', ok: false, code: 'RUV1704', message: 'cancelled' });\n\
+             return;\n\
+             }\n\
+             write({ id: request.id, frame: 'api-start', ok: true, status: 200, headers: {} });\n\
+             producing.set(request.id, setInterval(() => write({ id: request.id, frame: 'api-chunk', ok: true, bodyBase64: 'AA==' }), 20));\n\
+             });\n\
+             rl.on('close', () => process.exit(0));\n",
+        )
+        .unwrap();
+    }
+
+    fn api_stream_request() -> WorkerRequest {
+        WorkerRequest::Api {
+            id: next_request_id(),
+            project_root: "/project".to_string(),
+            route_file: "/project/app/api/events/route.ts".to_string(),
+            method: "GET".to_string(),
+            request_path: "/api/events".to_string(),
+            headers: BTreeMap::new(),
+            header_pairs: Vec::new(),
+            body: None,
+            body_base64: None,
+            stream_response: true,
+            params: BTreeMap::new(),
+            known_inputs_version: None,
+        }
+    }
+
+    /// The whole path over a real pipe: a reader disconnects, a Node worker
+    /// receives the withdrawal, and the response ends.
+    ///
+    /// The unit tests above stop at the host's stdin queue, which cannot show
+    /// that the frame the host writes is the frame the worker reads. This runs
+    /// against a script that only ever stops when it is told to, so the
+    /// assertion below can only pass if the cancel crossed the pipe and was
+    /// understood.
+    #[tokio::test]
+    async fn a_dropped_stream_body_reaches_a_real_worker_as_a_cancel() {
+        let temp = tempfile::tempdir().unwrap();
+        let worker_script = temp.path().join("worker.mjs");
+        write_streaming_worker_script(&worker_script);
+        let worker = Arc::new(
+            Worker::spawn(&worker_script, &BTreeMap::new(), JavaScriptRuntime::Node)
+                .await
+                .unwrap(),
+        );
+
+        let request = api_stream_request();
+        let started = worker
+            // Generous, so the drain's own grace cannot be what ends this test:
+            // only the worker's terminal frame can.
+            .start_api_response(&request, std::time::Duration::from_secs(30))
+            .await
+            .expect("the worker starts streaming");
+        let body = started.body.expect("a streamed response carries a body");
+        assert_eq!(worker.in_flight(), 1);
+
+        drop(body);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            worker.pending.wait_until_idle(),
+        )
+        .await
+        .expect("the cancelled stream never reached a terminal frame");
+        worker.shutdown().await;
+    }
+
+    /// An answered request is not cancelled: the frame the guard would send
+    /// would name an id the worker has already forgotten, and a worker that
+    /// reused ids would abort the wrong work.
+    #[tokio::test]
+    async fn an_answered_request_is_never_cancelled() {
+        let (stdin_tx, mut stdin_rx) = mpsc::channel::<String>(4);
+        let worker = stub_worker(Some(stdin_tx));
+        let request = ssg_request(false);
+
+        let responder = {
+            let worker = Arc::clone(&worker);
+            tokio::spawn(async move {
+                let line = stdin_rx.recv().await.expect("the request reaches stdin");
+                let id = request_id_of(&line);
+                let pending = worker
+                    .pending
+                    .response(&id, true)
+                    .await
+                    .expect("the request registered a pending response");
+                let _ = pending
+                    .sender
+                    .send(WorkerResponse {
+                        id,
+                        ok: true,
+                        ..WorkerResponse::default()
+                    })
+                    .await;
+                stdin_rx
+            })
+        };
+
+        worker
+            .send(&request, std::time::Duration::from_secs(5))
+            .await
+            .expect("the worker answered");
+        let mut stdin_rx = responder.await.unwrap();
+
+        assert!(
+            stdin_rx.try_recv().is_err(),
+            "an answered request must queue nothing further"
+        );
     }
 }

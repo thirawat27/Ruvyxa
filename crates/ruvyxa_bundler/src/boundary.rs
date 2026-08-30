@@ -9,6 +9,7 @@
 //! - **RUV1008** – Private `process.env.*` variable read in a client bundle.
 //! - **RUV1010** – File inside `server/` directory reachable by a client graph.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use ruvyxa_diagnostics::Diagnostic;
@@ -103,7 +104,21 @@ fn check_client_module(
     }
 
     // RUV1008 – private env var reads (non-fatal: recorded as diagnostic)
+    //
+    // One diagnostic per *name*, not per read. `private_env_reads` reports
+    // occurrences in source order and unfiltered, because that is the shared
+    // extraction contract the JavaScript half is held to; the conclusion drawn
+    // from it here is about the variable, and repeating it once per mention
+    // made the report longest exactly where the reader most needs to see the
+    // set of leaked names. First-seen order is kept rather than sorting, so the
+    // list still reads down the file — and it is deterministic either way,
+    // which matters because these render into strings the shared-chunk artifact
+    // cache stores.
+    let mut already_reported = BTreeSet::new();
     for var_name in private_env_reads(&module.ast) {
+        if !already_reported.insert(var_name.clone()) {
+            continue;
+        }
         out.push(
             Diagnostic::new(
                 "RUV1008",
@@ -213,13 +228,7 @@ mod tests {
     /// the Node half. A change made in one language and not the other fails here.
     #[test]
     fn matches_the_shared_cross_language_env_policy_table() {
-        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/env-policy-conformance.json");
-        let fixture: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&fixture_path)
-                .unwrap_or_else(|error| panic!("read {}: {error}", fixture_path.display())),
-        )
-        .expect("conformance fixture is valid JSON");
+        let fixture = env_policy_fixture();
 
         let cases = fixture["cases"].as_array().expect("fixture declares cases");
         assert!(!cases.is_empty(), "the fixture must carry cases");
@@ -231,6 +240,74 @@ mod tests {
                 env_read_is_private(name),
                 expected,
                 "process.env.{name} — {why}"
+            );
+        }
+    }
+
+    fn env_policy_fixture() -> serde_json::Value {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/env-policy-conformance.json");
+        serde_json::from_str(
+            &std::fs::read_to_string(&fixture_path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", fixture_path.display())),
+        )
+        .expect("conformance fixture is valid JSON")
+    }
+
+    /// The other half of the same policy: which name a read *is*.
+    ///
+    /// Classifying correctly is worth nothing while the two graphs extract
+    /// different names from the same source, and they did — `env_read_name`
+    /// reads the name with `skip_identifier` while `parsePrivateEnvName` in
+    /// `packages/ruvyxa/runtime/compiler.mjs` matched upper-case only, so
+    /// `process.env.databaseUrl` was invisible to `ruvyxa dev` and refused by
+    /// `ruvyxa build`. `tests/packages/ruvyxa/env-policy.test.mjs` replays the
+    /// same table through the Node half.
+    #[test]
+    fn matches_the_shared_cross_language_env_extraction_table() {
+        let fixture = env_policy_fixture();
+        let cases = fixture["extraction"]["cases"]
+            .as_array()
+            .expect("fixture declares extraction cases");
+        assert!(!cases.is_empty(), "the fixture must carry extraction cases");
+        for case in cases {
+            let source = case["source"].as_str().expect("case source");
+            let expected: Vec<&str> = case["privateNames"]
+                .as_array()
+                .expect("case names")
+                .iter()
+                .map(|name| name.as_str().expect("case name"))
+                .collect();
+            let why = case["why"].as_str().unwrap_or("");
+            assert_eq!(
+                find_private_env_reads(source),
+                expected,
+                "{source:?} — {why}"
+            );
+        }
+    }
+
+    /// Every name the classification table judges must be a name the extractor
+    /// can produce, or the row tests nothing end to end. Two of them —
+    /// `node_env` and `ruvyxa_public_key` — were unreachable from any source
+    /// through the Node graph, which is how the extraction divergence stayed
+    /// invisible while the classification table passed on both sides.
+    #[test]
+    fn every_classified_name_is_a_name_the_scanner_can_extract() {
+        let fixture = env_policy_fixture();
+        for case in fixture["cases"].as_array().expect("fixture declares cases") {
+            let name = case["name"].as_str().expect("case name");
+            // The empty name is the one deliberate exception: neither graph
+            // reports a zero-length name, so that row exists only as a unit of
+            // the predicate.
+            if name.is_empty() || !case["private"].as_bool().expect("case verdict") {
+                continue;
+            }
+            let source = format!("export const value = process.env[{name:?}]\n");
+            assert_eq!(
+                find_private_env_reads(&source),
+                vec![name.to_owned()],
+                "no source can spell {name}, so the classification case is untested end to end"
             );
         }
     }
@@ -293,6 +370,54 @@ mod tests {
         "#;
 
         assert_eq!(find_private_env_reads(source), vec!["DATABASE_URL"]);
+    }
+
+    /// RUV1008 answers *which* private names a module leaks, not how many times
+    /// each one is written.
+    ///
+    /// One name is one conclusion, so a module reading `DATABASE_URL` in three
+    /// places produced three byte-identical diagnostics — and the noise scales
+    /// with how badly the module violates the rule, so the output is least
+    /// readable exactly where the reader most needs the *set* of leaked names.
+    /// These are carried as rendered strings through the shared-chunk artifact
+    /// cache, so the duplication was stored as well as printed.
+    ///
+    /// First-seen order, not sorted: the diagnostic list is what the reader
+    /// walks against the file, and `private_env_reads` reports in source order.
+    #[test]
+    fn a_private_name_read_more_than_once_is_reported_once() {
+        let source = concat!(
+            "const a = process.env.DATABASE_URL;\n",
+            "const b = process.env.API_KEY;\n",
+            "const c = process.env.DATABASE_URL;\n",
+            "const d = process.env['API_KEY'];\n",
+            "const e = process.env.DATABASE_URL;\n",
+        );
+        let module = crate::compiler::CompiledModule::new(
+            Path::new("/project/app/page.js").to_path_buf(),
+            source.to_string(),
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+            false,
+            false,
+        );
+
+        let mut out = Vec::new();
+        check_client_module(&module, Path::new("/project"), &mut out)
+            .expect("a private env read is non-fatal");
+
+        let reported: Vec<&str> = out
+            .iter()
+            .inspect(|diagnostic| assert_eq!(diagnostic.code, "RUV1008"))
+            .map(|diagnostic| {
+                if diagnostic.explanation.contains("DATABASE_URL") {
+                    "DATABASE_URL"
+                } else {
+                    "API_KEY"
+                }
+            })
+            .collect();
+        assert_eq!(reported, ["DATABASE_URL", "API_KEY"]);
     }
 
     #[test]

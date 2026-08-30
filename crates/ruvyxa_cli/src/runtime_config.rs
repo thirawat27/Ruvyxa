@@ -165,12 +165,35 @@ pub(crate) fn dev_server_config(
     server.route_manifest_observer = Some(discovery_observer(
         discovery_dir,
         config.site.clone(),
-        resolve_site_url(config.site.url.as_deref(), |name| std::env::var(name).ok())
-            .ok()
-            .flatten(),
+        dev_site_url(config.site.url.as_deref()),
         config.typed_routes().then(|| args.root.clone()),
     ));
     Ok(server)
+}
+
+/// The sitemap origin for `ruvyxa dev`, with a malformed one reported.
+///
+/// `resolve_site_url` takes real trouble to say which of five sources supplied
+/// a bad value, and `build` propagates that. Development wrote `.ok().flatten()`
+/// instead, which collapses "the configured value is malformed" and "there is
+/// no value" into the same `None`. Downstream, `write_discovery_files` takes
+/// the `None` branch and sets `sitemap_needs_site_url`, which the dev observer
+/// never reads -- so a project debugging its sitemap under `ruvyxa dev`, the
+/// exact workflow the discovery observer was added for, got a 404 and no reason
+/// for it, and went looking at its route table.
+///
+/// Reported and not fatal, deliberately: whether `ruvyxa dev` should refuse to
+/// start over a sitemap origin is a separate decision, and this only restores
+/// the message. The two other failures this observer can hit are printed the
+/// same way.
+fn dev_site_url(configured: Option<&str>) -> Option<String> {
+    match resolve_site_url(configured, |name| std::env::var(name).ok()) {
+        Ok(url) => url,
+        Err(error) => {
+            eprintln!("{}", warn_text(format!("site.url ignored: {error}")));
+            None
+        }
+    }
 }
 
 /// Regenerate what a route set implies, whenever the dev server re-discovers it.
@@ -202,7 +225,11 @@ fn discovery_observer(
             .filter(|route| route.kind == ruvyxa_graph::RouteKind::Page)
             .map(|route| route.path.clone())
             .collect();
-        if let Err(error) = crate::site_discovery::write_discovery_files(
+        // `regenerate_*`, not `write_*`: this directory persists across route
+        // changes and restarts, and the write-once rule that protects a
+        // project's own `public/sitemap.xml` during a build would freeze the
+        // dev server's copy at whatever the route set was the first time it ran.
+        if let Err(error) = crate::site_discovery::regenerate_discovery_files(
             manifest,
             &paths,
             &discovery_dir,
@@ -384,7 +411,7 @@ pub(crate) fn load_project_config(root: &Path) -> anyhow::Result<ProjectConfig> 
         .unwrap_or_else(default_javascript_runtime);
     let Some(renderer) = find_runtime_script(root, "config-renderer.mjs") else {
         let mut config = ProjectConfig {
-            build_dependency_hash: build_dependency_hash(root, "no-config"),
+            build_dependency_hash: build_dependency_hash(root, "no-config")?,
             ..ProjectConfig::default()
         };
         config.javascript_runtime_override = Some(bootstrap_runtime);
@@ -432,7 +459,7 @@ pub(crate) fn load_project_config(root: &Path) -> anyhow::Result<ProjectConfig> 
         }
     });
     config.build_dependency_hash =
-        build_dependency_hash(root, &required_config_dependency_hash(&result)?);
+        build_dependency_hash(root, &required_config_dependency_hash(&result)?)?;
     config.validate_paths()?;
     Ok(config)
 }
@@ -929,14 +956,29 @@ pub(crate) fn default_javascript_runtime() -> JavaScriptRuntime {
 /// existed, and the two are now consistent rather than one covering what the
 /// other missed.
 ///
-/// A project with no readable `.env` folds in an empty map and lands on the
-/// hash it had before this existed.
-fn build_dependency_hash(root: &Path, config_hash: &str) -> String {
-    let environment = ruvyxa_dev_server::project_env(root).unwrap_or_default();
-    crate::artifact_cache::content_hash(&format!(
+/// A project with *no* `.env` folds in an empty map and lands on the hash it
+/// had before this existed. A project whose `.env` cannot be read does not:
+/// that used to map onto the identical hash, so every cache above -- compiled
+/// modules and their namespace, the artifact graph, the client route artifacts,
+/// the shared chunk artifacts -- could not tell "there is no environment" from
+/// "I could not open the environment", while the paragraphs above explain at
+/// length why the environment has to be part of the key.
+///
+/// It is worse than a cache collision on its own. `project_env` fails only when
+/// a `.env` exists and cannot be read; absence is not an error. So the build
+/// that swallowed it went on to compile without values the project had asked
+/// for, wrote `RUVYXA_PUBLIC_*` substitutions that were not there, and cached
+/// the result. Failing is the honest answer: the environment was declared, and
+/// it could not be read.
+///
+/// The sibling `adapter_runner_env` twenty lines up propagates the same call
+/// for the same reason.
+fn build_dependency_hash(root: &Path, config_hash: &str) -> anyhow::Result<String> {
+    let environment = ruvyxa_dev_server::project_env(root)?;
+    Ok(crate::artifact_cache::content_hash(&format!(
         "{config_hash}\0{}",
         serde_json::to_string(&environment).unwrap_or_default()
-    ))
+    )))
 }
 
 pub(crate) fn required_config_dependency_hash(

@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 axum.workspace = true
+blake3.workspace = true
 ruvyxa_diagnostics = { path = "../ruvyxa_diagnostics" }
 serde.workspace = true
 serde_json.workspace = true

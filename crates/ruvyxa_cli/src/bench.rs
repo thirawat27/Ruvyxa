@@ -283,7 +283,7 @@ pub(crate) async fn run_project_benchmark(args: &BenchArgs) -> anyhow::Result<()
     let saving = cache_saving(&results);
 
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&results)?);
+        write_machine_report(&serde_json::to_string_pretty(&results)?)?;
     } else {
         print_benchmark_table(samples, &results, &root, &app_dir, started.elapsed());
         print_cache_saving(saving);
@@ -865,11 +865,29 @@ fn apply_leaf_edit(path: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("failed to apply isolated edit to {}", path.display()))
 }
 
+/// Read one build's cache counters out of its client build report.
+///
+/// The report is `client-report.json` at the build root — it used to be
+/// `client/manifest.json`, and this function is the third reader the move had
+/// to reach. It missed this one, and the shape of the miss is the reason this
+/// no longer treats a missing report as an observation: the old code returned
+/// `BuildCacheObservation::default()`, so the benchmark went on to publish
+/// "zero cache hits" for every warm scenario. A benchmark that cannot find its
+/// telemetry and answers zero is worse than one that stops, because the zero
+/// is indistinguishable from a real measurement of a cache that never hit.
+///
+/// Every caller reads this straight after a completed `benchmark_build`, which
+/// never runs `--server-only`, so the report is always written. A file that is
+/// not there means the path is wrong, not that the cache was cold — the one
+/// legitimate "nothing to observe" scenario (`first-route`, which renders
+/// rather than builds) pushes `BuildCacheObservation::default()` itself.
 fn read_cache_observation(out_dir: &Path) -> anyhow::Result<BuildCacheObservation> {
-    let path = out_dir.join("client").join("manifest.json");
-    if !path.is_file() {
-        return Ok(BuildCacheObservation::default());
-    }
+    let path = client_build_report_path(out_dir);
+    ensure!(
+        path.is_file(),
+        "benchmark build emitted no client report at {}; refusing to report zero cache hits for a measurement that was never taken",
+        path.display()
+    );
     let value: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)
         .with_context(|| format!("failed to read cache telemetry from {}", path.display()))?;
     let artifact_hits = value
@@ -913,11 +931,17 @@ fn semantic_build_artifacts(out_dir: &Path) -> anyhow::Result<BTreeMap<String, S
             continue;
         }
         let source = fs::read(entry.path())?;
-        let normalized_source = match normalized.as_str() {
-            "assets/.ruvyxa-images.json" | "client/manifest.json" | "prerender/manifest.json" => {
-                normalize_telemetry_json(&source)?
-            }
-            _ => source,
+        // The client build report is telemetry-bearing and no longer lives in
+        // `client/`; comparing it raw would report a cold/warm diff on the
+        // cache counters it exists to record.
+        let normalized_source = if normalized == CLIENT_BUILD_REPORT_FILE
+            || matches!(
+                normalized.as_str(),
+                "assets/.ruvyxa-images.json" | "prerender/manifest.json"
+            ) {
+            normalize_telemetry_json(&source)?
+        } else {
+            source
         };
         artifacts.insert(
             normalized,
@@ -1027,7 +1051,7 @@ mod tests {
         fs::create_dir_all(&client).unwrap();
         fs::write(temp.path().join("manifest.json"), r#"{"routes":[]}"#).unwrap();
         fs::write(
-            client.join("manifest.json"),
+            client_build_report_path(temp.path()),
             r#"{"routes":[{"file":"a.js","cacheHits":0}],"durationMs":10,"cache":{"directory":"one"}}"#,
         )
         .unwrap();
@@ -1035,7 +1059,7 @@ mod tests {
         let cold = semantic_build_artifacts(temp.path()).unwrap();
 
         fs::write(
-            client.join("manifest.json"),
+            client_build_report_path(temp.path()),
             r#"{"routes":[{"file":"a.js","cacheHits":9}],"durationMs":1,"cache":{"directory":"two"}}"#,
         )
         .unwrap();
@@ -1043,6 +1067,47 @@ mod tests {
 
         fs::write(client.join("a.js"), "export default 2").unwrap();
         assert_ne!(cold, semantic_build_artifacts(temp.path()).unwrap());
+    }
+
+    /// The counters live in the client build report, which moved out of the
+    /// published `client/` directory to the build root. A benchmark reading the
+    /// old path found nothing and reported a cache that never hit.
+    #[test]
+    fn cache_observation_reads_the_client_report_at_the_build_root() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("client")).unwrap();
+        fs::write(
+            client_build_report_path(temp.path()),
+            r#"{"cacheHits":7,"cache":{"graphHits":4},"routes":[{"artifactCacheHit":true},{"artifactCacheHit":false},{"artifactCacheHit":true}]}"#,
+        )
+        .unwrap();
+
+        let observation = read_cache_observation(temp.path()).unwrap();
+        assert_eq!(observation.compile_hits, 7);
+        assert_eq!(observation.graph_hits, 4);
+        assert_eq!(observation.artifact_hits, 2);
+    }
+
+    /// "The report is not there" and "the report says zero" are different
+    /// answers, and only one of them is a real measurement. Reporting the
+    /// missing file as a zeroed observation is how the move to
+    /// `client-report.json` stayed invisible: the number still looked real.
+    #[test]
+    fn missing_client_report_fails_instead_of_reporting_zero_cache_hits() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("client")).unwrap();
+        // The published directory the report used to live in is not a fallback.
+        fs::write(
+            temp.path().join("client").join("manifest.json"),
+            r#"{"cacheHits":7}"#,
+        )
+        .unwrap();
+
+        let error = read_cache_observation(temp.path()).unwrap_err().to_string();
+        assert!(
+            error.contains(CLIENT_BUILD_REPORT_FILE),
+            "error should name the report it could not find: {error}"
+        );
     }
 
     #[test]

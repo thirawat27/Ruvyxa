@@ -22,7 +22,7 @@
 /** Route parameters extracted from a matched URL. */
 export type RouteParams = Record<string, string | string[] | undefined>
 
-/** A route entry as published in `.ruvyxa/client/manifest.json`. */
+/** A route entry as published in `.ruvyxa/client/route-manifest.json`. */
 export interface RouteManifestEntry {
   /** Route pattern, e.g. `/blog/[slug]`. */
   path: string
@@ -77,6 +77,22 @@ function escapeRegex(value: string): string {
  *
  * An optional catch-all also has to match the parent path itself (`/shop` for
  * `/shop/[[...slug]]`), which is why its slash is inside the group.
+ *
+ * **`\w` here is a cross-language contract, not an implementation detail.**
+ * Without the `u` flag it is exactly `[A-Za-z0-9_]`, and a bracketed segment
+ * whose name falls outside it is not rejected — it falls through to the literal
+ * branch below and becomes an ordinary URL component. Route discovery in
+ * `crates/ruvyxa_graph/src/lib.rs` (`validate_dynamic_name`) used to accept a
+ * wider set, so `app/blog/[post-id]/page.tsx` was written into the manifest as
+ * a dynamic route and compiled here to the literal path `/blog/[post-id]`: a
+ * route that passed `ruvyxa check`, appeared in the route table, and matched no
+ * request on any host. Discovery was narrowed to this character set and now
+ * refuses the folder with `RUV1002`.
+ *
+ * Widening any of the three patterns below without widening
+ * `validate_dynamic_name` in the same change turns that silent 404 into a host
+ * divergence, which is worse. `tests/fixtures/route-pattern-conformance.json`
+ * is replayed by both languages and fails the one that moved.
  */
 export function compilePattern(routePath: string): CompiledPattern {
   if (routePath === '/') {
@@ -125,6 +141,11 @@ export function compilePattern(routePath: string): CompiledPattern {
  * Per-segment specificity: static (0) < dynamic (1) < catch-all (2) <
  * optional catch-all (3). Lower sorts first, so `/blog/new` wins over
  * `/blog/[slug]`.
+ *
+ * The three `\w` tests must stay identical to `compilePattern`'s: a segment
+ * scored 0 here is indexed as an exact static path by
+ * `createCanonicalRouteMatcher`, so a disagreement between the two would put a
+ * parameterized route in the static table under its own literal spelling.
  */
 export function routeSpecificity(routePath: string): number[] {
   if (routePath === '/') return [0]

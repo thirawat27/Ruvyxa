@@ -785,6 +785,16 @@ export function originGuard(options: OriginGuardOptions = {}): RuvyxaPlugin {
 
 // ─── healthCheck ─────────────────────────────────────────────────────────────
 
+/** One failed health probe, handed to the plugin's log sink. */
+interface HealthCheckFailure {
+  /** The path the probe answered on. */
+  path: string
+  /** The thrown value's message, already coerced to a string. */
+  message: string
+  /** The thrown value itself, for a sink that wants the stack or the cause. */
+  error: unknown
+}
+
 export interface HealthCheckOptions {
   /** Exact path the endpoint answers on. @default "/health" */
   path?: string
@@ -795,6 +805,27 @@ export interface HealthCheckOptions {
   check?: () => unknown | Promise<unknown>
   /** Status used when `check` throws. @default 503 */
   failureStatus?: number
+  /**
+   * Include the thrown message in the response body as `error`.
+   *
+   * **Do not enable this on an internet-reachable path.** A health endpoint is
+   * by definition answered without credentials — a platform probe calls it — so
+   * everything it says is public, and a driver's message is internal topology:
+   * `pg` reports `connect ECONNREFUSED <host>:<port>`, Prisma reports the host,
+   * port, and database name. Enabling it hands an anonymous caller a map of the
+   * internals at exactly the moment the system is under stress.
+   *
+   * Only reasonable when the endpoint is reachable solely from inside the
+   * cluster — a Kubernetes readiness probe on the pod network, or a path an
+   * upstream proxy refuses to forward. @default false
+   */
+  exposeErrors?: boolean
+  /**
+   * Where the real failure goes. Defaults to
+   * `console.error('[ruvyxa:health-check] <path> check failed: <message>')`,
+   * which reaches the process log every host already collects.
+   */
+  logger?: (failure: HealthCheckFailure) => void
 }
 
 /**
@@ -803,6 +834,10 @@ export interface HealthCheckOptions {
  * A platform health probe should not depend on the render pipeline: a check
  * that renders a page reports the renderer, not the process. This answers from
  * the plugin host directly, so it stays truthful while rendering is degraded.
+ *
+ * A thrown `check` answers `failureStatus` with a fixed `{ "status": "error" }`
+ * body; the message itself goes to `logger`, never to the caller, unless
+ * `exposeErrors` is explicitly set. See that option before setting it.
  */
 export function healthCheck(options: HealthCheckOptions = {}): RuvyxaPlugin {
   const routePath = normalizePublicPath(options.path ?? '/health', 'healthCheck')
@@ -813,6 +848,10 @@ export function healthCheck(options: HealthCheckOptions = {}): RuvyxaPlugin {
   if (!Number.isInteger(failureStatus) || failureStatus < 400 || failureStatus > 599) {
     throw new TypeError('healthCheck: failureStatus must be a 4xx or 5xx integer')
   }
+  if (options.logger !== undefined && typeof options.logger !== 'function') {
+    throw new TypeError('healthCheck: logger must be a function')
+  }
+  const exposeErrors = options.exposeErrors === true
 
   return definePlugin({
     name: 'ruvyxa:health-check',
@@ -825,15 +864,35 @@ export function healthCheck(options: HealthCheckOptions = {}): RuvyxaPlugin {
             const result = options.check ? await options.check() : 'ok'
             return healthResponse(200, result)
           } catch (error) {
-            return healthResponse(failureStatus, {
-              status: 'error',
-              error: error instanceof Error ? error.message : String(error),
-            })
+            const message = error instanceof Error ? error.message : String(error)
+            emitHealthFailure(options.logger, { path: routePath, message, error })
+            return healthResponse(
+              failureStatus,
+              exposeErrors ? { status: 'error', error: message } : { status: 'error' },
+            )
           }
         },
       })
     },
   })
+}
+
+function emitHealthFailure(
+  logger: HealthCheckOptions['logger'],
+  failure: HealthCheckFailure,
+): void {
+  try {
+    if (logger) logger(failure)
+    else console.error(`[ruvyxa:health-check] ${failure.path} check failed: ${failure.message}`)
+  } catch {
+    // A probe that 500s because its own log sink threw is worse than a probe
+    // that reports the dependency it was asked about.
+    try {
+      console.error('[ruvyxa:health-check] log sink failed')
+    } catch {
+      // Console implementations can also be replaced by application code.
+    }
+  }
 }
 
 function healthResponse(status: number, payload: unknown): Response {

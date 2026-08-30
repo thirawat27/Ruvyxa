@@ -49,6 +49,21 @@ pub(crate) fn build_reference_manifest(
         .map(|module| (module.path.clone(), declared_lane(module)))
         .collect::<BTreeMap<_, _>>();
 
+    // The queue below is drained against this index rather than against the
+    // slice. `modules.iter().find(|module| module.path == path)` inside the loop
+    // is an O(n) `PathBuf` comparison per iteration over a queue that approaches
+    // the whole graph, so the walk cost modules² per route — invisible on a
+    // fixture, and the shape that turns a comfortable build into an
+    // unacceptable one as an application grows.
+    //
+    // `or_insert` rather than `insert`, because `find` answered with the *first*
+    // module carrying a path and a last-wins map would silently walk a
+    // different module's dependencies if a path were ever repeated.
+    let mut by_path: BTreeMap<&Path, &CompiledModule> = BTreeMap::new();
+    for module in modules {
+        by_path.entry(module.path.as_path()).or_insert(module);
+    }
+
     // A client boundary owns its shared dependency closure. Explicit server or
     // action modules terminate that closure and are rejected below.
     let mut pending = lanes
@@ -56,7 +71,7 @@ pub(crate) fn build_reference_manifest(
         .filter_map(|(path, lane)| (*lane == ModuleLane::Client).then_some(path.clone()))
         .collect::<VecDeque<_>>();
     while let Some(path) = pending.pop_front() {
-        let Some(module) = modules.iter().find(|module| module.path == path) else {
+        let Some(module) = by_path.get(path.as_path()) else {
             continue;
         };
         for dependency in module.deps.iter() {
@@ -296,6 +311,56 @@ mod tests {
                 .modules
                 .iter()
                 .all(|module| module.lane == ModuleLane::Client)
+        );
+    }
+
+    /// The emitted manifest's bytes, pinned by their own hash.
+    ///
+    /// `artifact_version` is `blake3` over the serialized reference list, so it
+    /// is the whole document in sixteen characters: any change to a lane, an id,
+    /// a module path, or the order of any of them moves it. It is pinned here
+    /// because the closure walk is a performance surface — the queue is drained
+    /// against an index rather than a linear scan — and a refactor there is only
+    /// correct if the bytes downstream of it do not move. `display_module`
+    /// answers `client.ts` for `C:/app/client.ts` on Windows and on Linux
+    /// alike, so the literal is host-independent.
+    ///
+    /// The chain is three levels deep on purpose: a one-hop closure is answered
+    /// by the seed queue alone and never exercises a promoted module being
+    /// pushed back onto it.
+    #[test]
+    fn the_client_closure_manifest_bytes_are_pinned() {
+        let modules = vec![
+            module(
+                "C:/app/client.ts",
+                "'use client'; export {}",
+                vec!["C:/app/first.ts"],
+            ),
+            module(
+                "C:/app/first.ts",
+                "export const value = 1",
+                vec!["C:/app/second.ts"],
+            ),
+            module(
+                "C:/app/second.ts",
+                "export const value = 2",
+                vec!["C:/app/third.ts"],
+            ),
+            module("C:/app/third.ts", "export const value = 3", vec![]),
+        ];
+        let manifest = build_reference_manifest(&modules, Path::new("C:/app")).unwrap();
+        assert!(
+            manifest
+                .modules
+                .iter()
+                .all(|module| module.lane == ModuleLane::Client),
+            "the client boundary owns its whole shared closure: {:?}",
+            manifest.modules
+        );
+        assert_eq!(
+            manifest.artifact_version, "628cac8ffdb4e19e",
+            "the reference manifest's bytes moved: {:?}",
+            manifest.modules
         );
     }
 

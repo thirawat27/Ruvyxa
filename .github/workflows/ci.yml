@@ -135,10 +135,33 @@ jobs:
       # project under it, and checks what the browser would have been told —
       # the watcher, the HMR tracker, the socket, and the client bundler are all
       # covered a unit at a time and the seam between them by nobody.
+      # Built once and named, rather than left to `cargo run`. With the wrapper
+      # in the way the smoke's child is `cargo` and `ruvyxa dev` is *its* child,
+      # so the teardown signalled the wrapper and left a `ruvyxa.exe` bound to
+      # 4402 holding `target\debug\ruvyxa.exe` open and a watcher on
+      # examples/deploy-smoke — which the very next steps of this job then link
+      # against and rebuild. That reads as a flaky runner.
+      - name: Build the CLI the dev server smoke runs
+        run: cargo build -p ruvyxa_cli
       - name: Exercise the dev server
         timeout-minutes: 20
         shell: bash
+        env:
+          RUVYXA_CLI: ${{ github.workspace }}/target/debug/ruvyxa${{ runner.os == 'Windows' && '.exe' || '' }}
         run: node scripts/smoke-dev-server.mjs examples/deploy-smoke 4402
+      # Fails by name here instead of as an "Access is denied" link error three
+      # steps later.
+      - name: Confirm the dev server released its port
+        shell: bash
+        run: |
+          node -e "
+            const server = require('node:net').createServer()
+            server.on('error', (error) => {
+              console.error('port 4402 is still held after the dev server smoke: ' + error.code)
+              process.exit(1)
+            })
+            server.listen(4402, '127.0.0.1', () => server.close())
+          "
       # The scaffold-to-clean walk: `create-ruvyxa`, every CLI command, the
       # build targets, dev/prod parity, the production server, `preview`, the
       # build-time error scenarios, and a rebuild after `clean`. It is the most
@@ -292,3 +315,27 @@ jobs:
           FIXTURE=$(node scripts/edge-fixture.mjs examples/deploy-smoke --out .static --drop api/health --drop cached --drop rsc)
           cargo run -p ruvyxa_cli -- build --root "$FIXTURE" --adapter static
           node scripts/smoke-runtime-adapter.mjs static "$FIXTURE/.ruvyxa/static" 4400 "$FIXTURE/.ruvyxa/static"
+      # Reproducibility: build, wipe, build again, compare every emitted byte.
+      #
+      # Everything else in this repository gates the *ingredients* — the
+      # `localeCompare` ban, the host-locale case-folding ban, explicit
+      # comparators, the shared ordering fixtures. This is the only lane that
+      # checks the property they exist to produce, and it ran in no workflow at
+      # all: `verify:reproducible` was a package script nobody had a reason to
+      # type. A gate that is never executed is indistinguishable from one that
+      # does not exist.
+      #
+      # One leg, and `examples/deploy-smoke` rather than `examples/demo`: it is
+      # two more full builds, and the question — does anything in the build
+      # depend on wall-clock time, iteration order, a random value, an absolute
+      # path, or the host locale — is not platform-specific. It runs last
+      # because it wipes and rewrites `.ruvyxa` for the project it is given.
+      #
+      # Invoked as the script rather than through `pnpm verify:reproducible`,
+      # which is the same command with no arguments: `--root` after a pnpm
+      # shorthand is pnpm's to parse, not the script's.
+      - name: Verify the build is reproducible
+        if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 20
+        shell: bash
+        run: node scripts/verify-reproducible.mjs --root examples/deploy-smoke

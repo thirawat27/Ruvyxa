@@ -329,3 +329,133 @@ fn stripping_ansi_leaves_only_what_the_terminal_shows() {
     // A multi-byte glyph is content, not styling.
     assert_eq!(strip_ansi("\x1b[32m✓\x1b[0m ok"), "✓ ok");
 }
+
+/// A repository file name is not text this crate wrote.
+///
+/// `ruvyxa routes` prints the path of every discovered route and `ruvyxa check`
+/// prints the file behind every diagnostic, so whatever the author of a
+/// repository named a file is handed to a terminal — which is an interpreter.
+/// The vector is a pull request from a fork: a name carrying `ESC [ 2 J`, an
+/// OSC title-set, or a run of newlines and forged glyphs rewrites what a
+/// reviewer sees in the CI log.
+#[test]
+fn a_path_carrying_control_characters_reaches_the_terminal_as_text() {
+    let hostile = std::path::PathBuf::from(
+        "app/\u{1b}[2J\u{1b}]0;owned\u{7}\r\n  \u{2713} 0 problems\u{7f}/page.tsx",
+    );
+
+    let painted = paint_when(true, hostile.display().to_string(), "34");
+    assert_eq!(
+        painted.matches('\u{1b}').count(),
+        2,
+        "the only escapes may be the two the styling itself adds: {painted:?}"
+    );
+    for forbidden in ['\r', '\n', '\u{7}', '\u{7f}'] {
+        assert!(
+            !painted.contains(forbidden),
+            "{forbidden:?} survived into {painted:?}"
+        );
+    }
+    // The name is still recognisably the name: only the control characters go.
+    assert!(painted.contains("app/") && painted.contains("/page.tsx"));
+
+    // Colour off is not a safe case — it is the CI log the vector is aimed at.
+    let plain = paint_when(false, hostile.display().to_string(), "34");
+    assert!(!plain.contains('\u{1b}'), "{plain:?}");
+    assert!(!plain.contains('\n'), "{plain:?}");
+}
+
+/// Decoration writes its own escapes and had to be filtered separately.
+///
+/// A ramp walks the text one character at a time, so an escape smuggled into it
+/// would be coloured character by character and emitted in pieces.
+#[test]
+fn a_gradient_paints_no_escape_it_was_handed() {
+    let hostile = "wordmark\u{1b}[2J\r\u{9b}0m";
+
+    for depth in [
+        ColorDepth::None,
+        ColorDepth::Ansi16,
+        ColorDepth::Ansi256,
+        ColorDepth::TrueColor,
+    ] {
+        let painted = BRAND.paint_with(depth, hostile);
+        // Every escape in the result is one the ramp itself wrote: the styled
+        // filter rewrites anything else, so a result it leaves alone contains
+        // nothing else. The erase sequence survives as the literal text `[2J`,
+        // which is a defanged sequence and not one.
+        assert_eq!(
+            sanitize_styled(&painted),
+            painted,
+            "{depth:?} emitted an escape it was handed: {painted:?}"
+        );
+        assert!(
+            !painted.contains('\r') && !painted.contains('\u{9b}'),
+            "{depth:?} emitted a control character: {painted:?}"
+        );
+
+        let cell = BRAND.cell(depth, "\u{1b}[2J", 0.5);
+        assert_eq!(sanitize_styled(&cell), cell, "{depth:?} cell: {cell:?}");
+    }
+}
+
+/// The last filter before the bytes leave the process.
+///
+/// A caller composing its own table row may print a cell exactly as it received
+/// it — `ruvyxa routes` prints the route's own `path` column that way — so the
+/// role filter is not the only thing standing between a name and the terminal.
+/// What survives here is a colour change and nothing else.
+#[test]
+fn a_finished_line_keeps_its_colours_and_no_other_escape() {
+    let styled = format!("{} {}", paint_when(true, "page", "36"), "/\u{1b}[2Jblog");
+    let filtered = sanitize_styled(&styled);
+
+    assert!(
+        filtered.starts_with("\u{1b}[36mpage\u{1b}[0m"),
+        "{filtered:?}"
+    );
+    assert!(!filtered.contains("\u{1b}[2J"), "{filtered:?}");
+    assert!(
+        filtered.ends_with("/\u{fffd}[2Jblog"),
+        "the escape loses its introducer and prints as the text it was: {filtered:?}"
+    );
+
+    // A 24-bit colour writes `;` and, on some terminals, `:` between its
+    // components, so both have to stay inside the allowlist.
+    let truecolor = "\u{1b}[1;38;2;251;101;251mR\u{1b}[0m";
+    assert_eq!(sanitize_styled(truecolor), truecolor);
+    // Every other final byte is somebody else's command.
+    for sequence in [
+        "\u{1b}[2K",
+        "\u{1b}[1;1H",
+        "\u{1b}]0;title\u{7}",
+        "\u{9b}2J",
+    ] {
+        assert!(
+            !sanitize_styled(sequence).contains('\u{1b}'),
+            "{sequence:?} survived"
+        );
+    }
+    // A tab means layout rather than a command, and a cell may hold one.
+    assert_eq!(sanitize_styled("a\tb"), "a\tb");
+}
+
+/// A closed pipe is the reader leaving, and nothing else is.
+///
+/// `println!` panics on any write failure, so `ruvyxa routes | head -5` or
+/// `ruvyxa check | grep -q RUV` reported failure for a command that did what it
+/// was asked. Every other failure — a full disk when stdout is redirected to a
+/// file — still panics, because that one is real.
+#[test]
+fn a_closed_pipe_stops_cleanly_and_every_other_write_failure_does_not() {
+    crate::stream::report(Ok(()));
+    crate::stream::report(Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)));
+
+    let full_disk = std::panic::catch_unwind(|| {
+        crate::stream::report(Err(std::io::Error::from(std::io::ErrorKind::StorageFull)));
+    });
+    assert!(
+        full_disk.is_err(),
+        "a write that failed for a reason of its own must still be reported"
+    );
+}

@@ -1,0 +1,88 @@
+{
+  "contract": "ruvyxa.route-chains",
+  "schemaVersion": 1,
+  "why": [
+    "A route's layout and template chains are discovered twice. `layout_chain()`",
+    "and `template_chain()` in crates/ruvyxa_graph/src/lib.rs answer for",
+    "`ruvyxa build`, and `collectLayouts()`/`collectTemplates()` in",
+    "packages/ruvyxa/runtime/compiler.mjs answer for `ruvyxa dev` and for every",
+    "route a deployed function composes. A layout one host wraps a page in and",
+    "the other does not is a page that has its `<html>`/`<body>` shell in",
+    "production and loses it locally, or the reverse.",
+    "",
+    "Both halves used to pass one literal `layout.tsx` / `template.tsx` to their",
+    "nested walk, while the same two files accept `page.jsx` as a route and",
+    "accept both `default.tsx` and `default.jsx` for a slot. A project written",
+    "in `.jsx` therefore lost *every* layout and template, in both hosts, with",
+    "no diagnostic and a successful build. They were consistently wrong, which",
+    "is why nothing here failed; this table is what makes them consistently",
+    "right.",
+    "",
+    "Probe order is part of the contract, not an implementation detail. `.tsx`",
+    "is probed first at every level, so a project holding a stray `layout.jsx`",
+    "beside its `layout.tsx` composes the same file it composed before `.jsx`",
+    "was accepted here at all.",
+    "",
+    "`tree` lists files to create under the app directory; every one is written",
+    "with placeholder contents. `routeDir` is the directory of the route being",
+    "resolved, relative to the app directory (empty string for the root route).",
+    "`layouts` and `templates` are the expected chains in composition order —",
+    "root first — as paths relative to the app directory.",
+    "",
+    "Every implementation replays this file:",
+    "  - crates/ruvyxa_graph/src/lib.rs (route_chains_match_the_shared_conformance_table)",
+    "  - tests/packages/ruvyxa/route-chain-contract.test.mjs",
+    "",
+    "The Rust half asserts one thing the JavaScript half cannot: a chain entry",
+    "is an id with the extension stripped (`app/layout`), so the id alone does",
+    "not say which file it came from. `resolve_layout_file()` has to probe the",
+    "same extensions the chain walk did, or the chain names a layout that",
+    "nothing can load — which leaves the layout's own imports unstaged into",
+    "`<out>/server/` and the route stuck on SSR. Every case here is resolved",
+    "back to its file on that side."
+  ],
+  "cases": [
+    {
+      "name": "a TypeScript layout and template are found at the root",
+      "tree": ["layout.tsx", "template.tsx", "page.tsx"],
+      "routeDir": "",
+      "layouts": ["layout.tsx"],
+      "templates": ["template.tsx"]
+    },
+    {
+      "name": "a JSX-only project keeps its layouts and templates",
+      "tree": ["layout.jsx", "template.jsx", "dash/layout.jsx", "dash/page.jsx"],
+      "routeDir": "dash",
+      "layouts": ["layout.jsx", "dash/layout.jsx"],
+      "templates": ["template.jsx"]
+    },
+    {
+      "name": "a JSX layout nests under a TypeScript one",
+      "tree": ["layout.tsx", "dash/layout.jsx", "dash/reports/page.jsx"],
+      "routeDir": "dash/reports",
+      "layouts": ["layout.tsx", "dash/layout.jsx"],
+      "templates": []
+    },
+    {
+      "name": "tsx wins over a stray jsx at the same level",
+      "tree": ["layout.tsx", "layout.jsx", "template.tsx", "template.jsx", "page.tsx"],
+      "routeDir": "",
+      "layouts": ["layout.tsx"],
+      "templates": ["template.tsx"]
+    },
+    {
+      "name": "levels without one are skipped",
+      "tree": ["layout.jsx", "dash/reports/template.jsx", "dash/reports/page.jsx"],
+      "routeDir": "dash/reports",
+      "layouts": ["layout.jsx"],
+      "templates": ["dash/reports/template.jsx"]
+    },
+    {
+      "name": "a project with neither carries empty chains",
+      "tree": ["page.jsx"],
+      "routeDir": "",
+      "layouts": [],
+      "templates": []
+    }
+  ]
+}

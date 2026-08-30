@@ -715,12 +715,14 @@ describe('vercel prerender functions', () => {
     ],
   } as unknown as BuildContext['deployManifest']
 
-  const build = () =>
+  const buildWith = (deployManifest: BuildContext['deployManifest']) =>
     vercel({ projectOutput: false }).build({
       root: '.',
       outDir: '.ruvyxa',
-      deployManifest: manifest,
+      deployManifest,
     } as BuildContext)
+
+  const build = () => buildWith(manifest)
 
   const configFor = (
     artifacts: NonNullable<Awaited<ReturnType<typeof build>>['artifacts']>,
@@ -774,6 +776,98 @@ describe('vercel prerender functions', () => {
       artifacts.some((artifact) => artifact.path.includes('about')),
       false,
     )
+  })
+
+  it("gives an expansion its own route's window, whatever the manifest order is", async () => {
+    // The catch-all is declared first on purpose. "The first pattern that fits"
+    // is not an answer — the router resolves static before dynamic before
+    // catch-all, so `/blog/hello` belongs to `/blog/[slug]` however the two
+    // routes happen to be ordered on disk.
+    const artifacts =
+      (
+        await buildWith({
+          buildId: '0123456789abcdef',
+          routes: [
+            {
+              id: 'app/[...all]/page',
+              path: '/[...all]',
+              kind: 'page',
+              serve: 'function',
+              strategy: 'isr',
+              runtime: 'node',
+              revalidate: 3600,
+            },
+            {
+              id: 'app/blog/[slug]/page',
+              path: '/blog/[slug]',
+              kind: 'page',
+              serve: 'function',
+              strategy: 'isr',
+              runtime: 'node',
+              revalidate: 60,
+            },
+          ],
+          prerendered: [
+            { path: '/blog/hello', document: 'blog/hello/index.html', strategy: 'isr' },
+            { path: '/legal', document: 'legal/index.html', strategy: 'isr' },
+          ],
+        } as unknown as BuildContext['deployManifest'])
+      ).artifacts ?? []
+
+    assert.equal(configFor(artifacts, 'blog/hello').expiration, 60)
+    // The catch-all still lends its own window to the paths only it answers.
+    assert.equal(configFor(artifacts, 'legal').expiration, 3600)
+  })
+
+  it('takes an expansion parent only from an ISR page, and defaults when none claims it', async () => {
+    // A dynamic API route and a PPR page can both match a page expansion's
+    // path, and neither can have produced it. A manifest carrying that overlap
+    // is exactly what the narrowing defends against.
+    const artifacts =
+      (
+        await buildWith({
+          buildId: '0123456789abcdef',
+          routes: [
+            {
+              id: 'app/[...proxy]/route',
+              path: '/[...proxy]',
+              kind: 'api',
+              serve: 'function',
+              strategy: 'ssr',
+              runtime: 'node',
+              revalidate: 900,
+            },
+            {
+              id: 'app/[...marketing]/page',
+              path: '/[...marketing]',
+              kind: 'page',
+              serve: 'function',
+              strategy: 'ppr',
+              runtime: 'node',
+              revalidate: 3600,
+            },
+            {
+              id: 'app/notes/[slug]/page',
+              path: '/notes/[slug]',
+              kind: 'page',
+              serve: 'function',
+              strategy: 'isr',
+              runtime: 'node',
+              revalidate: 45,
+            },
+          ],
+          prerendered: [
+            { path: '/notes/first', document: 'notes/first/index.html', strategy: 'isr' },
+            { path: '/pricing', document: 'pricing/index.html', strategy: 'isr' },
+          ],
+        } as unknown as BuildContext['deployManifest'])
+      ).artifacts ?? []
+
+    assert.equal(configFor(artifacts, 'notes/first').expiration, 45)
+    // No ISR page claims `/pricing`, so it takes the default window rather than
+    // borrowing a longer one from a route that did not render it. Shortening
+    // the cache is the safe direction; refusing to emit it is not.
+    assert.equal(configFor(artifacts, 'pricing').expiration, 60)
   })
 
   it('purges the CDN when revalidatePath() forces a write', async () => {

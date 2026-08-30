@@ -21,7 +21,14 @@ const workspaceRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta
 const modulePath = path.join(workspaceRoot, 'packages/ruvyxa/runtime/package-exports.mjs')
 
 const compilerPath = path.join(workspaceRoot, 'packages/ruvyxa/runtime/compiler.mjs')
-const { probeFileCandidate } = await import(`file://${compilerPath.replaceAll('\\', '/')}`)
+const { probeFileCandidate, resolveSpecifierPath, unresolvedBareSpecifierMessage } = await import(
+  `file://${compilerPath.replaceAll('\\', '/')}`
+)
+
+const pathsPath = path.join(workspaceRoot, 'packages/ruvyxa/runtime/paths.mjs')
+const { loadTsconfigPaths, resolveTsconfigPath } = await import(
+  `file://${pathsPath.replaceAll('\\', '/')}`
+)
 
 const {
   PACKAGE_EXPORT_TARGETS,
@@ -141,6 +148,90 @@ describe('file probing', () => {
         assert.equal(answered, testCase.expect, `${testCase.name} disagrees with the shared table`)
       } finally {
         rmSync(directory, { recursive: true, force: true })
+      }
+    })
+  }
+})
+
+/**
+ * Which *source* answers a non-relative specifier, and in what order.
+ *
+ * Every section above describes a rule that applies once a package has been
+ * chosen. This one describes the walk that chooses it, which is the step the
+ * two graphs had silently drifted apart on: `resolver.rs` probed the project
+ * root with the bare specifier between `tsconfig` and `node_modules` and this
+ * graph never did. The Rust half is `resolution_order_matches_the_shared_table`
+ * in `crates/ruvyxa_bundler/src/resolver.rs`.
+ */
+describe('resolution order', () => {
+  for (const scenario of contract.resolutionOrder) {
+    describe(scenario.name, () => {
+      for (const testCase of scenario.cases) {
+        it(testCase.name, () => {
+          const root = realpathSync(mkdtempSync(path.join(tmpdir(), 'ruvyxa-resolution-')))
+          try {
+            for (const [relative, source] of Object.entries(scenario.files)) {
+              const file = path.join(root, relative)
+              mkdirSync(path.dirname(file), { recursive: true })
+              writeFileSync(file, source)
+            }
+            const baseDir = path.join(root, scenario.importer)
+            mkdirSync(baseDir, { recursive: true })
+            const importer = path.join(baseDir, 'page.ts')
+            // `absolute` cases carry the project root, forward-slashed: the
+            // form a generated entry emits, and the one that carries a drive
+            // prefix rather than a leading slash on Windows.
+            const specifier = testCase.absolute
+              ? `${root.replaceAll('\\', '/')}/${testCase.specifier}`
+              : testCase.specifier
+
+            // The same two steps the dependency walk in compiler.mjs takes for
+            // every specifier, in the same order — so the table measures the
+            // product rule rather than a restatement of it.
+            const resolved = resolveSpecifierPath(specifier, undefined, {
+              baseDir,
+              root,
+              platform: 'browser',
+              bundleTarget: 'client',
+              bundlePackages: false,
+              bundleDependencies: false,
+              tsconfigPaths: loadTsconfigPaths(root),
+              resolveTsconfigPath,
+            })
+            const message = resolved
+              ? null
+              : unresolvedBareSpecifierMessage(specifier, {
+                  baseDir,
+                  root,
+                  bundleTarget: 'client',
+                  importer,
+                })
+
+            const expected = testCase.expect
+            if (expected.kind === 'resolved') {
+              assert.equal(
+                resolved && path.relative(root, resolved).replaceAll('\\', '/'),
+                expected.path,
+                `${testCase.name} resolved elsewhere`,
+              )
+            } else if (expected.kind === 'diagnostic') {
+              assert.equal(resolved, null, `${testCase.name} must not resolve`)
+              assert.ok(
+                message?.includes(expected.code),
+                `${testCase.name} expected ${expected.code}, got ${message}`,
+              )
+              assert.ok(
+                message?.includes(expected.names),
+                `${testCase.name} must name ${expected.names}, got ${message}`,
+              )
+            } else {
+              assert.equal(resolved, null, `${testCase.name} must not resolve`)
+              assert.equal(message, null, `${testCase.name} must stay silent`)
+            }
+          } finally {
+            rmSync(root, { recursive: true, force: true })
+          }
+        })
       }
     })
   }

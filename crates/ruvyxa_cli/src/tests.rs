@@ -226,15 +226,57 @@ fn prerender_paths_stay_inside_the_build_output() {
     }
 }
 
+/// Replay the shared cross-language path-safety table through the *writer*.
+///
+/// The fixture was introduced for the two readers — the native server's
+/// `is_safe_relative_path` and the deployed handler's `isUnsafeSegment` — and
+/// this third copy of the same rule, the one place a bad segment actually
+/// becomes a filesystem path, was never enrolled. Its hand-written test was a
+/// strict subset of the table: nothing about the safe cases `hello world`,
+/// `a.b/c-d_e`, or a non-ASCII segment, and nothing about `foo:bar`, which the
+/// fixture records as a past incident.
+///
+/// A writer stricter than the readers is not harmless either: it decides what
+/// `getStaticParams()` may emit, so a divergence fails a build over a URL the
+/// readers would have served.
 #[test]
-fn unsafe_prerender_segments_cover_separators_and_control_characters() {
-    assert!(is_unsafe_prerender_segment(".."));
-    assert!(is_unsafe_prerender_segment("."));
-    assert!(is_unsafe_prerender_segment("a\\b"));
-    assert!(is_unsafe_prerender_segment("a:b"));
-    assert!(is_unsafe_prerender_segment("a\u{7f}b"));
-    assert!(!is_unsafe_prerender_segment("hello-world"));
-    assert!(!is_unsafe_prerender_segment("a%20b"));
+fn prerender_paths_replay_the_shared_cross_language_path_safety_table() {
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/prerender-path-conformance.json");
+    let fixture: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", fixture_path.display())),
+    )
+    .expect("conformance fixture is valid JSON");
+
+    let cases = fixture["cases"].as_array().expect("fixture declares cases");
+    assert!(!cases.is_empty(), "an empty table gates nothing");
+
+    let prerender_dir = std::path::Path::new("/out/prerender");
+    for case in cases {
+        let path = case["path"].as_str().expect("case declares a path");
+        let safe = case["safe"].as_bool().expect("case declares a verdict");
+        let why = case["why"].as_str().unwrap_or_default();
+
+        // The segment rule and the path mapper that consults it are held to the
+        // same table: a safe path has only safe segments, and an unsafe one is
+        // unsafe because at least one of its segments is.
+        let unsafe_segments = path
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .filter(|segment| is_unsafe_prerender_segment(segment))
+            .count();
+        assert_eq!(unsafe_segments == 0, safe, "{path:?} — {why}");
+
+        let written = prerender_html_path(prerender_dir, &format!("/{path}"));
+        assert_eq!(written.is_some(), safe, "{path:?} — {why}");
+        if let Some(written) = written {
+            assert!(
+                written.starts_with(prerender_dir),
+                "{path:?} would be written outside the build output: {written:?}"
+            );
+        }
+    }
 }
 
 use clap::CommandFactory;
@@ -952,6 +994,120 @@ fn stable_prerender_inputs_resolve_project_relative_worker_paths() {
     );
 }
 
+/// Every path this returns is canonical, including the ones remapped out of the
+/// staging tree.
+///
+/// Both callers hand the result straight to `store_prerender_artifact`, which
+/// keys the cached artifact by exactly what it is given and does not
+/// canonicalize again — so the guarantee has to hold on every branch, not just
+/// the one that covers most inputs. The staging remap rebuilt its answer from
+/// the caller's own `root`, which is the value `--root` was given rather than a
+/// resolved path, so the same file was keyed two ways depending on which branch
+/// produced it.
+#[test]
+fn stable_prerender_inputs_are_canonical_even_when_remapped_out_of_staging() {
+    let temp = tempfile::tempdir().unwrap();
+    let canonical = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
+    let project = canonical.join("project");
+    let page = project.join("app").join("page.tsx");
+    fs::create_dir_all(page.parent().unwrap()).unwrap();
+    fs::write(&page, "export default 1").unwrap();
+
+    // The staging tree the build renders from: `<staging>/server/app`, sitting
+    // outside the project because the output directory does.
+    let staged_app = canonical.join("out").join("server").join("app");
+    fs::create_dir_all(&staged_app).unwrap();
+    let staged_page = staged_app.join("page.tsx");
+    fs::write(&staged_page, "export default 1").unwrap();
+
+    // `--root` is used as typed. This spelling names the project and is not
+    // canonical, which is the whole difference the remap branch let through.
+    let typed_root = project.join("app").join("..");
+
+    let inputs = stable_prerender_inputs(&typed_root, &staged_app, &[staged_page]);
+
+    assert_eq!(
+        inputs,
+        vec![page],
+        "a staging path remapped onto the project must come back canonical"
+    );
+}
+
+/// The prerender artifact store keys by the paths it is handed, and does not
+/// canonicalize them a second time.
+///
+/// Its callers pass `stable_prerender_inputs` output, which has already resolved
+/// and canonicalized every path — and `normalized_canonical_path` is a
+/// filesystem syscall, the expensive one on Windows. Repeating it here cost two
+/// per input for every stored artifact, so a dynamic route expanded to thousands
+/// of paths paid `2 × modules` of them per path with nothing to show for the
+/// second.
+///
+/// Asserted through the stored file because there is nothing else to see: the
+/// second call answered identically by construction, which is exactly why it
+/// survived. If a future caller has to pass unresolved paths, canonicalize at
+/// that caller — the store is on the hot loop and this one is not.
+#[test]
+fn store_prerender_artifact_keys_by_the_paths_it_is_given() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("page.tsx");
+    fs::write(&source, "export default () => 'first'").unwrap();
+    // The same file, spelled the way a caller that had not resolved it would.
+    let unresolved = temp.path().join("nested").join("..").join("page.tsx");
+    fs::create_dir_all(temp.path().join("nested")).unwrap();
+
+    let job = PrerenderJob {
+        route_path: "/keyed".to_string(),
+        render_path: "/keyed".to_string(),
+        params: RouteParams::new(),
+        strategy: RenderStrategy::Ssg,
+        revalidate: None,
+        kind: PrerenderJobKind::Render {
+            route_file: source.clone(),
+            mode: "full",
+            server_components: false,
+        },
+    };
+    let cache = PrerenderArtifactCache {
+        directory: temp.path().join("cache"),
+        dependency_hash: "config-v1".to_string(),
+        render_context_hash: "context-v1".to_string(),
+        fingerprints: Arc::new(ArtifactFingerprintCache::default()),
+        enabled: true,
+    };
+
+    store_prerender_artifact(
+        &cache,
+        &job,
+        "renderer-v1",
+        std::slice::from_ref(&unresolved),
+        "<main>keyed</main>",
+    );
+
+    let stored: serde_json::Value = serde_json::from_slice(
+        &fs::read(prerender_artifact_cache_file(&cache.directory, &job)).unwrap(),
+    )
+    .unwrap();
+    let keys = stored["files"]
+        .as_object()
+        .expect("the artifact records the files it was keyed against")
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        keys,
+        vec![unresolved.to_string_lossy().into_owned()],
+        "the store must record the path it was given, not a re-canonicalized one"
+    );
+
+    // And an artifact keyed that way is still validated against the file it
+    // names, which is the only thing the key is for.
+    assert_eq!(
+        load_prerender_artifact(&cache, &job).as_deref(),
+        Some("<main>keyed</main>")
+    );
+}
+
 #[test]
 fn prerender_artifact_cache_reuses_and_invalidates_dependency_content() {
     let temp = tempfile::tempdir().unwrap();
@@ -977,13 +1133,20 @@ fn prerender_artifact_cache_reuses_and_invalidates_dependency_content() {
         enabled: true,
     };
 
-    store_prerender_artifact(
-        &cache,
-        &job,
-        "renderer-v1",
+    // Keyed exactly as the two real callers key it: `stable_prerender_inputs`
+    // output, already resolved and canonical, with no second canonicalization
+    // inside the store.
+    let inputs = stable_prerender_inputs(
+        temp.path(),
+        &temp.path().join("app"),
         std::slice::from_ref(&source),
-        "<main>first</main>",
     );
+    assert_eq!(
+        inputs,
+        vec![ruvyxa_diagnostics::normalized_canonical_path(&source)]
+    );
+
+    store_prerender_artifact(&cache, &job, "renderer-v1", &inputs, "<main>first</main>");
     assert_eq!(
         load_prerender_artifact(&cache, &job).as_deref(),
         Some("<main>first</main>")
@@ -1293,6 +1456,112 @@ fn rejects_security_limits_above_hard_ceiling() {
 
     let error = config.validate_paths().unwrap_err();
     assert!(error.to_string().contains("security.actionLimit"));
+}
+
+/// Every other numeric field in the file fails a build when it is out of
+/// range. `image.quality` and `image.effort` were silently clamped instead, so
+/// a project asking for something impossible got a different build than it
+/// asked for and was told nothing; `image.workers` was handed straight to
+/// `rayon::ThreadPoolBuilder`, where a typo becomes a spawn failure naming
+/// rayon rather than the config key, or a thrashing build.
+#[test]
+fn rejects_out_of_range_image_settings() {
+    for (field, value) in [
+        ("quality", json!(0)),
+        ("quality", json!(101)),
+        ("effort", json!(7)),
+        ("workers", json!(100_000)),
+    ] {
+        let config: ProjectConfig =
+            serde_json::from_value(json!({ "image": { field: value } })).unwrap();
+        let error = config.validate_paths().unwrap_err().to_string();
+        assert!(
+            error.contains(&format!("image.{field}")),
+            "image.{field} = {value} should be rejected by name, got: {error}"
+        );
+    }
+}
+
+/// The bounds are exactly the ones the shared image fixture declares, and the
+/// two documented "let the host decide" zeros stay legal: `image.workers: 0`
+/// means Rayon's own worker count, and `image.effort: 0` is libwebp's fastest
+/// encode.
+#[test]
+fn accepts_image_settings_at_their_documented_bounds() {
+    for value in [
+        json!({ "quality": 1 }),
+        json!({ "quality": 100 }),
+        json!({ "effort": 0 }),
+        json!({ "effort": 6 }),
+        json!({ "workers": 0 }),
+        json!({ "workers": crate::image_optimizer::MAX_CONFIGURED_IMAGE_WORKERS }),
+    ] {
+        let config: ProjectConfig = serde_json::from_value(json!({ "image": value })).unwrap();
+        config
+            .validate_paths()
+            .unwrap_or_else(|error| panic!("{value} must be accepted, got: {error}"));
+    }
+}
+
+/// The quality bounds are a shared contract with the two request hosts that
+/// answer `/__ruvyxa/image`, and this is the third implementation of them.
+#[test]
+fn image_quality_bounds_match_the_shared_fixture() {
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/dynamic-image-conformance.json");
+    let fixture: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&fixture_path).unwrap()).unwrap();
+    assert_eq!(fixture["quality"]["min"], json!(1));
+    assert_eq!(
+        fixture["quality"]["max"],
+        json!(crate::image_optimizer::MAX_IMAGE_QUALITY)
+    );
+}
+
+/// Machine-readable output must go through `write_machine_report`.
+///
+/// The helper exists because `println!` panics when the reader closes the pipe
+/// — `ruvyxa doctor --json | jq '.adapter'` turns a successful diagnostic run
+/// into an abort and a failed CI step — and the helper's own test tests the
+/// helper, so it could never notice a command that does not call it. Three did:
+/// `doctor --json`, `trace`, and `bench --json`.
+///
+/// The needles are assembled from pieces so this test does not match itself.
+#[test]
+fn no_command_prints_json_through_a_panicking_writer() {
+    let print_macro = concat!("print", "ln!");
+    let serializer = concat!("serde_json::", "to_string");
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut sources: Vec<std::path::PathBuf> = std::fs::read_dir(&src)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+        .collect();
+    sources.sort();
+    assert!(sources.len() > 5, "no sources were scanned");
+
+    let mut offenders = Vec::new();
+    for path in &sources {
+        let text = std::fs::read_to_string(path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        for (index, line) in lines.iter().enumerate() {
+            if !line.contains(print_macro) {
+                continue;
+            }
+            // The serializer call sits on the same line for a one-liner and on
+            // the next for a `json!` block; a short window covers both without
+            // parsing the macro.
+            let window = lines[index..lines.len().min(index + 5)].join("\n");
+            if window.contains(serializer) {
+                offenders.push(format!("{}:{}", path.display(), index + 1));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these write machine-readable output through a writer that panics on a \
+         closed pipe; call write_machine_report instead: {offenders:?}"
+    );
 }
 
 #[test]
@@ -2004,14 +2273,13 @@ fn client_artifact_cache_invalidates_dynamic_import_dependencies() {
 #[test]
 fn prerender_html_includes_hashed_hydration_and_preload_assets() {
     let temp = tempfile::tempdir().unwrap();
-    let client_dir = temp.path().join("client");
-    std::fs::create_dir_all(&client_dir).unwrap();
+    let client_report = temp.path().join(CLIENT_BUILD_REPORT_FILE);
     std::fs::write(
-        client_dir.join("manifest.json"),
+        &client_report,
         r#"{"routes":[{"path":"/docs/[slug]","src":"/__ruvyxa/client/docs.123.js","sharedChunks":[{"src":"/__ruvyxa/client/shared.456.js"}]}]}"#,
     )
     .unwrap();
-    let client_assets = load_prerender_client_assets(&client_dir);
+    let client_assets = load_prerender_client_assets(&client_report).unwrap();
     assert_eq!(client_assets.len(), 1);
 
     let html = inject_prerender_client_assets(
@@ -2038,14 +2306,13 @@ fn prerender_html_includes_hashed_hydration_and_preload_assets() {
 #[test]
 fn prerender_deferred_hydration_loads_bundle_only_through_loader() {
     let temp = tempfile::tempdir().unwrap();
-    let client_dir = temp.path().join("client");
-    std::fs::create_dir_all(&client_dir).unwrap();
+    let client_report = temp.path().join(CLIENT_BUILD_REPORT_FILE);
     std::fs::write(
-        client_dir.join("manifest.json"),
+        &client_report,
         r#"{"routes":[{"path":"/","src":"/__ruvyxa/client/home.js","sharedChunks":[{"src":"/__ruvyxa/client/shared.js"}],"hydration":"visible","hydrationLoader":"/__ruvyxa/client/hydration.js"}]}"#,
     )
     .unwrap();
-    let assets = load_prerender_client_assets(&client_dir);
+    let assets = load_prerender_client_assets(&client_report).unwrap();
 
     let html = inject_prerender_client_assets(
         "<!doctype html><html><head></head><body><main>Home</main></body></html>",
@@ -2317,6 +2584,162 @@ fn an_env_change_invalidates_the_bytes_it_is_compiled_into() {
         changed, removed,
         "removing a variable changes the emitted literal too"
     );
+}
+
+/// An unreadable `.env` is not the same as no `.env`.
+///
+/// Everything downstream keys on this hash -- the module compile cache and its
+/// namespace, the artifact graph, the client route artifacts, the shared chunk
+/// artifacts -- and all of them hold compiled bytes with `RUVYXA_PUBLIC_*`
+/// values written into them as literals. Swallowing the read mapped "I could
+/// not open the environment" onto the hash for "there is none", so the build
+/// compiled without values the project had declared and then cached the result
+/// under a key that could not tell the difference.
+///
+/// `project_env` fails only when a `.env` exists and cannot be read, which is
+/// why absence still hashes as it always did.
+#[test]
+fn an_unreadable_env_is_reported_rather_than_hashed_as_absent() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let root = temp.path();
+    std::fs::create_dir_all(root.join("app")).expect("app dir");
+
+    // No `.env` at all: the documented case, and it still loads.
+    let absent = crate::load_project_config(root).expect("a project with no .env still loads");
+    assert!(!absent.build_dependency_hash.is_empty());
+
+    // A `.env` that exists and reads: a different hash, because the
+    // environment is part of the key.
+    std::fs::write(root.join(".env"), b"RUVYXA_PUBLIC_A=1\n").expect("write .env");
+    let present = crate::load_project_config(root).expect("a readable .env loads");
+    assert_ne!(
+        present.build_dependency_hash, absent.build_dependency_hash,
+        "the environment is part of the key, or a bundle survives the value changing",
+    );
+
+    // A `.env` that exists and cannot be read is a fault, not an empty map.
+    // A directory in its place is the portable way to make the read fail:
+    // permission bits are not, on Windows.
+    std::fs::remove_file(root.join(".env")).expect("remove .env");
+    std::fs::create_dir(root.join(".env")).expect("a directory where the file was");
+    let error = crate::load_project_config(root)
+        .expect_err("an unreadable .env must not be swallowed into an empty environment");
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.to_ascii_lowercase().contains("env"),
+        "the failure has to name what could not be read: {rendered}",
+    );
+}
+
+/// The two normalisations the `cli_args` module doc has always promised.
+///
+/// The doc positions itself as the contract a reader consults before adding a
+/// spelling, and it named three: `--root=x`, an em-dashed `—root`, and
+/// `test-parity`. Only the first existed, so a reader debugging a rejected
+/// `test-parity` would have gone looking for a bug in `normalize_command_arg`
+/// rather than adding the alias.
+#[test]
+fn the_documented_argument_spellings_are_the_ones_that_resolve() {
+    use std::ffi::OsString;
+
+    assert_eq!(
+        crate::cli_args::canonical_command_name("test-parity"),
+        Some("test:parity"),
+    );
+    // The canonical spelling still resolves, and an unknown one still does not
+    // -- clap's own error is better than this module guessing.
+    assert_eq!(
+        crate::cli_args::canonical_command_name("test:parity"),
+        Some("test:parity"),
+    );
+    assert_eq!(crate::cli_args::canonical_command_name("test_parity"), None);
+
+    // Smart punctuation, both substitutions.
+    for dash in ["\u{2014}", "\u{2013}"] {
+        assert_eq!(
+            crate::cli_args::normalized_option_arg(&OsString::from(format!("{dash}root"))),
+            Some("--root".to_string()),
+            "a {dash:?}-prefixed option must resolve",
+        );
+        assert_eq!(
+            crate::cli_args::normalized_option_arg(&OsString::from(format!("{dash}root=app"))),
+            Some("--root=app".to_string()),
+        );
+    }
+
+    // A value that merely begins with a dash is not an option and must not be
+    // rewritten: the gate is that the name has to resolve.
+    assert_eq!(
+        crate::cli_args::normalized_option_arg(&OsString::from("\u{2014}not-an-option")),
+        None,
+    );
+    assert_eq!(
+        crate::cli_args::normalized_option_arg(&OsString::from("\u{2014}")),
+        None,
+    );
+}
+
+/// `clean` reports what it did, and does what it reports.
+///
+/// The config cache and the generated route types live at a hardcoded
+/// `.ruvyxa/...` whatever `outDir` says, so a project that builds elsewhere had
+/// both left behind while the command printed `removed`. `clean` is the escape
+/// hatch a user reaches for when a cache has gone wrong, so a clean that did
+/// not happen is the defect rather than the leftover bytes.
+#[test]
+fn clean_removes_the_framework_directory_when_the_build_goes_elsewhere() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let root = temp.path();
+    std::fs::write(
+        root.join("ruvyxa.config.ts"),
+        "export default { outDir: 'dist' }\n",
+    )
+    .expect("write config");
+    std::fs::create_dir_all(root.join("app")).expect("app dir");
+
+    let framework = root.join(".ruvyxa");
+    std::fs::create_dir_all(framework.join("cache")).expect("cache dir");
+    std::fs::create_dir_all(framework.join("types")).expect("types dir");
+    std::fs::write(framework.join("cache").join("config-load.json"), b"{}").expect("write cache");
+    std::fs::write(framework.join("types").join("routes.d.ts"), b"// types").expect("write types");
+    let out = root.join("dist");
+    std::fs::create_dir_all(&out).expect("out dir");
+    std::fs::write(out.join("build.json"), b"{}").expect("write build");
+
+    crate::commands::clean(crate::ProjectArgs {
+        root: root.to_path_buf(),
+        runtime: None,
+    })
+    .expect("clean must succeed");
+
+    assert!(!out.exists(), "the configured out directory is removed");
+    assert!(
+        !framework.exists(),
+        "the framework directory holds the config cache and the route types, and \
+         `clean` said it removed everything",
+    );
+}
+
+/// The same command on a default-`outDir` project removes it exactly once.
+///
+/// `.ruvyxa` is both the build output and the framework directory there, and a
+/// second `remove_dir_all` of a path that is already gone would be an error
+/// rather than a no-op.
+#[test]
+fn clean_removes_the_default_out_directory_only_once() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let root = temp.path();
+    std::fs::create_dir_all(root.join("app")).expect("app dir");
+    let framework = root.join(".ruvyxa");
+    std::fs::create_dir_all(&framework).expect("framework dir");
+    std::fs::write(framework.join("build.json"), b"{}").expect("write build");
+
+    crate::commands::clean(crate::ProjectArgs {
+        root: root.to_path_buf(),
+        runtime: None,
+    })
+    .expect("clean must succeed on a default out directory");
+    assert!(!framework.exists());
 }
 
 #[test]
@@ -3145,6 +3568,155 @@ fn staged_build_commit_replaces_outputs_and_preserves_cache_directory() {
     assert!(!has_temp_build_dir(&out_dir, ".build-rollback"));
 }
 
+/// A process id no operating system Ruvyxa builds on will hand out: Linux caps
+/// `pid_max` far below it, Darwin lower still, and a Windows process id is a
+/// multiple of four. It also stays positive when read as a signed `pid_t`, so a
+/// Unix probe cannot mistake it for `kill`'s "every process" wildcard.
+const UNREACHABLE_PID: u32 = 0x7fff_ffff;
+
+/// A process that is certainly running and is certainly not this one.
+#[cfg(windows)]
+const RUNNING_FOREIGN_PID: u32 = 4; // The NT "System" process.
+#[cfg(not(windows))]
+const RUNNING_FOREIGN_PID: u32 = 1; // init / launchd.
+
+/// A commit is two moves, and its rollback arm runs only on a returned `Err`.
+/// A process killed between the moves therefore leaves `dist/` with none of the
+/// named outputs and the previous build inside `.build-rollback-*`, which
+/// nothing ever looked at again. The next commit has to find it.
+#[test]
+fn an_interrupted_commit_is_recovered_by_the_next_build() {
+    let temp = tempfile::tempdir().unwrap();
+    let out_dir = temp.path().join("dist");
+    let staging = temp.path().join("staging");
+    fs::create_dir_all(out_dir.join("server")).unwrap();
+    fs::write(out_dir.join("server").join("index.mjs"), "previous").unwrap();
+    fs::create_dir_all(staging.join("server")).unwrap();
+    fs::write(staging.join("server").join("index.mjs"), "next").unwrap();
+
+    // The first half of a commit, then a simulated kill: the outputs are in the
+    // rollback directory and `dist/` is empty.
+    let backup = create_build_temp_dir(&out_dir, ".build-rollback").unwrap();
+    move_named_build_outputs(&out_dir, &backup).unwrap();
+    assert!(!out_dir.join("server").exists());
+
+    commit_staged_build_outputs(&staging, &out_dir).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(out_dir.join("server").join("index.mjs")).unwrap(),
+        "next"
+    );
+    assert!(
+        !has_temp_build_dir(&out_dir, ".build-rollback"),
+        "a stale rollback directory was left behind"
+    );
+}
+
+/// Deleting a stranded rollback directory is what makes the loss permanent, so
+/// the sweep restores from it first. The marker names the outputs it holds, so
+/// recovery does not have to guess.
+#[test]
+fn recovery_restores_the_outputs_a_dead_build_stranded() {
+    let temp = tempfile::tempdir().unwrap();
+    let out_dir = temp.path().join("dist");
+    let stranded = out_dir.join(format!(".build-rollback-{UNREACHABLE_PID}-1"));
+    fs::create_dir_all(stranded.join("server")).unwrap();
+    fs::write(stranded.join("server").join("index.mjs"), "previous").unwrap();
+    fs::write(stranded.join("manifest.json"), "{\"routes\":[]}").unwrap();
+    fs::write(
+        stranded.join(".ruvyxa-rollback.json"),
+        format!("{{\"pid\":{UNREACHABLE_PID},\"outputs\":[\"server\",\"manifest.json\"]}}"),
+    )
+    .unwrap();
+
+    recover_stranded_build_outputs(&out_dir).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(out_dir.join("server").join("index.mjs")).unwrap(),
+        "previous"
+    );
+    assert_eq!(
+        fs::read_to_string(out_dir.join("manifest.json")).unwrap(),
+        "{\"routes\":[]}"
+    );
+    assert!(!has_temp_build_dir(&out_dir, ".build-rollback"));
+}
+
+/// The production shape of a dead owner: a process that really ran and really
+/// exited, rather than an id that never named anything. On Windows those are
+/// different answers — a process that has exited can still be opened while a
+/// handle to it is held, and only its exit code says it is gone.
+#[test]
+fn recovery_reclaims_a_directory_whose_owner_has_exited() {
+    // `--list` makes the test binary print its test names and exit, which is
+    // the cheapest real child process available on every platform this runs on.
+    // The handle is held until the end of the test, both to exercise the
+    // exit-code path and to keep the id from being recycled under the assert.
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--list")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let exited_pid = child.id();
+    child.wait().unwrap();
+
+    let temp = tempfile::tempdir().unwrap();
+    let out_dir = temp.path().join("dist");
+    let stranded = out_dir.join(format!(".build-rollback-{exited_pid}-1"));
+    fs::create_dir_all(stranded.join("client")).unwrap();
+    fs::write(stranded.join("client").join("app.js"), "previous").unwrap();
+
+    recover_stranded_build_outputs(&out_dir).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(out_dir.join("client").join("app.js")).unwrap(),
+        "previous"
+    );
+    assert!(!has_temp_build_dir(&out_dir, ".build-rollback"));
+    drop(child);
+}
+
+/// Two `ruvyxa build` invocations against one `dist/` already race, and a sweep
+/// keyed on age rather than on a dead process id would make that race
+/// destructive: it would restore a running build's backup over `dist/` and
+/// delete the tree it is still writing into.
+#[test]
+fn recovery_leaves_a_running_builds_directories_alone() {
+    let temp = tempfile::tempdir().unwrap();
+    let out_dir = temp.path().join("dist");
+    let foreign_rollback = out_dir.join(format!(".build-rollback-{RUNNING_FOREIGN_PID}-1"));
+    let own_staging = out_dir.join(format!(".build-staging-{}-1", std::process::id()));
+    fs::create_dir_all(foreign_rollback.join("server")).unwrap();
+    fs::write(foreign_rollback.join("server").join("index.mjs"), "theirs").unwrap();
+    fs::create_dir_all(own_staging.join("server")).unwrap();
+    fs::write(own_staging.join("server").join("index.mjs"), "mine").unwrap();
+
+    recover_stranded_build_outputs(&out_dir).unwrap();
+
+    assert!(foreign_rollback.join("server").join("index.mjs").exists());
+    assert!(own_staging.join("server").join("index.mjs").exists());
+    assert!(
+        !out_dir.join("server").exists(),
+        "a running build's backup must not be restored over its own output"
+    );
+}
+
+/// The staging half of the sweep: every killed build otherwise leaves a full
+/// partial tree inside `dist/` that nothing removes.
+#[test]
+fn recovery_removes_a_dead_builds_staging_tree() {
+    let temp = tempfile::tempdir().unwrap();
+    let out_dir = temp.path().join("dist");
+    let stranded = out_dir.join(format!(".build-staging-{UNREACHABLE_PID}-1"));
+    fs::create_dir_all(stranded.join("server")).unwrap();
+    fs::write(stranded.join("server").join("index.mjs"), "partial").unwrap();
+
+    recover_stranded_build_outputs(&out_dir).unwrap();
+
+    assert!(!has_temp_build_dir(&out_dir, ".build-staging"));
+}
+
 #[test]
 fn incomplete_build_staging_is_removed_when_its_owner_drops() {
     let temp = tempfile::tempdir().unwrap();
@@ -3875,5 +4447,652 @@ fn an_unparseable_route_manifest_fails_the_build_instead_of_emptying_itself() {
         std::fs::read_to_string(&manifest_path).unwrap(),
         truncated,
         "the damaged manifest must be left for inspection, never replaced with an empty one"
+    );
+}
+
+// ─── The config surface: one object, three descriptions ──────────────────────
+
+/// The key planted to make a struct name the fields it accepts.
+///
+/// `deny_unknown_fields` reports an unknown key by listing every known one, so
+/// this is how the Rust field set is read rather than transcribed. It is
+/// deliberately unwritable as a config option: if a field ever were named this,
+/// the probe would deserialize successfully and the test fails loudly rather
+/// than comparing an empty list.
+const CONFIG_SURFACE_PROBE_KEY: &str = "__ruvyxa_config_surface_probe__";
+
+/// Deserialize a probe document into the struct the fixture names.
+///
+/// The match is the only hand-written part of the probe, and it maps a fixture
+/// `rustType` to a type — never to a field list. Four of the five entries exist
+/// because the section sits behind an `#[serde(untagged)]` wrapper
+/// (`OnDemandImageOptions`, `SitemapSetting`, `RobotsSetting`, `OneOrManyRules`)
+/// and untagged deserialization buffers the content and reports only
+/// "data did not match any variant", discarding the inner field list.
+fn deserialize_config_probe(rust_type: &str, value: serde_json::Value) -> Option<String> {
+    fn outcome<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Option<String> {
+        serde_json::from_value::<T>(value)
+            .err()
+            .map(|e| e.to_string())
+    }
+    match rust_type {
+        "ProjectConfig" => outcome::<ProjectConfig>(value),
+        "OnDemandImageConfigOptions" => {
+            outcome::<crate::image_optimizer::OnDemandImageConfigOptions>(value)
+        }
+        "SitemapGenerationOptions" => {
+            outcome::<crate::site_discovery::SitemapGenerationOptions>(value)
+        }
+        "RobotsGenerationOptions" => {
+            outcome::<crate::site_discovery::RobotsGenerationOptions>(value)
+        }
+        "RobotsRuleOptions" => outcome::<crate::site_discovery::RobotsRuleOptions>(value),
+        other => panic!(
+            "tests/fixtures/config-surface-conformance.json names `{other}`, which this probe \
+             cannot deserialize. Add it to `deserialize_config_probe` — never transcribe its \
+             field list into the fixture by hand."
+        ),
+    }
+}
+
+/// Wrap the probe key in the nesting the fixture's `rustPath` describes.
+///
+/// A `[]` suffix means the segment is a sequence, and the probe goes into
+/// element 0 — that is the shape `entries[]` and `videos[]` are read in.
+fn config_probe_document(path: &[String]) -> serde_json::Value {
+    let mut value = serde_json::json!({ CONFIG_SURFACE_PROBE_KEY: true });
+    for segment in path.iter().rev() {
+        let mut map = serde_json::Map::new();
+        match segment.strip_suffix("[]") {
+            Some(name) => {
+                map.insert(name.to_string(), serde_json::Value::Array(vec![value]));
+            }
+            None => {
+                map.insert(segment.clone(), value);
+            }
+        }
+        value = serde_json::Value::Object(map);
+    }
+    serde_json::Value::Object(match value {
+        serde_json::Value::Object(map) => map,
+        other => panic!("a probe document is always an object, got {other}"),
+    })
+}
+
+/// Read the field names out of a `deny_unknown_fields` error.
+///
+/// serde writes one of three shapes — "there are no fields", "expected `a`",
+/// and "expected one of `a`, `b`" — and every field name in all three is
+/// delimited by backticks, which no Rust identifier and no `#[serde(rename)]`
+/// in this crate contains.
+fn config_fields_from_error(message: &str) -> Vec<String> {
+    let listed = message
+        .split_once(", expected")
+        .map(|(_, rest)| rest)
+        .unwrap_or("");
+    listed
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_string)
+        .collect()
+}
+
+/// `ruvyxa.config` has three descriptions of one object, and only two were held.
+///
+/// `ProjectConfig` here decides what the compiler reads, `CONFIG_KEY_SCHEMA` in
+/// `packages/ruvyxa/runtime/config-schema.mjs` decides what the config renderer
+/// accepts, and `RuvyxaConfig` in `@ruvyxa/core` decides what TypeScript
+/// accepts. `tests/packages/core/config-schema.test.ts` held the second against
+/// the third and nothing at all compared the first — so `image.maxWidth`, which
+/// Rust has always read as `pub max_width: u32` and the public type has always
+/// declared, was missing from the schema and from the hand-written literal that
+/// test compares against. Both gated descriptions agreed with each other and
+/// disagreed with Rust, so the gate saw nothing, and `assertKnownKeys` threw
+/// `RUV1602 unknown config.image field: maxWidth` before any command could run.
+///
+/// This is the missing third edge. `tests/fixtures/config-surface-conformance.json`
+/// is the shared table: this test asserts it equals what serde accepts, and
+/// `config-schema.test.ts` asserts `CONFIG_KEY_SCHEMA` equals it in both
+/// directions. Neither language can grow, rename, or drop a config key alone.
+///
+/// A *new nested section* is caught by the same pair without needing its own
+/// entry first: the struct that contains it gains a field, so this test fails on
+/// the parent's list until the fixture names it, and the schema test then fails
+/// until `CONFIG_KEY_SCHEMA` does.
+#[test]
+fn config_surface_matches_the_rust_config() {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Section {
+        rust_type: Option<String>,
+        #[serde(default)]
+        rust_path: Vec<String>,
+        probe: String,
+        fields: Vec<String>,
+        #[serde(default)]
+        reason: Vec<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Fixture {
+        sections: std::collections::BTreeMap<String, Section>,
+    }
+
+    let fixture: Fixture = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/config-surface-conformance.json"
+    ))
+    .expect("tests/fixtures/config-surface-conformance.json");
+    assert!(
+        fixture.sections.contains_key("config"),
+        "the fixture must describe the config root"
+    );
+
+    // `probe: "none"` is the one place a field list is written by hand, so the
+    // set of sections allowed to use it is fixed here rather than left to the
+    // fixture. Otherwise the way to silence a divergence this test finds is to
+    // stop probing the section — which looks like data and reads as a decision.
+    // Both entries are blocks Rust forwards whole and never types; that claim is
+    // asserted by `the_unprobed_config_sections_are_the_ones_rust_forwards_whole`.
+    let unprobed = fixture
+        .sections
+        .iter()
+        .filter(|(_, section)| section.probe == "none")
+        .map(|(path, _)| path.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        unprobed,
+        vec!["config.content", "config.content.engine", "config.markdown"],
+        "only the config blocks Rust reads as opaque JSON may go unprobed"
+    );
+
+    for (path, section) in &fixture.sections {
+        let mut expected = section.fields.clone();
+        expected.sort();
+        assert_eq!(
+            expected, section.fields,
+            "{path}: the fixture's field list is written in code-unit order, so both \
+             languages read the same table"
+        );
+
+        // A section whose parent does not declare it describes an object no
+        // config can reach, which is how a stale entry survives a rename.
+        if let Some((parent, own)) = path.rsplit_once('.') {
+            let own = own.strip_suffix("[]").unwrap_or(own);
+            let parent = fixture
+                .sections
+                .get(parent)
+                .unwrap_or_else(|| panic!("{path}: no fixture section describes `{parent}`"));
+            assert!(
+                parent.fields.iter().any(|field| field == own),
+                "{path}: `{parent_path}` does not declare `{own}`, so nothing can reach it",
+                parent_path = path.rsplit_once('.').expect("checked above").0
+            );
+        }
+
+        match section.probe.as_str() {
+            "serde" => {
+                let rust_type = section
+                    .rust_type
+                    .as_deref()
+                    .unwrap_or_else(|| panic!("{path}: a serde probe needs a `rustType`"));
+                let document = config_probe_document(&section.rust_path);
+                let error = deserialize_config_probe(rust_type, document).unwrap_or_else(|| {
+                    panic!(
+                        "{path}: `{rust_type}` accepted `{CONFIG_SURFACE_PROBE_KEY}`. Either it \
+                         lost `deny_unknown_fields` — in which case a misspelled config key is \
+                         now silently ignored — or a real field is named that."
+                    )
+                });
+                let mut actual = config_fields_from_error(&error);
+                actual.sort();
+                assert_eq!(
+                    actual, section.fields,
+                    "{path}: `{rust_type}` and the fixture describe different fields. \
+                     A field only Rust accepts is refused by RUV1602 before any command runs; \
+                     a field only the fixture (and so the schema) has is accepted and then \
+                     ignored. serde reported: {error}"
+                );
+            }
+            "none" => {
+                assert!(
+                    section.rust_type.is_none(),
+                    "{path}: an unprobed section must not claim a Rust type"
+                );
+                assert!(
+                    !section.reason.is_empty(),
+                    "{path}: a section Rust does not describe has to say why, or the next \
+                     reader cannot tell it from an omission"
+                );
+            }
+            other => panic!("{path}: unknown probe `{other}`"),
+        }
+    }
+}
+
+/// The two blocks Rust deliberately does not describe are the two it forwards.
+///
+/// `probe: "none"` in the fixture is the only place a field list is written by
+/// hand, so it is exactly where a wrong entry would go unnoticed. It is correct
+/// only while Rust really does read the block as one opaque value: the moment
+/// either grows a typed struct, the field list stops being the renderer's alone
+/// and has to be probed like every other section.
+#[test]
+fn the_unprobed_config_sections_are_the_ones_rust_forwards_whole() {
+    let config: ProjectConfig = serde_json::from_value(serde_json::json!({
+        "markdown": true,
+        "content": { "engine": { "anything": ["at", "all"] } },
+    }))
+    .expect("Rust accepts both blocks without knowing their shape");
+
+    assert_eq!(
+        config.markdown_enabled,
+        Some(true),
+        "`markdown` reaches Rust as the single boolean the renderer collapses it to"
+    );
+    assert_eq!(
+        config._content,
+        Some(serde_json::json!({ "engine": { "anything": ["at", "all"] } })),
+        "`content` reaches Rust as opaque JSON, so its keys are the renderer's to police"
+    );
+}
+
+/// The reproduction path from the finding, end to end through the renderer.
+///
+/// `image.maxWidth` was documented, typed in `RuvyxaConfig`, and read by Rust as
+/// `pub max_width: u32` — and `CONFIG_KEY_SCHEMA` did not list it, so
+/// `assertKnownKeys` threw `RUV1602 unknown config.image field: maxWidth` while
+/// the config was still being rendered. Every command loads the config first, so
+/// a project that set the documented option could not run any of them.
+///
+/// The unit test below deserializes `ProjectConfig` directly and so cannot see
+/// that: the renderer is the half that refused. This one writes the config a
+/// project would write and runs the whole load.
+#[test]
+fn a_rendered_config_carries_image_max_width_to_the_optimizer() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::create_dir_all(root.join("app")).unwrap();
+    std::fs::write(
+        root.join("ruvyxa.config.ts"),
+        "import { config } from \"ruvyxa/config\"\n\
+         \n\
+         export default config({ image: { maxWidth: 1920 } })\n",
+    )
+    .unwrap();
+
+    let config = load_project_config(root)
+        .expect("a config setting the documented `image.maxWidth` must load");
+    assert_eq!(
+        config.images.max_width, 1920,
+        "the rendered config has to carry the value the project wrote, not the default"
+    );
+}
+
+/// `image.maxWidth` reaches the field for every value the option documents.
+///
+/// The finding was not that the number was wrong — Rust has always read this
+/// key — but that no config carrying it ever got as far as being deserialized.
+/// `0` is the documented "publish the source's own resolution" escape hatch and
+/// is the case a projection that drops falsy values silently turns back into
+/// the 3840 default, so it is the one asserted.
+#[test]
+fn the_configured_image_max_width_reaches_the_optimizer() {
+    let default: ProjectConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert_eq!(default.images.max_width, 3840);
+
+    for width in [0_u32, 1920, 6000] {
+        let config: ProjectConfig =
+            serde_json::from_value(serde_json::json!({ "image": { "maxWidth": width } }))
+                .expect("`image.maxWidth` is a config option, not an unknown field");
+        assert_eq!(
+            config.images.max_width, width,
+            "a project that writes `image.maxWidth: {width}` must get {width}"
+        );
+        config
+            .validate_paths()
+            .unwrap_or_else(|error| panic!("`image.maxWidth: {width}` must validate: {error}"));
+    }
+}
+
+// ─── CLI build pipeline: report placement, worker lifetime, artifact reads ────
+
+/// The client build report is not a browser asset, and `client/` is public by
+/// contract.
+///
+/// It carries the absolute source paths of the build machine, the module graph
+/// of every shared chunk and route, the bundler cache location, the configured
+/// plugin list, and per-route byte counts — and it was written into the one
+/// directory the native server maps every flat `/__ruvyxa/client/<name>`
+/// request into and every static deployment copies wholesale to a CDN. The lean
+/// `route-manifest.json` beside it exists precisely so none of that has to
+/// ship.
+///
+/// Excluding it from the copy instead would have left three hosts to keep in
+/// step; a file outside the published directory cannot be published by any of
+/// them.
+#[test]
+fn the_client_build_report_is_written_outside_the_public_client_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let staging = temp.path();
+    let client_dir = staging.join("client");
+    fs::create_dir_all(&client_dir).unwrap();
+
+    let client_manifest = json!({
+        "routes": [{
+            "path": "/",
+            "src": "/__ruvyxa/client/home.abc.js",
+            "modules": [staging.join("app").join("page.tsx").to_string_lossy()],
+            "sharedChunks": [{ "src": "/__ruvyxa/client/shared.def.js" }],
+        }],
+        "cache": { "directory": staging.join("cache").to_string_lossy() },
+    });
+
+    let written = write_client_build_report(staging, &client_manifest).unwrap();
+
+    assert_eq!(written, staging.join("client-report.json"));
+    assert!(
+        !client_dir.join("manifest.json").exists(),
+        "the build report must not be emitted into the directory every host publishes"
+    );
+    assert_eq!(
+        fs::read_dir(&client_dir).unwrap().count(),
+        0,
+        "nothing about this report belongs under a public URL"
+    );
+    let report = fs::read_to_string(&written).unwrap();
+    assert!(
+        report.contains("page.tsx"),
+        "the report still carries absolute build-machine paths — which is why it moved: {report}"
+    );
+
+    // The pre-renderer reads it from its new home.
+    let assets = load_prerender_client_assets(&written).unwrap();
+    assert_eq!(assets["/"].src, "/__ruvyxa/client/home.abc.js");
+    assert_eq!(
+        assets["/"].preloads,
+        vec!["/__ruvyxa/client/shared.def.js".to_string()]
+    );
+
+    // And the commit carries it into the output directory, or the deployed
+    // function that reads it from there finds nothing.
+    assert!(
+        BUILD_OUTPUT_FILES.contains(&CLIENT_BUILD_REPORT_FILE),
+        "a build output nobody commits is a build output nobody has"
+    );
+}
+
+/// A warm build must read each cached artifact once.
+///
+/// The pre-scan that decided whether to start a Node process answered its
+/// question by doing the work: it called `load_prerender_artifact` for every
+/// job — a whole-file read and a JSON parse whose `html` field is the entire
+/// rendered document — and discarded the answer, and the render then loaded it
+/// again. `any()` short-circuits on the first *miss*, so a cold build paid one
+/// extra load and a fully warm build paid one per page: the entire cost landed
+/// on exactly the case the pre-scan existed to make fast.
+///
+/// The property the pre-scan protected is asserted here too: a build whose
+/// every render is a cache hit starts no Node process at all.
+#[tokio::test]
+async fn a_fully_warm_prerender_reads_each_artifact_once_and_starts_no_worker() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let app_dir = root.join("app");
+    fs::create_dir_all(app_dir.join("about")).unwrap();
+    let home_file = app_dir.join("page.tsx");
+    let about_file = app_dir.join("about").join("page.tsx");
+    fs::write(&home_file, "export default () => 'home'").unwrap();
+    fs::write(&about_file, "export default () => 'about'").unwrap();
+
+    let pages = [("/", home_file.clone()), ("/about", about_file.clone())];
+    let manifest = ruvyxa_graph::RouteManifest {
+        app_dir: PathBuf::from("app"),
+        routes: pages
+            .iter()
+            .map(|(path, file)| ruvyxa_graph::RouteEntry {
+                id: format!("app{path}/page"),
+                path: (*path).to_string(),
+                kind: ruvyxa_graph::RouteKind::Page,
+                file: file.clone(),
+                layout_chain: Vec::new(),
+                template_chain: Vec::new(),
+                slots: Vec::new(),
+                intercepts: Vec::new(),
+                server_modules: Vec::new(),
+                client_modules: Vec::new(),
+                runtime: ruvyxa_graph::RuntimeTarget::Node,
+                render: ruvyxa_graph::RenderMeta {
+                    strategy: RenderStrategy::Ssg,
+                    ..ruvyxa_graph::RenderMeta::default()
+                },
+            })
+            .collect(),
+        i18n: None,
+    };
+
+    let build = BuildConfigOptions::default();
+    let runtime = JavaScriptRuntime::Node;
+    let cache_dir = root.join("cache");
+    let prerender_dir = root.join("prerender");
+    let client_report = root.join(CLIENT_BUILD_REPORT_FILE);
+    fs::write(&client_report, r#"{"routes":[]}"#).unwrap();
+    let head = PrerenderHead {
+        asset_links: "".into(),
+        styles: "".into(),
+        plugin_head: "".into(),
+        shell: CsrShell::default(),
+    };
+
+    // The same cache identity the phase derives, so the artifacts stored here
+    // are the ones it validates: anything else is a miss, and a miss needs a
+    // Node process this test deliberately does not give it.
+    let worker_env = build_worker_env(root, &build, runtime).unwrap();
+    let artifact_cache = PrerenderArtifactCache {
+        directory: cache_dir.clone(),
+        dependency_hash: "dependency-v1".to_string(),
+        render_context_hash: prerender_context_hash(
+            root,
+            &head,
+            &load_prerender_client_assets(&client_report).unwrap(),
+            &build,
+            &worker_env,
+        ),
+        fingerprints: Arc::new(ArtifactFingerprintCache::default()),
+        enabled: true,
+    };
+    for (path, file) in &pages {
+        store_prerender_artifact(
+            &artifact_cache,
+            &PrerenderJob {
+                route_path: (*path).to_string(),
+                render_path: (*path).to_string(),
+                params: RouteParams::new(),
+                strategy: RenderStrategy::Ssg,
+                revalidate: None,
+                kind: PrerenderJobKind::Render {
+                    route_file: file.clone(),
+                    mode: "full",
+                    server_components: false,
+                },
+            },
+            "renderer-v1",
+            std::slice::from_ref(file),
+            &format!("<main>{path}</main>"),
+        );
+    }
+
+    PRERENDER_ARTIFACT_READS.store(0, std::sync::atomic::Ordering::Relaxed);
+    let prerendered = prerender_static_routes(
+        root,
+        &app_dir,
+        &manifest,
+        &prerender_dir,
+        &client_report,
+        head.clone(),
+        &build,
+        RuvyxaBuildCache {
+            dependency_hash: "dependency-v1",
+            directory: &cache_dir,
+        },
+        runtime,
+        false,
+        None,
+    )
+    .await
+    .expect("a fully cached pre-render needs no worker and cannot fail");
+
+    assert_eq!(prerendered.len(), 2);
+    assert!(
+        prerendered.iter().all(|route| route.artifact_cache_hit),
+        "the test's own cache identity does not match the phase's: {prerendered:?}"
+    );
+    assert_eq!(
+        PRERENDER_ARTIFACT_READS.load(std::sync::atomic::Ordering::Relaxed),
+        pages.len(),
+        "a warm build must read each cached artifact once, not twice"
+    );
+    assert_eq!(
+        fs::read_to_string(prerender_dir.join("index.html")).unwrap(),
+        "<main>/</main>"
+    );
+}
+
+/// A client report that is present but unusable stops the build; a report that
+/// is simply absent does not.
+///
+/// The three answers are not one answer. An empty asset map makes
+/// `inject_prerender_client_assets` hand back the document unchanged, so a
+/// damaged report produced pages with no bootstrap block and no
+/// `<script type="module">` at all — on a build that reported success. Nothing
+/// downstream can see it either: `output_audit` looks for references that do
+/// not resolve, and a document that references *nothing* has none. The deployed
+/// site then renders correctly and is completely non-interactive.
+///
+/// `write_style_asset` was hardened against the same shape with the same
+/// answer, and `prebuilt_client_assets` in `html_document.rs` and
+/// `read_cache_observation` in `bench.rs` already separate absent from
+/// unreadable for this very file. This was the reader that did not.
+#[test]
+fn an_unusable_client_report_fails_the_prerender_phase_instead_of_dropping_hydration() {
+    let temp = tempfile::tempdir().unwrap();
+    let client_report = temp.path().join(CLIENT_BUILD_REPORT_FILE);
+
+    // A build interrupted mid-write, or two builds sharing an output directory.
+    fs::write(&client_report, r#"{"routes":[{"path":"/","src":"/a.j"#).unwrap();
+    let error = load_prerender_client_assets(&client_report)
+        .expect_err("a truncated client report is not a project without client bundles");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains(CLIENT_BUILD_REPORT_FILE),
+        "the error must name the file to delete and rebuild: {message}"
+    );
+
+    // Valid JSON that is not this document is the same class of answer: the
+    // routes table is what the map is built from, so a file without one cannot
+    // be read as "no routes ship a bundle".
+    fs::write(&client_report, r#"{"cacheHits":3}"#).unwrap();
+    assert!(
+        load_prerender_client_assets(&client_report).is_err(),
+        "a report with no routes table is unusable, not empty"
+    );
+
+    // The one legal absence: a build that emitted no client bundle at all.
+    fs::remove_file(&client_report).unwrap();
+    assert!(
+        load_prerender_client_assets(&client_report)
+            .expect("a missing report is a legal state")
+            .is_empty()
+    );
+}
+
+/// The cell is what `shutdown()` reaches, and a pool nobody needed was never
+/// started.
+///
+/// `NodeWorkerPool` has no `Drop` impl, and its `retiring` field exists because
+/// a worker that crossed its render budget is no longer in `workers`: its
+/// `Child` is owned by a detached drain task that only `shutdown()` joins. The
+/// cell is therefore the single owner — an un-started cell has nothing to
+/// close, and an adopted pool is closed by the phase that adopted it rather
+/// than by the caller that started it.
+#[tokio::test]
+async fn an_unstarted_worker_pool_has_nothing_to_shut_down() {
+    let pool = LazyPrerenderWorkerPool::new(
+        Path::new("/nonexistent"),
+        BTreeMap::new(),
+        1,
+        JavaScriptRuntime::Node,
+    );
+
+    assert!(!pool.started());
+    pool.shutdown().await;
+    assert!(!pool.started(), "shutting down must not start anything");
+}
+
+/// A server-components pass whose every route is answered from the cache starts
+/// no worker, so there is no pool to leak on the way out.
+///
+/// The three exits that used to skip `shutdown()` are all on the far side of
+/// this early return; the return itself is what keeps a warm build off Node
+/// entirely, and nothing else covers it.
+#[tokio::test]
+async fn a_fully_cached_server_component_pass_starts_no_worker() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let app_dir = root.join("app");
+    fs::create_dir_all(app_dir.join("live")).unwrap();
+    let page = app_dir.join("live").join("page.tsx");
+    fs::write(&page, "export const serverComponents = true").unwrap();
+
+    let manifest = ruvyxa_graph::RouteManifest {
+        app_dir: PathBuf::from("app"),
+        routes: vec![ruvyxa_graph::RouteEntry {
+            id: "app/live/page".to_string(),
+            path: "/live".to_string(),
+            kind: ruvyxa_graph::RouteKind::Page,
+            file: page.clone(),
+            layout_chain: Vec::new(),
+            template_chain: Vec::new(),
+            slots: Vec::new(),
+            intercepts: Vec::new(),
+            server_modules: Vec::new(),
+            client_modules: Vec::new(),
+            runtime: ruvyxa_graph::RuntimeTarget::Node,
+            render: ruvyxa_graph::RenderMeta {
+                strategy: RenderStrategy::Ssr,
+                server_components: true,
+                ..ruvyxa_graph::RenderMeta::default()
+            },
+        }],
+        i18n: None,
+    };
+
+    let cache = ServerComponentEntryCache {
+        directory: root.join("cache"),
+        dependency_hash: "dependency-v1".to_string(),
+        context_hash: "worker-v1".to_string(),
+        fingerprints: Arc::new(ArtifactFingerprintCache::default()),
+    };
+    store_server_component_entry(
+        &cache,
+        "/live",
+        std::slice::from_ref(&page),
+        "export default 1",
+        &[],
+    );
+
+    let entries = collect_server_component_entries(
+        root,
+        &app_dir,
+        &manifest,
+        &BuildConfigOptions::default(),
+        JavaScriptRuntime::Node,
+        Some(&cache),
+    )
+    .await
+    .expect("a cached entry must not need a worker");
+
+    assert_eq!(
+        entries.entries.get("/live").map(String::as_str),
+        Some("export default 1")
     );
 }

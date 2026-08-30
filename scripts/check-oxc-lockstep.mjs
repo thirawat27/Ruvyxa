@@ -8,11 +8,12 @@
 //
 // Nothing in cargo or npm relates these two packages, so this check is the only
 // thing holding them together. It fails the build the moment they drift.
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 
 const CARGO_LOCK = 'Cargo.lock'
 const CARGO_TOML = 'Cargo.toml'
 const RUNTIME_PKG = 'packages/ruvyxa/package.json'
+const WORKSPACE_YAML = 'pnpm-workspace.yaml'
 
 const failures = []
 
@@ -60,6 +61,32 @@ if (lockedRustVersion && nodeRequirement && lockedRustVersion !== nodeRequiremen
       `    cargo update -p oxc --precise <version>\n` +
       `    pnpm install`,
   )
+}
+
+// `minimumReleaseAgeExclude` used to list 23 `oxc-transform` specifiers pinned
+// to `0.142.0 || 0.143.0` — versions this workspace had long since moved past,
+// under no `minimumReleaseAge` policy for them to modify. `pnpm config get
+// minimumReleaseAge` answered `undefined`, there is no repository `.npmrc`, and
+// the user one carries only an auth token, so the block was doing nothing while
+// reading as live policy: a maintainer bumping oxc would reasonably assume those
+// 23 lines had to move with it.
+//
+// It was deleted. This is what stops it coming back stale: the list is only
+// meaningful while every entry names the version actually pinned, and this check
+// already reads that version for the lockstep comparison above.
+if (nodeRequirement && existsSync(WORKSPACE_YAML)) {
+  const workspace = readFileSync(WORKSPACE_YAML, 'utf8')
+  const stale = [...workspace.matchAll(/^\s*-\s*'?([^'\n]*oxc-transform[^'\n]*)'?\s*$/gm)]
+    .map((match) => match[1].trim())
+    .filter((entry) => !entry.includes(nodeRequirement))
+  if (stale.length > 0) {
+    failures.push(
+      `${WORKSPACE_YAML} pins oxc-transform at ${nodeRequirement} but lists ` +
+        `${stale.length} exclusion(s) naming another version: ${stale.slice(0, 3).join(', ')}` +
+        `${stale.length > 3 ? ', …' : ''}. An exclusion list that does not name the pinned ` +
+        'version excludes nothing.',
+    )
+  }
 }
 
 if (failures.length > 0) {

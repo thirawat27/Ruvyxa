@@ -53,11 +53,39 @@ jobs:
             echo "::error::Tag version ($TAG_VERSION) does not match package.json ($PKG_VERSION)"
             exit 1
           fi
+  # The gate every publish job waits on, and for a long time the reason that
+  # wait meant nothing.
+  #
+  # `ci.yml` triggers on the same `v*.*.*` tag as this workflow and neither one
+  # references the other, so the two ran in parallel: `verify-release` could go
+  # green and `publish-native` could start while `test (windows-latest)` was
+  # still running, or already red. `verify-release` itself was one
+  # `ubuntu-latest` runner of static checks — no dev server, no deployed
+  # artifact, no scaffold-to-clean walk — while this repository's expensive
+  # defects are overwhelmingly Windows-specific (`\\?\` canonical paths, CRLF
+  # against rustfmt's `newline_style`, `%TEMP%` ancestors, a `process.exit`
+  # abort on the Windows runner). None of that class could block a tag.
+  #
+  # So the gate carries the platforms itself rather than depending on a verdict
+  # GitHub gives no ordering guarantee about. That roughly triples the release
+  # critical path, which is the trade: a tagged publish is the most expensive
+  # place in this repository to discover a platform defect, and the alternative
+  # is discovering it after five native packages are already on npm.
+  # `ci_workflows.rs` asserts what this job *covers*, not that it exists.
   verify-release:
-    name: Verify release candidate
+    name: Verify release candidate (${{ matrix.os }})
     needs: resolve-version
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      # One platform failing must not hide the verdict of the other two: the
+      # question at a tag is "which platforms are broken", not "is anything".
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: windows-latest
+          - os: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -65,15 +93,62 @@ jobs:
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          shared-key: ruvyxa-release-verify
+          shared-key: 'ruvyxa-release-verify-${{ matrix.os }}'
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24.19.0
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
+      # The audits gate the tag.
+      #
+      # `security.yml` runs both lanes, but nothing in this workflow depends on
+      # it and its push triggers are path-filtered to manifest files — so a tag
+      # could publish with an advisory outstanding, from a job that holds
+      # NPM_TOKEN. Running them here is what makes "verify" mean it.
+      #
+      # Once, on Linux only: an advisory is a property of the lockfiles, not of
+      # the runner, and installing cargo-audit on three platforms would triple
+      # the cost of learning the same answer. `--locked` so the audit tool
+      # itself is reproducible.
+      - name: Install RustSec cargo-audit
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Audit Cargo lockfile
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo audit --file Cargo.lock
+      - name: Audit production dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: pnpm audit --prod --audit-level low
+      - name: Audit development dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: pnpm audit --audit-level high
+      # Retried the way `ci.yml` retries them. Three platforms of end-to-end
+      # lanes surface every latent registry flake as a publish blocker, and a
+      # transient fetch is the one failure here that means nothing about the
+      # release candidate.
+      - name: Prefetch Rust dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if cargo fetch --locked; then
+              exit 0
+            fi
+            delay=$((attempt * 20))
+            echo "cargo fetch failed on attempt ${attempt}; retrying in ${delay}s"
+            sleep "$delay"
+          done
+          cargo fetch --locked
       - name: Install JavaScript dependencies
-        run: pnpm install --frozen-lockfile --prefer-offline
+        run: |
+          for attempt in 1 2 3; do
+            if pnpm install --frozen-lockfile --prefer-offline; then
+              exit 0
+            fi
+            delay=$((attempt * 20))
+            echo "pnpm install failed on attempt ${attempt}; retrying in ${delay}s"
+            sleep "$delay"
+          done
+          pnpm install --frozen-lockfile --prefer-offline
       - name: Check formatting and dependency locks
         run: |
           pnpm format:check
@@ -91,6 +166,28 @@ jobs:
         run: |
           pnpm release:validate
           pnpm pack:smoke
+      # Everything above is a check a developer can run. Everything below needs
+      # a server started, and none of it stood between a tag and npm.
+      - name: Build the CLI the end-to-end lanes run
+        run: cargo build -p ruvyxa_cli
+      - name: Exercise the dev server
+        timeout-minutes: 20
+        env:
+          RUVYXA_CLI: ${{ github.workspace }}/target/debug/ruvyxa${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: node scripts/smoke-dev-server.mjs examples/deploy-smoke 4402
+      - name: Build and launch Node deployment artifact
+        timeout-minutes: 15
+        run: |
+          cargo run -p ruvyxa_cli -- build --root examples/deploy-smoke --adapter node
+          node scripts/smoke-runtime-adapter.mjs node examples/deploy-smoke/.ruvyxa/deploy/node 4390
+      # PowerShell-only and bound to `target\debug\ruvyxa.exe`, which is why it
+      # is one leg — and why the platform it is bound to had to be in this
+      # matrix for the walk to be reachable from a release at all.
+      - name: Walk the full project flow
+        if: matrix.os == 'windows-latest'
+        timeout-minutes: 45
+        shell: pwsh
+        run: pnpm test:full-flow
 
   publish-native:
     name: Publish Ruvyxa Framework CLI (${{ matrix.os }})

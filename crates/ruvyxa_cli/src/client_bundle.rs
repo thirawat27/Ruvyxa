@@ -1471,12 +1471,15 @@ pub(crate) fn emit_shared_route_chunk(
 
 /// Emit the lean route table the browser router fetches for soft navigation.
 ///
-/// `manifest.json` is a build report: it carries absolute source paths, module
-/// lists, byte counts, and per-route chunk graphs — none of which the browser
-/// needs, and the absolute paths of which should never be shipped to clients.
-/// This sibling file exposes only `{ path, src, sharedChunks, artifactVersion }` per
-/// page route, so `@ruvyxa/react`'s router downloads kilobytes, not the full
-/// build manifest. The dev server synthesizes the same shape at
+/// The client build report carries absolute source paths, module lists, byte
+/// counts, and per-route chunk graphs — none of which the browser needs, and
+/// the absolute paths of which must never be shipped to clients. It used to sit
+/// in this directory as `manifest.json` and was served at
+/// `/__ruvyxa/client/manifest.json` by every host; it is now written outside it,
+/// at the build root as `client-report.json`. This file exposes only
+/// `{ path, src, sharedChunks, artifactVersion }` per page route, so
+/// `@ruvyxa/react`'s router downloads kilobytes, not the whole report. The dev
+/// server synthesizes the same shape at
 /// `/__ruvyxa/client/route-manifest.json`.
 /// Write the project's compiled CSS as a content-addressed client asset.
 ///
@@ -1743,7 +1746,45 @@ pub(crate) async fn collect_server_component_entries(
     .await
     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
-    for route in &pending {
+    // Every exit shuts the pool down, not just the two that used to.
+    //
+    // `NodeWorkerPool` has no `Drop` impl, and its `retiring` field exists
+    // precisely because a worker that crossed `DEFAULT_ISOLATED_RENDERS_PER_WORKER`
+    // is no longer in `workers`: its `Child` is owned by a detached drain task
+    // that only `shutdown()` joins. The transport-error and no-source paths on
+    // either side of the `!response.ok` branch returned without it, so a failed
+    // build left an orphaned `node` process holding handles on the project and
+    // the build directory — on Windows exactly what makes the next build's
+    // renames fail and burn through `rename_with_windows_retry`.
+    let outcome = collect_pending_server_component_entries(
+        &pool,
+        root,
+        app_dir,
+        &pending,
+        cache,
+        &mut collected,
+    )
+    .await;
+    pool.shutdown().await;
+    outcome?;
+    Ok(collected)
+}
+
+/// Ask the worker for each pending route's browser entry.
+///
+/// Extracted so its three failure exits and its success exit are all one
+/// `Result` returned to a caller that owns the pool's shutdown. Results are
+/// accumulated into `collected` rather than returned, so a failure part-way
+/// through still leaves the caller with a value to drop.
+async fn collect_pending_server_component_entries(
+    pool: &ruvyxa_dev_server::NodeWorkerPool,
+    root: &Path,
+    app_dir: &Path,
+    pending: &[RouteEntry],
+    cache: Option<&ServerComponentEntryCache>,
+    collected: &mut ServerComponentEntries,
+) -> anyhow::Result<()> {
+    for route in pending {
         let response = pool
             .rsc_client_entry(root, app_dir, &route.file, &route.path)
             .await
@@ -1756,7 +1797,6 @@ pub(crate) async fn collect_server_component_entries(
         if !response.ok {
             let code = response.code.unwrap_or_else(|| "RUV1300".to_string());
             let message = ruvyxa_diagnostics::worker_failure_message(response.message);
-            pool.shutdown().await;
             anyhow::bail!(
                 "Server-components client entry failed for {}: {}",
                 route.path,
@@ -1790,8 +1830,7 @@ pub(crate) async fn collect_server_component_entries(
         collected.entries.insert(route.path.clone(), source);
         collected.server_references.extend(server_references);
     }
-    pool.shutdown().await;
-    Ok(collected)
+    Ok(())
 }
 
 /// What the `react-server` graph reported about every server-components route.

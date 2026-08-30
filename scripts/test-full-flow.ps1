@@ -305,18 +305,22 @@ foreach ($name in @("server", "client", "assets", "prerender")) {
     }
 }
 
-$ClientManifestPath = Join-Path $ClientDir "manifest.json"
+# The lean route table the browser router fetches, and the file every host
+# reads to find a route's scripts. It is machine-read on the SSR path, so
+# assert it parses and carries per-route entries rather than only that the file
+# exists. The verbose build report that used to sit beside it as
+# `client/manifest.json` now lives outside the published directory, at the build
+# root as `client-report.json`.
+$ClientManifestPath = Join-Path $ClientDir "route-manifest.json"
 if (Test-Path $ClientManifestPath) {
-    # The client manifest is machine-read on the SSR path, so assert it parses
-    # and carries per-route entries rather than only that the file exists.
     $clientManifest = Get-Content $ClientManifestPath -Raw | ConvertFrom-Json
     if ($clientManifest.routes.Count -gt 0) {
-        Write-Ok "build: client/manifest.json ($($clientManifest.routes.Count) routes)"
+        Write-Ok "build: client/route-manifest.json ($($clientManifest.routes.Count) routes)"
     } else {
-        Write-Fail "build: client/manifest.json has no routes"
+        Write-Fail "build: client/route-manifest.json has no routes"
     }
 } else {
-    Write-Fail "build: client/manifest.json missing"
+    Write-Fail "build: client/route-manifest.json missing"
 }
 
 $BuildJson = Join-Path $OutDir "build.json"

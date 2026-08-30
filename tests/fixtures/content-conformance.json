@@ -1,0 +1,103 @@
+{
+  "why": "Both content compilers append the frontmatter/meta/headings/contentFormat exports only when the author did not write them. Deciding that needs an answer to 'does this module already export NAME', and both halves answered it with a private tokenizer that knew line comments, block comments and the three quote characters but had no regular-expression branch. A regex containing a quote therefore opened a string skip that ran to the next quote anywhere in the file, so the author's own export stopped being seen as code and the generated one was appended beside it: 'Identifier already declared'. The cases below pin the decision to the one scanner per language, in both directions.",
+  "declarationCounting": "'declarations' counts occurrences of the literal substring 'export const NAME' in the compiled module, the passed-through source included. A case whose own source spells the phrase therefore expects two.",
+  "cases": [
+    {
+      "name": "regex holding a single quote above an authored frontmatter",
+      "why": "The reported reproduction. The quote inside the character class must not open a string, and the author's frontmatter must remain the only declaration.",
+      "file": "page.mdx",
+      "source": "export const pattern = /['\"]/\nexport const frontmatter = { title: 'Quote' }\n\n# Heading\n",
+      "declarations": { "frontmatter": 1, "meta": 1, "headings": 1, "contentFormat": 1 },
+      "exports": { "frontmatter": { "title": "Quote" }, "contentFormat": "mdx" }
+    },
+    {
+      "name": "regex holding a double quote above an authored frontmatter",
+      "why": "The same blindness with the other ASCII quote, which the tokenizer also treated as a string opener.",
+      "file": "page.mdx",
+      "source": "export const pattern = /[\"']/\nexport const frontmatter = { title: \"Double\" }\n\n# Heading\n",
+      "declarations": { "frontmatter": 1, "meta": 1, "headings": 1, "contentFormat": 1 },
+      "exports": { "frontmatter": { "title": "Double" }, "contentFormat": "mdx" }
+    },
+    {
+      "name": "regex holding a backtick above an authored frontmatter",
+      "why": "A backtick in a character class opened a template literal that ran to end of file, so nothing after the regex was code at all.",
+      "file": "page.mdx",
+      "source": "export const pattern = /[`'\"]/\nexport const frontmatter = { title: 'Tick' }\n\n# Heading\n",
+      "declarations": { "frontmatter": 1, "meta": 1, "headings": 1, "contentFormat": 1 },
+      "exports": { "frontmatter": { "title": "Tick" }, "contentFormat": "mdx" }
+    },
+    {
+      "name": "an export written inside template text is not an export",
+      "why": "Template text is not code, so the generated frontmatter is still appended and the phrase appears twice: once as the string the author wrote, once as the declaration. This is the direction the shared scanner makes stricter, and it is the intended one.",
+      "file": "page.mdx",
+      "source": "export const sample = `export const frontmatter = 1`\n\n# Heading\n",
+      "declarations": { "frontmatter": 2, "meta": 1, "headings": 1, "contentFormat": 1 },
+      "exports": {
+        "frontmatter": {},
+        "sample": "export const frontmatter = 1",
+        "contentFormat": "mdx"
+      }
+    },
+    {
+      "name": "a backtick inside a template interpolation closes nothing",
+      "why": "A quoted backtick inside a ${...} ended the template early for the tokenizer, which then read the rest of the module as string content. Interpolations are code for the shared scanner.",
+      "file": "page.mdx",
+      "source": "export const sample = `${\"`\"} done`\nexport const frontmatter = { title: 'Interp' }\n\n# Heading\n",
+      "declarations": { "frontmatter": 1, "meta": 1, "headings": 1, "contentFormat": 1 },
+      "exports": {
+        "frontmatter": { "title": "Interp" },
+        "sample": "` done",
+        "contentFormat": "mdx"
+      }
+    },
+    {
+      "name": "a re-export clause already publishes the name",
+      "why": "ast::has_named_runtime_export deliberately ignores re-export forms because they are a graph edge it cannot prove. The generator needs the wider answer: a clause that already binds the name makes an appended declaration a duplicate the module cannot parse.",
+      "file": "page.mdx",
+      "source": "export { title as frontmatter, title as meta } from './linked.js'\n\n# Heading\n",
+      "dependencies": { "linked.js": "export const title = { title: 'Linked' };\n" },
+      "declarations": { "frontmatter": 0, "meta": 0, "headings": 1, "contentFormat": 1 },
+      "exports": { "frontmatter": { "title": "Linked" }, "contentFormat": "mdx" }
+    },
+    {
+      "name": "a local export clause already publishes the name",
+      "why": "The clause form without a `from` has to be recognised too, and the exported name is the one after `as`.",
+      "file": "page.mdx",
+      "source": "export const local = { title: 'Local' }\nexport { local as frontmatter, local as meta }\n\n# Heading\n",
+      "declarations": { "frontmatter": 0, "meta": 0, "headings": 1, "contentFormat": 1 },
+      "exports": { "frontmatter": { "title": "Local" }, "contentFormat": "mdx" }
+    },
+    {
+      "name": "a generator declaration already publishes the name",
+      "why": "`export function* frontmatter` puts the star between the keyword and the name, so a prefix list of `function `/`const `/... cannot reach past it and the export went unseen on the Rust side.",
+      "file": "page.mdx",
+      "source": "export function* frontmatter() {}\n\n# Heading\n",
+      "declarations": { "frontmatter": 0, "meta": 1, "headings": 1, "contentFormat": 1 }
+    },
+    {
+      "name": "a combining-mark identifier is one identifier",
+      "why": "The Rust tokenizer classified identifier characters with char::is_alphanumeric, which is false for the combining marks Thai, Devanagari, Arabic, Hebrew and Vietnamese are written with, so it split one identifier into three tokens.",
+      "file": "page.mdx",
+      "source": "export const ค่า = 1\n\n# Heading\n",
+      "declarations": { "frontmatter": 1, "meta": 1, "headings": 1, "contentFormat": 1 },
+      "exports": { "frontmatter": {}, "contentFormat": "mdx" }
+    },
+    {
+      "name": "a declared name that only starts with the generated name is a different name",
+      "why": "`frontmatterค่า` is not `frontmatter`. An identifier-boundary check written in ASCII bytes ends the name at the combining mark and suppresses the generated export, which loses the frontmatter and the headings silently — the reverse direction of the same defect.",
+      "file": "page.mdx",
+      "source": "export const frontmatterค่า = 1\n\n# Heading\n",
+      "declarations": { "frontmatter": 2, "meta": 1, "headings": 1, "contentFormat": 1 },
+      "exports": { "frontmatter": {}, "contentFormat": "mdx" }
+    },
+    {
+      "name": "a clause name that only starts with the generated name is a different name",
+      "why": "The same boundary question inside a clause: `{ value as frontmatterค่า }` publishes `frontmatterค่า`, so the generated frontmatter is still required.",
+      "file": "page.mdx",
+      "source": "export { value as frontmatterค่า } from './linked.js'\n\n# Heading\n",
+      "dependencies": { "linked.js": "export const value = 1;\n" },
+      "declarations": { "frontmatter": 1, "meta": 1, "headings": 1, "contentFormat": 1 },
+      "exports": { "frontmatter": {}, "contentFormat": "mdx" }
+    }
+  ]
+}

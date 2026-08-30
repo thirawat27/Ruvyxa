@@ -24,6 +24,10 @@
 //! - [`progress`] — the two live surfaces: the runner track and the spinner.
 //! - [`banner`] — the header every command opens with and the line a
 //!   successful one closes on.
+//! - [`sanitize`] — what a value is allowed to be once it is on its way to a
+//!   terminal, since repository file paths reach one directly.
+//! - [`stream`] — the one writer every durable line goes through, where a
+//!   closed pipe is a clean stop rather than a panic.
 //!
 //! The split between `theme` and `gradient` is the one worth holding on to.
 //! Adding a 24-bit colour to a role looks like an improvement and is a
@@ -36,6 +40,8 @@ pub mod gradient;
 pub mod layout;
 pub mod mascot;
 pub mod progress;
+pub mod sanitize;
+pub mod stream;
 pub mod theme;
 
 pub use banner::*;
@@ -43,6 +49,8 @@ pub use gradient::{BRAND, Gradient, HEAT, PULSE, RULE, Rgb, TRAIL, to_ansi256};
 pub use layout::*;
 pub use mascot::*;
 pub use progress::*;
+pub use sanitize::*;
+pub use stream::*;
 pub use theme::*;
 
 #[cfg(test)]

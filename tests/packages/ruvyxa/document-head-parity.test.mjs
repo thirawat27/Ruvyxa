@@ -24,6 +24,7 @@ import { describe, it } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 import { documentAssetsPrelude } from '../../../packages/ruvyxa/runtime/entry-templates.mjs'
+import { escapeHtmlAttribute } from '../../../packages/ruvyxa/runtime/serverless-handler.mjs'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
 const fixture = JSON.parse(
@@ -75,5 +76,41 @@ describe('document head defaults', () => {
     assert.match(head, /example\.test\/a\.js/)
     assert.ok(head.indexOf('ruvyxa.png') < head.indexOf('example.test'))
     assert.ok(head.indexOf('example.test') < head.indexOf('/s.css'))
+  })
+})
+
+/**
+ * The escaping half of the same fixture, against both JavaScript copies.
+ *
+ * `escape_html` on the native host says it is the one place this rule lives.
+ * It is not: the prelude `entry-templates.mjs` generates carries
+ * `__ruvyxaEscapeAttribute`, and `serverless-handler.mjs` carries
+ * `escapeHtmlAttribute`, and a deployed page goes through one of those rather
+ * than through anything in `crates/`. All three were missing `'`, which was
+ * inert only for as long as every call site happened to be element text or a
+ * double-quoted attribute. `crates/ruvyxa_dev_server/src/static_assets.rs`
+ * replays this same table on the other side.
+ */
+describe('the HTML escaping rule, across every copy of it', () => {
+  const cases = fixture.escaping.cases
+
+  it('has a table to replay', () => {
+    assert.ok(Array.isArray(cases) && cases.length > 0, 'an empty table asserts nothing')
+  })
+
+  it('is the same rule in the generated entry prelude', async () => {
+    const source = documentAssetsPrelude('', { assetLinks: '', pluginHead: '' })
+    const module = await import(
+      `data:text/javascript,${encodeURIComponent(`${source}\nexport { __ruvyxaEscapeAttribute }`)}`
+    )
+    for (const { name, input, expect } of cases) {
+      assert.equal(module.__ruvyxaEscapeAttribute(input), expect, name)
+    }
+  })
+
+  it('is the same rule in the deployed request-time writer', () => {
+    for (const { name, input, expect } of cases) {
+      assert.equal(escapeHtmlAttribute(input), expect, name)
+    }
   })
 })

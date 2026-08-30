@@ -278,6 +278,51 @@ describe('serverless handler dynamic image bounds', () => {
       )
     }
   })
+
+  /**
+   * Which header names an adapter's emitted handler treats as its platform's
+   * ingress, held to the shared contract in both directions.
+   *
+   * `clientIpHeaders` reached exactly two adapters — the two whose platform
+   * headers were being *removed* from an unconditional list — and never the
+   * other two serverless targets, which have documented ingress of their own.
+   * Nothing asked an adapter to answer the question, so Netlify and Firebase
+   * quietly collapsed every per-client control to one bucket. This is what asks.
+   *
+   * Both directions matter and for opposite reasons. A missing declaration
+   * makes identity fall through to a right-to-left `X-Forwarded-For` scan on a
+   * platform whose real client is not there; a declaration for a header the
+   * platform does *not* overwrite is worse, because one client rotating a
+   * fabricated value then gets a fresh bucket per request.
+   */
+  it('declares the ingress headers the shared contract names, and no others', () => {
+    for (const adapter of fixture('adapter-contract.json').adapters) {
+      assert.ok(
+        Array.isArray(adapter.clientIpHeaders),
+        `adapter ${adapter.name} must declare clientIpHeaders, even as an empty list`,
+      )
+      const source = adapterSource(adapter.name)
+      const declared = [...source.matchAll(/clientIpHeaders: \[([^\]]*)\]/g)].map((match) =>
+        [...match[1].matchAll(/'([^']+)'/g)].map((name) => name[1]),
+      )
+      // An adapter with two entry points declares the same list at each, and a
+      // list stated twice differently is the divergence this is guarding.
+      for (const list of declared) {
+        assert.deepEqual(
+          list,
+          adapter.clientIpHeaders,
+          `adapter ${adapter.name} passes clientIpHeaders the shared contract does not name`,
+        )
+      }
+      assert.equal(
+        declared.length > 0,
+        adapter.clientIpHeaders.length > 0,
+        adapter.clientIpHeaders.length > 0
+          ? `adapter ${adapter.name} declares no clientIpHeaders, so every visitor shares one rate-limit bucket on a platform that has an ingress`
+          : `adapter ${adapter.name} declares clientIpHeaders the contract says its platform does not write, which one client can rotate for a fresh bucket per request`,
+      )
+    }
+  })
 })
 
 /**

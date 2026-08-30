@@ -14,7 +14,30 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const ARTIFACT_GRAPH_IDENTITY: &str = "ruvyxa_artifact_graph";
+/// Identity of the compiler whose artifacts this graph describes.
+///
+/// Derived from the crate version, exactly as `cache::COMPILER_VERSION` is, and
+/// for the same reason — not a hand-maintained counter, which is only correct
+/// while somebody remembers it. The namespace beside it is derived from the
+/// *project*: config, lockfile, build hooks. Nothing in it moves when the
+/// compiler does.
+///
+/// That gap was load-bearing. A `Transform` record's content hash is the
+/// compiler's output while its key is not, and `publish` fails closed when a
+/// key it already holds `Ready` produces a different hash. A graph filled by
+/// one build of this crate and read by another therefore turned a changed
+/// transform into `NonDeterministicOutput` — a hard build failure that
+/// survived across runs until the cache directory was deleted, naming an
+/// artifact identity and nothing actionable. Comparing the version here makes
+/// the same situation a cold start.
+const ARTIFACT_GRAPH_IDENTITY: &str = concat!("ruvyxa_artifact_graph:", env!("CARGO_PKG_VERSION"));
+
+/// How many build epochs a record survives without being touched.
+///
+/// Three keeps the cache warm across a branch switch and back — the shape that
+/// costs the most to rebuild — while bounding the manifest at roughly the work
+/// of the last three builds instead of every build ever run in this directory.
+const RETENTION_EPOCHS: u64 = 3;
 
 /// Stable stage identity for an internal build artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -128,6 +151,15 @@ pub struct ArtifactRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     pub generation: u64,
+    /// Build epoch in which this record was last begun, published, or hit.
+    ///
+    /// Retention is decided from this and nothing else: see
+    /// [`ArtifactTaskGraph::save`]. A record persisted before epochs were
+    /// recorded reads as `0`, which is older than any live epoch and therefore
+    /// ages out on the third build after the upgrade — a rebuild, never a wrong
+    /// answer.
+    #[serde(default)]
+    pub last_touched_epoch: u64,
     #[serde(skip)]
     active_builders: usize,
 }
@@ -165,6 +197,8 @@ pub enum ArtifactGraphError {
 struct ArtifactGraphInner {
     records: BTreeMap<ArtifactKey, ArtifactRecord>,
     dependents: BTreeMap<ArtifactKey, BTreeSet<ArtifactKey>>,
+    /// This process's build epoch: one past whatever the loaded manifest wrote.
+    epoch: u64,
     hits: u64,
     misses: u64,
     invalidations: u64,
@@ -176,6 +210,10 @@ struct ArtifactGraphInner {
 struct ArtifactGraphManifest {
     identity: String,
     namespace: String,
+    /// Epoch the writing build ran under. Absent in a manifest written before
+    /// retention existed, which reads as `0` and makes the next build epoch 1.
+    #[serde(default)]
+    epoch: u64,
     records: Vec<ArtifactRecord>,
 }
 
@@ -199,13 +237,16 @@ impl ArtifactTaskGraph {
 
     pub fn at_dir(cache_dir: &Path, namespace: &str, enabled: bool) -> Self {
         let manifest_path = cache_dir.join("artifact-graph.json");
-        let records = enabled
+        let (records, previous_epoch) = enabled
             .then(|| load_manifest(&manifest_path, namespace))
             .flatten()
             .unwrap_or_default();
         let mut inner = ArtifactGraphInner {
             records,
             dependents: BTreeMap::new(),
+            // One load is one build, so the epoch advances here and nowhere
+            // else. Every save in this process stamps the same number.
+            epoch: previous_epoch.saturating_add(1),
             hits: 0,
             misses: 0,
             invalidations: 0,
@@ -262,6 +303,7 @@ impl ArtifactTaskGraph {
         let content_hash = content_hash.into();
         {
             let mut inner = self.lock();
+            let epoch = inner.epoch;
             if let Some(existing) = inner.records.get(&key) {
                 if existing.dependencies != dependencies {
                     return Err(ArtifactGraphError::DependencyMismatch {
@@ -279,6 +321,13 @@ impl ArtifactTaskGraph {
                         return Err(ArtifactGraphError::NonDeterministicOutput { identity });
                     }
                     inner.hits = inner.hits.saturating_add(1);
+                    // A hit is a touch. Answering from the graph is the whole
+                    // point of the record, so it must renew retention exactly
+                    // as building it would — otherwise the artifacts a build
+                    // reuses most are the first ones aged out.
+                    if let Some(existing) = inner.records.get_mut(&key) {
+                        existing.last_touched_epoch = epoch;
+                    }
                     return Ok(true);
                 }
             }
@@ -303,6 +352,7 @@ impl ArtifactTaskGraph {
             });
         }
         let mut inner = self.lock();
+        let epoch = inner.epoch;
         // Join whenever work is still in flight, not only while the state still
         // reads `Building`.
         //
@@ -331,6 +381,7 @@ impl ArtifactTaskGraph {
                 });
             }
             existing.active_builders += 1;
+            existing.last_touched_epoch = epoch;
             return Ok(ArtifactTask {
                 graph: self.clone(),
                 key,
@@ -355,6 +406,7 @@ impl ArtifactTaskGraph {
                 content_hash: None,
                 reason: None,
                 generation,
+                last_touched_epoch: epoch,
                 active_builders: 1,
             },
         );
@@ -451,27 +503,76 @@ impl ArtifactTaskGraph {
         stats
     }
 
+    /// Persist the graph, keeping only what the next few builds can still use.
+    ///
+    /// The graph has invalidation and eviction but no *retention*, and neither
+    /// stands in for it: invalidation cancels a record without removing it, and
+    /// eviction only runs under a soft memory limit measured against a byte
+    /// estimate several times smaller than this JSON encoding. Every edit gives
+    /// a `Transform` a new semantic key, so writing the whole map grew the file
+    /// by one record per changed module per build, forever, and both ends of
+    /// every later build paid to parse and rewrite it.
+    ///
+    /// A record survives if it was touched — begun, published, or hit — within
+    /// the last [`RETENTION_EPOCHS`] build epochs, or if [`is_evictable`] says
+    /// something still holds it: work in flight, a joined builder, or another
+    /// record's dependency edge. The dependency closure of everything retained
+    /// is then retained too, so pruning can never leave a dangling edge behind.
+    /// Dropping a record the next build would have hit costs that build a
+    /// rebuild, which is the same trade `evict_to_bytes` already documents.
+    ///
+    /// In-memory state is untouched: this decides what reaches disk, not what
+    /// this process may still answer from.
     pub fn save(&self) -> std::io::Result<()> {
         if !self.enabled {
             return Ok(());
         }
-        let records = self
-            .lock()
-            .records
-            .values()
-            .map(|record| {
-                let mut record = record.clone();
-                record.active_builders = 0;
-                if record.state == ArtifactState::Building {
-                    record.state = ArtifactState::Cancelled;
-                    record.reason = Some("artifact was active when graph was saved".to_string());
+        let (records, epoch) = {
+            let inner = self.lock();
+            let epoch = inner.epoch;
+            let mut retained = inner
+                .records
+                .iter()
+                .filter(|(key, record)| {
+                    epoch.saturating_sub(record.last_touched_epoch) < RETENTION_EPOCHS
+                        || !is_evictable(record, &inner.dependents, key)
+                })
+                .map(|(key, _)| key.clone())
+                .collect::<BTreeSet<_>>();
+            let mut queue = retained.iter().cloned().collect::<VecDeque<_>>();
+            while let Some(key) = queue.pop_front() {
+                let Some(record) = inner.records.get(&key) else {
+                    continue;
+                };
+                for dependency in &record.dependencies {
+                    if inner.records.contains_key(&dependency.key)
+                        && retained.insert(dependency.key.clone())
+                    {
+                        queue.push_back(dependency.key.clone());
+                    }
                 }
-                record
-            })
-            .collect();
+            }
+            let records = inner
+                .records
+                .iter()
+                .filter(|(key, _)| retained.contains(*key))
+                .map(|(_, record)| {
+                    let mut record = record.clone();
+                    record.active_builders = 0;
+                    if record.state == ArtifactState::Building {
+                        record.state = ArtifactState::Cancelled;
+                        record.reason =
+                            Some("artifact was active when graph was saved".to_string());
+                    }
+                    record
+                })
+                .collect();
+            (records, epoch)
+        };
         let manifest = ArtifactGraphManifest {
             identity: ARTIFACT_GRAPH_IDENTITY.to_string(),
             namespace: self.namespace.to_string(),
+            epoch,
             records,
         };
         let json = serde_json::to_vec(&manifest).map_err(std::io::Error::other)?;
@@ -795,7 +896,11 @@ fn rebuild_dependents(inner: &mut ArtifactGraphInner) {
     }
 }
 
-fn load_manifest(path: &Path, namespace: &str) -> Option<BTreeMap<ArtifactKey, ArtifactRecord>> {
+/// Load the persisted records and the epoch the writing build ran under.
+fn load_manifest(
+    path: &Path,
+    namespace: &str,
+) -> Option<(BTreeMap<ArtifactKey, ArtifactRecord>, u64)> {
     let source = fs::read(path).ok()?;
     let manifest: ArtifactGraphManifest = serde_json::from_slice(&source).ok()?;
     if manifest.identity != ARTIFACT_GRAPH_IDENTITY || manifest.namespace != namespace {
@@ -807,7 +912,7 @@ fn load_manifest(path: &Path, namespace: &str) -> Option<BTreeMap<ArtifactKey, A
             return None;
         }
     }
-    Some(records)
+    Some((records, manifest.epoch))
 }
 
 #[cfg(test)]
@@ -991,6 +1096,201 @@ mod tests {
         assert!(graph.publish(artifact, BTreeSet::new(), "output").unwrap());
         assert_eq!(graph.stats().misses, 1);
         assert_eq!(graph.stats().hits, 1);
+    }
+
+    /// The graph identity must follow the compiler that filled it.
+    ///
+    /// A `Transform` record's content hash is the compiler's output while its
+    /// key is not, so a graph written by a different build of this crate can
+    /// hold a `Ready` record whose hash the current transform will never
+    /// reproduce — and `publish` fails closed on that, giving a sticky hard
+    /// build failure that survives across runs. An identity that moves with the
+    /// crate version turns that into a clean cold start.
+    #[test]
+    fn a_graph_from_another_compiler_version_loads_as_zero_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let graph = ArtifactTaskGraph::at_dir(temp.path(), "test", true);
+        let artifact = key(ArtifactKind::Transform, "module");
+        graph
+            .publish(artifact.clone(), BTreeSet::new(), "output-v1")
+            .unwrap();
+        graph.save().unwrap();
+        assert_eq!(
+            ArtifactTaskGraph::at_dir(temp.path(), "test", true)
+                .stats()
+                .records,
+            1
+        );
+
+        let manifest_path = temp.path().join("artifact-graph.json");
+        let json = fs::read_to_string(&manifest_path).unwrap();
+        let doctored = json.replace(ARTIFACT_GRAPH_IDENTITY, "ruvyxa_artifact_graph:0.0.0-other");
+        assert_ne!(doctored, json, "the identity must be part of the manifest");
+        fs::write(&manifest_path, doctored).unwrap();
+
+        let reloaded = ArtifactTaskGraph::at_dir(temp.path(), "test", true);
+        assert_eq!(
+            reloaded.stats().records,
+            0,
+            "a graph from another compiler must be a cold start, not a poisoned graph"
+        );
+        assert!(
+            !reloaded
+                .publish(artifact, BTreeSet::new(), "output-v2")
+                .unwrap(),
+            "a changed transform must republish rather than fail closed"
+        );
+    }
+
+    /// A superseded generation must not be persisted forever.
+    ///
+    /// Every edit gives a `Transform` a new semantic key, so the record the
+    /// previous build published is never hit again — and nothing dropped it.
+    /// `save` wrote every record in memory, so `artifact-graph.json` grew by
+    /// one record per changed module per build, was parsed in full at the start
+    /// of the next build and re-serialised at the end of it, and `ruvyxa clean`
+    /// was the only reclaim. Eviction could not stand in: it is driven by a
+    /// soft memory limit against a byte estimate several times smaller than the
+    /// JSON encoding, so the file reached hundreds of megabytes before the
+    /// accounting reported any pressure at all.
+    #[test]
+    fn a_superseded_generation_is_not_kept_forever() {
+        let temp = tempfile::tempdir().unwrap();
+        const BUILDS: u64 = 10;
+        // Ten builds, each editing the module, so each publishes a new key.
+        for build in 0..BUILDS {
+            let graph = ArtifactTaskGraph::at_dir(temp.path(), "test", true);
+            graph
+                .publish(
+                    key(ArtifactKind::Transform, &format!("module-v{build}")),
+                    BTreeSet::new(),
+                    format!("output-v{build}"),
+                )
+                .unwrap();
+            graph.save().unwrap();
+        }
+
+        let reloaded = ArtifactTaskGraph::at_dir(temp.path(), "test", true);
+        let records = reloaded.stats().records;
+        assert!(
+            records < BUILDS as usize,
+            "the persisted graph must not grow by one record per build: {records}"
+        );
+        assert!(
+            records <= RETENTION_EPOCHS as usize,
+            "the persisted graph must be bounded by the retention window: {records}"
+        );
+        // The window is warm, not empty: the most recent build's record is
+        // still there, so a branch switch and back is still a hit.
+        assert!(
+            reloaded
+                .record(&key(ArtifactKind::Transform, "module-v9"))
+                .is_some(),
+            "the newest record must survive its own build"
+        );
+    }
+
+    /// A hit is a touch. A module nobody edits is republished with the same key
+    /// every build, which `publish` answers from the graph without opening a
+    /// generation — if that did not renew the record, the artifacts a build
+    /// reuses most would be the first ones dropped.
+    #[test]
+    fn a_repeatedly_hit_record_is_never_aged_out() {
+        let temp = tempfile::tempdir().unwrap();
+        let stable = key(ArtifactKind::Transform, "unchanged");
+        for build in 0..10 {
+            let graph = ArtifactTaskGraph::at_dir(temp.path(), "test", true);
+            graph
+                .publish(stable.clone(), BTreeSet::new(), "stable-output")
+                .unwrap();
+            graph
+                .publish(
+                    key(ArtifactKind::Emit, &format!("route-v{build}")),
+                    BTreeSet::new(),
+                    format!("emit-v{build}"),
+                )
+                .unwrap();
+            graph.save().unwrap();
+        }
+
+        let reloaded = ArtifactTaskGraph::at_dir(temp.path(), "test", true);
+        assert!(
+            reloaded.record(&stable).is_some(),
+            "a record hit by every build must not be aged out"
+        );
+        assert!(
+            reloaded
+                .publish(stable, BTreeSet::new(), "stable-output")
+                .unwrap(),
+            "and it must still answer as a hit"
+        );
+    }
+
+    /// Retention must never break the graph it prunes. A record something else
+    /// still depends on stays, however long ago it was last touched — the same
+    /// pin `is_evictable` already applies under memory pressure.
+    #[test]
+    fn retention_keeps_a_record_a_surviving_dependent_still_needs() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = key(ArtifactKind::Source, "shared");
+
+        let first = ArtifactTaskGraph::at_dir(temp.path(), "test", true);
+        first
+            .publish(source.clone(), BTreeSet::new(), "source-v1")
+            .unwrap();
+        first.save().unwrap();
+
+        // Many later builds, none of which touch `source` directly; each emits
+        // a fresh route that depends on it.
+        for build in 0..8 {
+            let graph = ArtifactTaskGraph::at_dir(temp.path(), "test", true);
+            graph
+                .publish(
+                    key(ArtifactKind::Emit, &format!("route-v{build}")),
+                    BTreeSet::from([ArtifactDependency::new(
+                        source.clone(),
+                        Some("source-v1".to_string()),
+                    )]),
+                    format!("emit-v{build}"),
+                )
+                .unwrap();
+            graph.save().unwrap();
+        }
+
+        let reloaded = ArtifactTaskGraph::at_dir(temp.path(), "test", true);
+        assert!(
+            reloaded.record(&source).is_some(),
+            "a dependency of a retained record must be retained with it"
+        );
+        let records = reloaded.lock().records.clone();
+        for (key, record) in &records {
+            for dependency in &record.dependencies {
+                assert!(
+                    records.contains_key(&dependency.key),
+                    "record {} kept a dangling edge to {}",
+                    key.identity,
+                    dependency.key.identity
+                );
+            }
+        }
+    }
+
+    /// The identity is derived, never stamped: it names the crate version and
+    /// carries no hand-maintained `vN` counter.
+    #[test]
+    fn the_graph_identity_carries_no_version_counter() {
+        assert!(
+            ARTIFACT_GRAPH_IDENTITY.contains(env!("CARGO_PKG_VERSION")),
+            "the identity must follow the compiler: {ARTIFACT_GRAPH_IDENTITY}"
+        );
+        for segment in ARTIFACT_GRAPH_IDENTITY.split(':') {
+            assert!(
+                !segment.strip_prefix('v').is_some_and(
+                    |rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
+                ),
+                "a `{segment}` counter would have to be maintained by hand"
+            );
+        }
     }
 
     #[test]

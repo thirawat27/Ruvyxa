@@ -1,8 +1,9 @@
 //! HTML document assembly: head/HMR injection, client hydration scripts,
 //! and the dev error overlay / production error pages.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
@@ -283,6 +284,9 @@ pub(crate) fn client_hydration_script(
         return String::new();
     }
     let assets = if config.watch {
+        // `ruvyxa dev` has no built bundles by design: `/__ruvyxa/client` is
+        // the on-demand compiler, and pointing the document at it is the whole
+        // mechanism.
         ClientAssets {
             src: format!(
                 "/__ruvyxa/client?path={}",
@@ -293,15 +297,24 @@ pub(crate) fn client_hydration_script(
             hydration_loader: Some("/__ruvyxa/hydration-loader.js".to_string()),
         }
     } else {
-        prebuilt_client_assets(config, &route.path).unwrap_or_else(|| ClientAssets {
-            src: format!(
-                "/__ruvyxa/client?path={}",
-                url_encode_component(request_path)
-            ),
-            preloads: Vec::new(),
-            hydration: route.render.hydration,
-            hydration_loader: Some("/__ruvyxa/hydration-loader.js".to_string()),
-        })
+        // A production server has no on-demand compiler to fall back to. It
+        // used to emit the same dev endpoint here, so an absent, truncated or
+        // invalid manifest silently made a `ruvyxa start` page load a second,
+        // separately-compiled React through a path meant for development —
+        // exactly the duplication whose symptom (every hook in the second copy
+        // throwing) this crate already paid for once, and invisible, because
+        // the page still renders server-side and answers 200.
+        //
+        // Shipping no bundle is the honest outcome and the one the RSC path
+        // already takes: the page is server-rendered and inert, which is
+        // recoverable by rebuilding, where two Reacts is not.
+        match prebuilt_client_assets(config, &route.path) {
+            Some(assets) => assets,
+            None => {
+                report_missing_prebuilt_bundle(&route.path);
+                return String::new();
+            }
+        }
     };
     let deferred = matches!(
         assets.hydration,
@@ -409,6 +422,10 @@ pub(crate) const MAX_CACHED_MANIFEST_ROOTS: usize = 128;
 struct ClientManifestCache {
     entries: HashMap<PathBuf, CachedClientManifest>,
     next_sequence: u64,
+    /// Manifests already reported as unusable, and the reason each was reported
+    /// for. [`report_manifest_failure`] consults it so a broken file on the SSR
+    /// request path logs once rather than once per request.
+    reported_failures: HashMap<PathBuf, String>,
 }
 
 impl ClientManifestCache {
@@ -451,18 +468,129 @@ pub(crate) fn cached_client_manifest_roots() -> usize {
         .map_or(0, |guard| guard.entries.len())
 }
 
+/// The client build report `ruvyxa build` leaves at the build root.
+///
+/// Not `client/`: that directory is public by contract — every file in it is
+/// served at `/__ruvyxa/client/<name>` and copied to the CDN by a deploy — while
+/// this report carries the build machine's absolute source paths and the module
+/// graph of every chunk. What stayed inside `client/` is the lean
+/// `route-manifest.json` the browser router fetches, which exposes only
+/// `{ path, src, sharedChunks }` and is read by `client_manifest` in `lib.rs`
+/// and `framework_endpoints.rs` for exactly that purpose.
+///
+/// This reader wants the other file, and wants it for the same reason
+/// `loadClientAssets` in `packages/ruvyxa/runtime/adapter-runner.mjs` does: the
+/// lean table carries no `hydration` or `hydrationLoader`, so a document
+/// composed from it would hydrate every deferred route eagerly. Two hosts, one
+/// question, one file.
+///
+/// The report used to sit at `client/manifest.json`. When it moved, this reader
+/// was left behind and every `ruvyxa start` page shipped no client script at
+/// all — a miss here is indistinguishable from a project that ships no client
+/// bundle, so the page still answered 200.
+fn client_build_report_path(config: &ServerConfig) -> Option<PathBuf> {
+    Some(config.client_dir.parent()?.join("client-report.json"))
+}
+
 pub(crate) fn prebuilt_client_assets(
     config: &ServerConfig,
     route_path: &str,
 ) -> Option<ClientAssets> {
-    let manifest_path = config.client_dir.join("manifest.json");
-    let routes = load_client_manifest(&manifest_path)?;
-    routes.get(route_path).cloned()
+    let manifest_path = client_build_report_path(config)?;
+    match load_client_manifest(&manifest_path) {
+        ClientManifest::Loaded(routes) => routes.get(route_path).cloned(),
+        ClientManifest::Absent | ClientManifest::Unreadable => None,
+    }
+}
+
+/// The three distinguishable answers a manifest read can give.
+///
+/// They used to be one: `load_client_manifest` returned `Option` and reached it
+/// through `.ok()?` from a missing file, an unreadable file and invalid JSON
+/// alike. Only the first of those is a legal state, and collapsing the other
+/// two into it is what let a corrupt manifest look exactly like a project with
+/// no client bundles.
+enum ClientManifest {
+    /// No file at that path — a project whose routes ship no client bundle, or
+    /// a dev server, which never writes one.
+    Absent,
+    /// The file is there but cannot be used: unreadable, truncated, or not
+    /// valid JSON. Already logged by [`load_client_manifest`].
+    Unreadable,
+    Loaded(Arc<HashMap<String, ClientAssets>>),
+}
+
+/// Log a manifest that exists but cannot be used, once per distinct reason.
+///
+/// This is reached from the SSR request path, so an unconditional `error!`
+/// would write a line per request for as long as the bad file sits on disk.
+/// The reason is remembered next to the path and only re-reported when it
+/// changes — which is what makes a *new* failure after a rebuild still visible.
+fn report_manifest_failure(cache: &Mutex<ClientManifestCache>, manifest_path: &Path, reason: &str) {
+    if let Ok(mut guard) = cache.lock() {
+        if guard
+            .reported_failures
+            .get(manifest_path)
+            .map(String::as_str)
+            == Some(reason)
+        {
+            return;
+        }
+        // Bound the map exactly as `entries` is bounded. The cost of forgetting
+        // is a repeated log line, never a wrong answer.
+        if guard.reported_failures.len() >= MAX_CACHED_MANIFEST_ROOTS {
+            guard.reported_failures.clear();
+        }
+        guard
+            .reported_failures
+            .insert(manifest_path.to_path_buf(), reason.to_string());
+    }
+
+    tracing::error!(
+        path = %manifest_path.display(),
+        reason,
+        "client manifest is present but unusable; routes will be served without their client bundles"
+    );
+}
+
+/// Forget a path's reported failure so a later break is reported again.
+fn clear_manifest_failure(cache: &Mutex<ClientManifestCache>, manifest_path: &Path) {
+    if let Ok(mut guard) = cache.lock()
+        && !guard.reported_failures.is_empty()
+    {
+        guard.reported_failures.remove(manifest_path);
+    }
+}
+
+/// Routes already reported as having no built client bundle.
+///
+/// Bounded by the application's route count, and only ever written on the
+/// production path where a route has no entry in the manifest.
+static MISSING_BUNDLE_REPORTED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+/// Say once, per route, that a production page is being served without its
+/// client bundle.
+///
+/// The alternative this replaced — pointing the document at `/__ruvyxa/client`
+/// — logged nothing at all, and the only evidence anything was wrong was a
+/// bundle URL buried in the HTML of a page that otherwise answered 200.
+fn report_missing_prebuilt_bundle(route_path: &str) {
+    let reported = MISSING_BUNDLE_REPORTED.get_or_init(|| Mutex::new(HashSet::new()));
+    if let Ok(mut guard) = reported.lock()
+        && !guard.insert(route_path.to_string())
+    {
+        return;
+    }
+
+    tracing::error!(
+        route = %route_path,
+        "no built client bundle for this route; serving it server-rendered without hydration (rebuild to restore it)"
+    );
 }
 
 /// Load the client manifest's per-route asset lookup, reusing the cached parse
 /// when the source file's contents are byte-identical to the cached parse.
-fn load_client_manifest(manifest_path: &Path) -> Option<Arc<HashMap<String, ClientAssets>>> {
+fn load_client_manifest(manifest_path: &Path) -> ClientManifest {
     let cache = CLIENT_MANIFEST_CACHE.get_or_init(|| Mutex::new(ClientManifestCache::default()));
 
     // Metadata first. Hashing the bytes is what makes invalidation exact, but
@@ -478,10 +606,22 @@ fn load_client_manifest(manifest_path: &Path) -> Option<Arc<HashMap<String, Clie
         && let Some(entry) = guard.entries.get(manifest_path)
         && entry.settled_identity == Some(identity)
     {
-        return Some(Arc::clone(&entry.routes));
+        return ClientManifest::Loaded(Arc::clone(&entry.routes));
     }
 
-    let source = fs::read(manifest_path).ok()?;
+    let source = match fs::read(manifest_path) {
+        Ok(source) => source,
+        // "There is no manifest" is a legal answer: a project whose routes ship
+        // no client bundle never writes one.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            clear_manifest_failure(cache, manifest_path);
+            return ClientManifest::Absent;
+        }
+        Err(error) => {
+            report_manifest_failure(cache, manifest_path, &error.to_string());
+            return ClientManifest::Unreadable;
+        }
+    };
     let content_hash = blake3::hash(&source);
 
     if let Ok(mut guard) = cache.lock()
@@ -491,12 +631,19 @@ fn load_client_manifest(manifest_path: &Path) -> Option<Arc<HashMap<String, Clie
         // Same bytes, newly settled timestamp: record it so the next request
         // can stop at the metadata.
         entry.settled_identity = identity;
-        return Some(Arc::clone(&entry.routes));
+        return ClientManifest::Loaded(Arc::clone(&entry.routes));
     }
 
     // Cache miss or the file changed since it was parsed: parse once, then
     // rebuild the route lookup for subsequent requests.
-    let manifest: ClientAssetManifest = serde_json::from_slice(&source).ok()?;
+    let manifest: ClientAssetManifest = match serde_json::from_slice(&source) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            report_manifest_failure(cache, manifest_path, &error.to_string());
+            return ClientManifest::Unreadable;
+        }
+    };
+    clear_manifest_failure(cache, manifest_path);
     let mut routes: HashMap<String, ClientAssets> = HashMap::with_capacity(manifest.routes.len());
     for route in manifest.routes {
         // The build emits unique route paths; keep the first if that ever
@@ -529,7 +676,7 @@ fn load_client_manifest(manifest_path: &Path) -> Option<Arc<HashMap<String, Clie
         );
     }
 
-    Some(routes)
+    ClientManifest::Loaded(routes)
 }
 
 /// Make a JSON value safe to embed inside an inline `<script>` element.
@@ -820,7 +967,7 @@ pub(crate) fn error_response(
     is_dev: bool,
 ) -> Response {
     if !is_dev {
-        return html_response(status, plain_error_page("Internal server error"));
+        return html_response(status, plain_error_page(status, "Internal server error"));
     }
     let code_frame = diagnostics
         .span
@@ -838,18 +985,28 @@ pub(crate) fn public_internal_error(config: &ServerConfig, error: &RuvyxaError) 
     }
 }
 
-pub(crate) fn error_page(message: &str, show_overlay: bool) -> String {
+pub(crate) fn error_page(status: StatusCode, message: &str, show_overlay: bool) -> String {
     if show_overlay {
         dev_error_overlay(message, None, None, None)
     } else {
-        plain_error_page(message)
+        plain_error_page(status, message)
     }
 }
 
-pub(crate) fn plain_error_page(message: &str) -> String {
-    let not_found = message.contains("Route not found");
-    let code = if not_found { "404" } else { "500" };
-    let title = if not_found {
+/// Render the framework's own error card for `status`.
+///
+/// The code and the headline come from the status, never from the message. The
+/// page used to infer them by sniffing `message.contains("Route not found")`,
+/// which coupled a rendered status code to a caller's wording — and the
+/// coupling had already broken by the time it was found: both
+/// `error_page("Asset not found", …)` call sites were written after the
+/// sniffing rule and neither used the phrase, so every missing asset on a
+/// production `ruvyxa start` answered 404 with a body that said 500, a
+/// `<title>` disagreeing with the status line, and "Ruvyxa hit an unexpected
+/// error." for a request that was simply for something that does not exist.
+pub(crate) fn plain_error_page(status: StatusCode, message: &str) -> String {
+    let code = status.as_u16();
+    let title = if status.is_client_error() {
         "This page could not be found."
     } else {
         "Ruvyxa hit an unexpected error."
@@ -1134,6 +1291,15 @@ pub fn escape_html(input: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+        // `&#39;` rather than `&apos;`, which HTML 4 does not define and which
+        // therefore reaches an older parser as literal text. Every call site
+        // today is element text or a double-quoted attribute, so nothing was
+        // injectable without it -- but this function's own comment invites the
+        // next author to trust it in any context, and the single-quoted
+        // attribute style is one `declares_own_icon` and `document_head_defaults`
+        // explicitly expect documents to use. It is also the escaper a
+        // pre-rendered page goes through, where a miss is baked into static HTML.
+        .replace('\'', "&#39;")
 }
 
 #[cfg(test)]
@@ -1345,5 +1511,264 @@ mod tests {
         assert!(localized.contains("<html lang=\"th\">"));
         assert!(localized.contains("hreflang=\"en\" href=\"/en/about\""));
         assert!(localized.contains("hreflang=\"x-default\" href=\"/en/about\""));
+    }
+
+    /// The rendered code is the response's code, not a guess at the wording.
+    ///
+    /// The page used to sniff `message.contains("Route not found")`, so every
+    /// 404 whose message was phrased any other way rendered a 500 card under a
+    /// 404 status line. Both `error_page("Asset not found", …)` call sites were
+    /// written after that rule and neither used the magic phrase, which is how
+    /// a missing asset on `ruvyxa start` came to answer 404 with a body that
+    /// said 500.
+    #[test]
+    fn plain_error_page_code_follows_the_status_not_the_message() {
+        for message in ["Asset not found", "Route not found", "anything at all"] {
+            let not_found = plain_error_page(StatusCode::NOT_FOUND, message);
+            assert!(
+                not_found.contains("<span class=\"code\">404</span>"),
+                "404 status must render a 404 card for {message:?}: {not_found}"
+            );
+            assert!(
+                not_found.contains("<title>Ruvyxa Error - 404</title>"),
+                "{message:?}"
+            );
+            assert!(
+                not_found.contains("This page could not be found."),
+                "{message:?}"
+            );
+
+            let server_error = plain_error_page(StatusCode::INTERNAL_SERVER_ERROR, message);
+            assert!(
+                server_error.contains("<span class=\"code\">500</span>"),
+                "500 status must render a 500 card for {message:?}: {server_error}"
+            );
+            assert!(
+                server_error.contains("<title>Ruvyxa Error - 500</title>"),
+                "{message:?}"
+            );
+            assert!(
+                server_error.contains("Ruvyxa hit an unexpected error."),
+                "{message:?}"
+            );
+        }
+    }
+
+    /// Other statuses are rendered as themselves rather than rounded to 500.
+    #[test]
+    fn plain_error_page_renders_any_status_it_is_given() {
+        let payload_too_large = plain_error_page(StatusCode::PAYLOAD_TOO_LARGE, "too big");
+        assert!(payload_too_large.contains("<span class=\"code\">413</span>"));
+        assert!(payload_too_large.contains("<title>Ruvyxa Error - 413</title>"));
+        // A client error is the visitor's problem to fix, not a crash report.
+        assert!(payload_too_large.contains("This page could not be found."));
+
+        let gateway = plain_error_page(StatusCode::BAD_GATEWAY, "upstream died");
+        assert!(gateway.contains("<span class=\"code\">502</span>"));
+        assert!(gateway.contains("Ruvyxa hit an unexpected error."));
+    }
+
+    /// `error_page` carries the status through to the plain page.
+    #[test]
+    fn error_page_threads_the_status_through_to_the_plain_page() {
+        let plain = error_page(StatusCode::NOT_FOUND, "Asset not found", false);
+        assert!(plain.contains("<span class=\"code\">404</span>"), "{plain}");
+
+        // The dev overlay is the message, not a status card, and must stay so.
+        let overlay = error_page(StatusCode::NOT_FOUND, "Asset not found", true);
+        assert!(
+            !overlay.contains("<span class=\"code\">404</span>"),
+            "{overlay}"
+        );
+        assert!(overlay.contains("Asset not found"), "{overlay}");
+    }
+
+    fn hydration_test_route(root: &Path) -> RouteEntry {
+        RouteEntry {
+            id: "page:index".to_string(),
+            path: "/".to_string(),
+            file: root.join("app/page.tsx"),
+            kind: ruvyxa_graph::RouteKind::Page,
+            layout_chain: Vec::new(),
+            template_chain: Vec::new(),
+            slots: Vec::new(),
+            intercepts: Vec::new(),
+            server_modules: Vec::new(),
+            client_modules: Vec::new(),
+            runtime: ruvyxa_graph::RuntimeTarget::Node,
+            render: Default::default(),
+        }
+    }
+
+    /// A production server never points a document at the dev compile endpoint.
+    ///
+    /// `/__ruvyxa/client?path=…` compiles the route on demand, as a second,
+    /// separately-linked React. Reaching it from a `ruvyxa start` process
+    /// because the manifest was absent, truncated or invalid is invisible — the
+    /// page still renders server-side and answers 200 — and the duplication it
+    /// creates is the one this crate already paid for once.
+    #[test]
+    fn production_never_falls_back_to_the_dev_compile_endpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let build_dir = temp.path().join(".ruvyxa");
+        std::fs::create_dir_all(build_dir.join("client")).unwrap();
+        // The build report at the build root, which is where a build writes it
+        // and where `prebuilt_client_assets` reads it. Writing it into
+        // `client/` under the name it carried two moves ago is how this suite
+        // stayed green while `ruvyxa start` shipped no client script at all.
+        let manifest = build_dir.join("client-report.json");
+        let config = ServerConfig::production(temp.path(), "localhost", 3000);
+        let route = hydration_test_route(temp.path());
+
+        // (a) no manifest file at all.
+        let script = client_hydration_script(&config, &route, "/", &RouteParams::new());
+        assert!(
+            !script.contains("/__ruvyxa/client?path="),
+            "a missing manifest must not reach the dev endpoint: {script}"
+        );
+        assert!(
+            !script.contains("<script type=\"module\""),
+            "no prebuilt bundle means no module script at all: {script}"
+        );
+
+        // (b) present but not valid JSON.
+        std::fs::write(&manifest, "{\"routes\": [").unwrap();
+        let script = client_hydration_script(&config, &route, "/", &RouteParams::new());
+        assert!(
+            !script.contains("/__ruvyxa/client?path="),
+            "an invalid manifest must not reach the dev endpoint: {script}"
+        );
+
+        // (c) valid, but this route is not in it.
+        std::fs::write(&manifest, "{\"routes\":[]}").unwrap();
+        let script = client_hydration_script(&config, &route, "/", &RouteParams::new());
+        assert!(
+            !script.contains("/__ruvyxa/client?path="),
+            "an unlisted route must not reach the dev endpoint: {script}"
+        );
+
+        // (d) the ordinary case still ships the built bundle.
+        std::fs::write(
+            &manifest,
+            r#"{"routes":[{"path":"/","src":"/__ruvyxa/client/home.a1b2c3.js","sharedChunks":[]}]}"#,
+        )
+        .unwrap();
+        let script = client_hydration_script(&config, &route, "/", &RouteParams::new());
+        assert!(
+            script.contains(r#"<script type="module" src="/__ruvyxa/client/home.a1b2c3.js">"#),
+            "a route present in the manifest must still get its bundle: {script}"
+        );
+    }
+
+    /// The production reader looks where `ruvyxa build` actually writes.
+    ///
+    /// This reader was pointed at `client/manifest.json` — the file the client
+    /// build report used to occupy. The report moved to the build root as
+    /// `client-report.json` (see `CLIENT_BUILD_REPORT_FILE` in the CLI) and only
+    /// the lean public route table stayed behind in `client/`, under a different
+    /// name. The two other readers in this crate were repointed and this one was
+    /// not, so every `ruvyxa start` page answered 200 server-rendered with no
+    /// script element at all: the miss is the same value as "this project ships
+    /// no client bundle".
+    ///
+    /// The layout below is what a real build leaves on disk, which is why both
+    /// files are written. The lean table is deliberately given a *different*
+    /// `src`: it is public by contract, carries no `hydration` keys, and is the
+    /// browser router's manifest — reading it here would silently downgrade
+    /// every deferred route to eager hydration. `loadClientAssets` in
+    /// `packages/ruvyxa/runtime/adapter-runner.mjs` reads the report for exactly
+    /// this, and these two hosts answer the same question.
+    #[test]
+    fn production_reads_the_client_report_the_build_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let build_dir = temp.path().join(".ruvyxa");
+        let client_dir = build_dir.join("client");
+        std::fs::create_dir_all(&client_dir).unwrap();
+
+        // The lean public table `ruvyxa build` writes for the browser router.
+        std::fs::write(
+            client_dir.join("route-manifest.json"),
+            r#"{"routes":[{"path":"/","src":"/__ruvyxa/client/lean.js","sharedChunks":[],"flight":false,"cache":false}],"styles":[]}"#,
+        )
+        .unwrap();
+        // The build report, at the build root, which is what carries hydration.
+        std::fs::write(
+            build_dir.join("client-report.json"),
+            r#"{"routes":[{"path":"/","src":"/__ruvyxa/client/home.a1b2c3.js","sharedChunks":[{"src":"/__ruvyxa/client/shared.123.js"}],"hydration":"visible","hydrationLoader":"/__ruvyxa/client/hydration.js"}]}"#,
+        )
+        .unwrap();
+
+        let config = ServerConfig::production(temp.path(), "localhost", 3000);
+        let assets = prebuilt_client_assets(&config, "/")
+            .expect("the route's built bundle is on disk and must be found");
+
+        assert_eq!(assets.src, "/__ruvyxa/client/home.a1b2c3.js");
+        assert_eq!(assets.preloads, vec!["/__ruvyxa/client/shared.123.js"]);
+        assert_eq!(assets.hydration, HydrationMode::Visible);
+        assert_eq!(
+            assets.hydration_loader.as_deref(),
+            Some("/__ruvyxa/client/hydration.js"),
+            "the lean table carries no hydration keys; reading it would lose these"
+        );
+
+        // And the document actually carries the element, which is the symptom
+        // that was visible in production and in no test.
+        let route = hydration_test_route(temp.path());
+        let script = client_hydration_script(&config, &route, "/", &RouteParams::new());
+        assert!(
+            script.contains("<script type=\"module\""),
+            "a built route must ship a module script: {script}"
+        );
+        assert!(
+            script.contains("/__ruvyxa/client/hydration.js"),
+            "a deferred route hydrates through its loader: {script}"
+        );
+        assert!(
+            !script.contains("/__ruvyxa/client/lean.js"),
+            "the public route table is not this reader's source: {script}"
+        );
+    }
+
+    /// `ruvyxa dev` is unchanged: on-demand compilation is its whole point.
+    #[test]
+    fn dev_still_serves_the_on_demand_compile_endpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = ServerConfig::dev(temp.path(), "localhost", 3000);
+        let route = hydration_test_route(temp.path());
+
+        let script = client_hydration_script(&config, &route, "/blog/a", &RouteParams::new());
+
+        assert!(
+            script.contains("/__ruvyxa/client?path="),
+            "dev must keep compiling routes on demand: {script}"
+        );
+    }
+
+    /// "No manifest" and "a manifest that cannot be read" are different answers.
+    #[test]
+    fn manifest_load_separates_absence_from_corruption() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest = temp.path().join("manifest.json");
+
+        assert!(matches!(
+            load_client_manifest(&manifest),
+            ClientManifest::Absent
+        ));
+
+        std::fs::write(&manifest, "not json at all").unwrap();
+        assert!(matches!(
+            load_client_manifest(&manifest),
+            ClientManifest::Unreadable
+        ));
+
+        std::fs::write(
+            &manifest,
+            r#"{"routes":[{"path":"/","src":"/a.js","sharedChunks":[]}]}"#,
+        )
+        .unwrap();
+        let ClientManifest::Loaded(routes) = load_client_manifest(&manifest) else {
+            panic!("a valid manifest must load");
+        };
+        assert_eq!(routes.get("/").unwrap().src, "/a.js");
     }
 }

@@ -1114,3 +1114,319 @@ test('an unchanged rebuild reuses its module URL instead of retaining a new grap
   const afterChange = await request({ type: 'ping' })
   assert.equal(afterChange.retainedModuleUrls, 2, 'changed output must load under a new module URL')
 })
+
+test('a cancelled streaming request stops producing and releases its slot', async (t) => {
+  // The host removes its own bookkeeping when a client disconnects mid-stream,
+  // which told the worker nothing at all: the worker's stream loop is bounded
+  // only by *idle* time between chunks, and an SSE route is never idle. The
+  // process kept producing forever while the pool counted it as idle and routed
+  // more work onto it.
+  const projectRoot = await mkdtemp(path.join(fixtureWorkspace, 'cancel-stream-'))
+  const appDir = path.join(projectRoot, 'app/api/forever')
+  const routeFile = path.join(appDir, 'route.ts')
+  await mkdir(appDir, { recursive: true })
+  // Deliberately ignores `request.signal`: the route is the shape that caused
+  // the finding, so the stop has to come from the worker cancelling the reader.
+  await writeFile(
+    routeFile,
+    `export function GET() {
+  let timer
+  const stream = new ReadableStream({
+    start(controller) {
+      const encoder = new TextEncoder()
+      timer = setInterval(() => controller.enqueue(encoder.encode('tick')), 10)
+    },
+    cancel() {
+      clearInterval(timer)
+    },
+  })
+  return new Response(stream, { headers: { 'content-type': 'text/event-stream' } })
+}
+`,
+  )
+
+  const worker = spawn(process.execPath, [workerScript], {
+    cwd: repoRoot,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  const lines = createInterface({ input: worker.stdout })
+  t.after(async () => {
+    lines.close()
+    worker.stdin.end()
+    await Promise.race([
+      new Promise((resolve) => worker.once('exit', resolve)),
+      new Promise((resolve) => setTimeout(resolve, 2_000)),
+    ])
+    if (worker.exitCode === null) worker.kill()
+    await rm(projectRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  })
+
+  const frames = []
+  const waiters = []
+  lines.on('line', (line) => {
+    frames.push(JSON.parse(line))
+    for (const waiter of waiters.splice(0)) waiter()
+  })
+  const waitFor = async (predicate, what) => {
+    const deadline = Date.now() + 10_000
+    while (!predicate()) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
+      await new Promise((resolve) => {
+        waiters.push(resolve)
+        setTimeout(resolve, 50)
+      })
+    }
+  }
+  const framesFor = (id) => frames.filter((frame) => frame.id === id)
+
+  worker.stdin.write(
+    `${JSON.stringify({
+      id: 'forever',
+      type: 'api',
+      projectRoot,
+      routeFile,
+      method: 'GET',
+      requestPath: '/api/forever',
+      headers: {},
+      params: {},
+      streamResponse: true,
+    })}\n`,
+  )
+
+  await waitFor(
+    () => framesFor('forever').filter((frame) => frame.frame === 'api-chunk').length >= 2,
+    'the stream to start producing',
+  )
+
+  worker.stdin.write(`${JSON.stringify({ type: 'cancel', id: 'forever' })}\n`)
+
+  await waitFor(
+    () => framesFor('forever').some((frame) => frame.frame === 'api-error'),
+    'the cancelled stream to end',
+  )
+  const terminal = framesFor('forever').at(-1)
+  assert.equal(terminal.frame, 'api-error')
+  assert.equal(terminal.code, 'RUV1704')
+
+  // Nothing may follow the terminal frame: an aborted producer that keeps
+  // enqueuing is the worker-exhaustion half of the finding.
+  const settled = framesFor('forever').length
+  await new Promise((resolve) => setTimeout(resolve, 250))
+  assert.equal(framesFor('forever').length, settled, 'a cancelled stream must stop producing')
+
+  worker.stdin.write(`${JSON.stringify({ id: 'after-cancel', type: 'ping' })}\n`)
+  await waitFor(() => framesFor('after-cancel').length === 1, 'the ping to answer')
+  assert.equal(framesFor('after-cancel')[0].activeRequests, 0, 'the slot must be released')
+
+  // A cancel for an id the worker already answered is a no-op, not an error
+  // frame the host would read as a response to the request it names.
+  worker.stdin.write(`${JSON.stringify({ type: 'cancel', id: 'forever' })}\n`)
+  worker.stdin.write(`${JSON.stringify({ id: 'after-repeat', type: 'ping' })}\n`)
+  await waitFor(() => framesFor('after-repeat').length === 1, 'the second ping to answer')
+  assert.equal(framesFor('forever').length, settled, 'a repeated cancel must answer nothing')
+})
+
+test('an API route handler receives a signal the host can abort', async (t) => {
+  // The `Request` a route handler received carried no signal at all, so a route
+  // written to observe a disconnect — a long poll, an outbound `fetch` it wants
+  // to abort with the caller — could not. This is the observable behaviour
+  // change: a handler that inspects `request.signal` now sees a real one.
+  const projectRoot = await mkdtemp(path.join(fixtureWorkspace, 'cancel-signal-'))
+  const appDir = path.join(projectRoot, 'app/api/wait')
+  const routeFile = path.join(appDir, 'route.ts')
+  await mkdir(appDir, { recursive: true })
+  await writeFile(
+    routeFile,
+    `export function GET({ request }) {
+  if (request.signal.aborted) return Response.json({ aborted: true })
+  return new Promise((resolve) => {
+    request.signal.addEventListener('abort', () => resolve(Response.json({ aborted: true })))
+  })
+}
+`,
+  )
+
+  const worker = spawn(process.execPath, [workerScript], {
+    cwd: repoRoot,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  const lines = createInterface({ input: worker.stdout })
+  t.after(async () => {
+    lines.close()
+    worker.stdin.end()
+    await Promise.race([
+      new Promise((resolve) => worker.once('exit', resolve)),
+      new Promise((resolve) => setTimeout(resolve, 2_000)),
+    ])
+    if (worker.exitCode === null) worker.kill()
+    await rm(projectRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  })
+
+  const waitFrame = (id, what) =>
+    new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`timed out waiting for ${what}`)), 10_000)
+      lines.on('line', (line) => {
+        const frame = JSON.parse(line)
+        if (frame.id !== id) return
+        clearTimeout(timer)
+        resolve(frame)
+      })
+    })
+  const answered = waitFrame('wait', 'the aborted handler')
+  const admitted = waitFrame('admitted', 'the bookkeeping ping')
+
+  worker.stdin.write(
+    `${JSON.stringify({
+      id: 'wait',
+      type: 'api',
+      projectRoot,
+      routeFile,
+      method: 'GET',
+      requestPath: '/api/wait',
+      headers: {},
+      params: {},
+    })}\n`,
+  )
+  // Lines are read in order, so by the time this ping has been answered the
+  // request above has been admitted and is running. Cancelling before that
+  // would be withdrawn from the queue instead — correct, but a different path
+  // from the one this test is about.
+  worker.stdin.write(`${JSON.stringify({ id: 'admitted', type: 'ping' })}\n`)
+  await admitted
+  worker.stdin.write(`${JSON.stringify({ type: 'cancel', id: 'wait' })}\n`)
+
+  const frame = await answered
+  assert.equal(frame.ok, true, frame.message)
+  assert.deepEqual(JSON.parse(frame.body), { aborted: true })
+})
+
+test('a change inside a directory input invalidates the bundle that globbed it', async (t) => {
+  // `import.meta.glob` records its watch *root* — a directory — as a bundle
+  // input, so the only thing that can invalidate on a new or removed match is
+  // the directory-prefix branch of `invalidateBundleCache`. That branch was
+  // unreachable: `statSync` was never imported, so classifying an input as a
+  // directory threw `ReferenceError` inside a `try` whose `catch` returned
+  // `false`, every input was recorded as a file, and adding a post to a globbed
+  // directory left `ruvyxa dev` serving the pre-edit render.
+  const projectRoot = await mkdtemp(path.join(fixtureWorkspace, 'glob-dir-test-'))
+  const appDir = path.join(projectRoot, 'app/api/posts')
+  const routeFile = path.join(appDir, 'route.ts')
+  const contentDir = path.join(projectRoot, 'content')
+  await mkdir(appDir, { recursive: true })
+  await mkdir(contentDir, { recursive: true })
+  await writeFile(path.join(contentDir, 'first.ts'), `export const title = 'first'\n`)
+  await writeFile(
+    routeFile,
+    `const posts = import.meta.glob('../../../content/*.ts', { eager: true })
+export function GET() { return Response.json({ titles: Object.values(posts).map((m) => m.title).sort() }) }
+`,
+  )
+
+  const { request } = startWorker(t, [projectRoot])
+
+  const apiRequest = {
+    type: 'api',
+    projectRoot,
+    routeFile,
+    method: 'GET',
+    requestPath: '/api/posts',
+    headers: {},
+    params: {},
+  }
+
+  const first = await request(apiRequest)
+  assert.equal(first.ok, true, first.message)
+  assert.deepEqual(JSON.parse(first.body), { titles: ['first'] })
+  assert.ok(
+    first.inputs.some((input) => path.resolve(input) === path.resolve(contentDir)),
+    'the glob watch root must be reported as a bundle input',
+  )
+
+  // A brand-new match. Nothing names the directory itself, so only the
+  // directory-prefix branch can connect this path to the cached bundle.
+  const addedFile = path.join(contentDir, 'second.ts')
+  await writeFile(addedFile, `export const title = 'second'\n`)
+  const invalidation = await request({ type: 'invalidate', paths: [addedFile] })
+  assert.equal(invalidation.ok, true)
+  assert.equal(
+    invalidation.invalidated,
+    1,
+    'a change under a recorded directory input must invalidate the bundle',
+  )
+
+  const second = await request(apiRequest)
+  assert.equal(second.ok, true, second.message)
+  assert.deepEqual(JSON.parse(second.body), { titles: ['first', 'second'] })
+})
+
+// The worker spends the shutdown window; the Rust host waits it out plus a
+// margin before killing the process. They were once written independently — 5 s
+// here against a 2 s host wait — so a shutdown reaching a busy worker always
+// took the kill branch and the window could never be spent. The host normalizes
+// the value into `RUVYXA_WORKER_SHUTDOWN_MS`, so the worker has to honour it.
+test('the shutdown grace comes from the environment the host normalizes', async (t) => {
+  const worker = spawn(process.execPath, [workerScript], {
+    cwd: repoRoot,
+    env: { ...process.env, RUVYXA_WORKER_SHUTDOWN_MS: '12000' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  const lines = createInterface({ input: worker.stdout })
+
+  t.after(async () => {
+    lines.close()
+    worker.stdin.end()
+    await Promise.race([
+      new Promise((resolve) => worker.once('exit', resolve)),
+      new Promise((resolve) => setTimeout(resolve, 2_000)),
+    ])
+    if (worker.exitCode === null) worker.kill()
+  })
+
+  const configured = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('worker ping timed out')), 10_000)
+    lines.once('line', (line) => {
+      clearTimeout(timer)
+      resolve(JSON.parse(line))
+    })
+    worker.stdin.write(`${JSON.stringify({ id: 'shutdown-grace', type: 'ping' })}
+`)
+  })
+
+  assert.equal(configured.ok, true)
+  assert.equal(configured.workerShutdownGraceMs, 12_000)
+})
+
+// An idle worker must not sit out the grace: the host waits for the process to
+// exit, so a worker holding nothing has to go as soon as its stdin closes. This
+// is why raising the grace costs an ordinary Ctrl-C nothing.
+test('an idle worker exits as soon as its stdin closes', async (t) => {
+  const worker = spawn(process.execPath, [workerScript], {
+    cwd: repoRoot,
+    // Far longer than this test will wait, so a worker that waits out the
+    // window instead of exiting fails rather than passing slowly.
+    env: { ...process.env, RUVYXA_WORKER_SHUTDOWN_MS: '600000' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  const lines = createInterface({ input: worker.stdout })
+  t.after(() => {
+    lines.close()
+    if (worker.exitCode === null) worker.kill()
+  })
+
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('worker ping timed out')), 10_000)
+    lines.once('line', () => {
+      clearTimeout(timer)
+      resolve()
+    })
+    worker.stdin.write(`${JSON.stringify({ id: 'idle-exit', type: 'ping' })}
+`)
+  })
+
+  worker.stdin.end()
+  const exited = await Promise.race([
+    new Promise((resolve) => worker.once('exit', () => resolve('exited'))),
+    new Promise((resolve) => setTimeout(() => resolve('still running'), 10_000)),
+  ])
+  assert.equal(exited, 'exited')
+})

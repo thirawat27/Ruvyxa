@@ -161,7 +161,12 @@ export default config({
 ```
 
 The PWA plugin defaults to `/manifest.webmanifest`, `/sw.js`, and `/pwa-register.js`; all three
-paths must differ. `openApi` defaults to `/openapi.json`, requires a non-empty title/version, and
+paths must differ. `scope` must be inside the directory `serviceWorkerPath` sits in, and is rejected
+at config time when it is not: the `Service-Worker-Allowed` header that widens a worker's reach is
+written by the plugin's own request handler and by nothing downstream, so a build that publishes
+`sw.js` as a plain asset for a CDN to serve would register in development and fail in production
+with `SecurityError`. A worker at `/sw.js` claims `/` already, which is why the default combination
+is unaffected. `openApi` defaults to `/openapi.json`, requires a non-empty title/version, and
 rejects duplicate method/path and `operationId` entries. Run a production build and inspect the
 generated output whenever adding a build plugin.
 
@@ -227,6 +232,16 @@ legitimate design; that case is governed by CORS instead. Unsafe methods are che
 `Origin` against `Host`, falling back to `Sec-Fetch-Site: same-origin` when the origin was stripped,
 and failing closed when neither is present. `webVitals` publishes its client script as a build asset
 and loads it with `src`, so it does not force `'unsafe-inline'` into a `script-src` policy.
+
+The collector is a public `POST` endpoint, so it also carries a ceiling: `rateLimit` defaults to 120
+records per client per minute and fifty times that from all clients combined, and a beacon past it
+gets `429`. The per-client budget needs to know who a client is, and only the deployment knows
+whether a forwarded header can be believed, so pass `clientIp` behind a proxy or platform edge —
+`webVitals({ clientIp: (request) => request.headers.get('cf-connecting-ip') })`. Without it there is
+no per-client bucket and only the endpoint-wide ceiling applies. Raise `rateLimit.max` for a busy
+site rather than lowering it: a limit tight enough to catch a flood also drops the beacons of a
+large shared egress, which biases the measurement towards whoever was not behind a NAT.
+`rateLimit: false` turns it off where a WAF already bounds the endpoint.
 
 ## Content-Security-Policy
 

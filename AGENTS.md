@@ -129,15 +129,16 @@ would not produce, and nothing points at the stamp as the reason.
 
 Derive the identity from something that already changes when the answer changes:
 
-| The cache                                  | Its identity                                                                                                |
-| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
-| every artifact under `.ruvyxa/cache/`      | `versioned_key()` in `artifact_cache.rs` — `env!("CARGO_PKG_VERSION")` mixed into the key                   |
-| a client route plan                        | `client_route_plan_variant()` — the serialized `BundleOptions` that produced it                             |
-| compiled modules (`ruvyxa_bundler::cache`) | `COMPILER_VERSION` — the crate version, nothing appended                                                    |
-| optimized images                           | `ENCODER_IDENTITY` — the crate version, mixed into the content-addressed key                                |
-| the config-load cache                      | `CONFIG_CACHE_TOOLCHAIN` — the crate version, at a fixed path with nothing else to distinguish it           |
-| the bundle-input manifest (`compiler.mjs`) | the sha256 of `compiler.mjs` itself: the file that defines the format is what changes when the format does  |
-| the incremental module graph               | `MANIFEST_VERSION`, a constant string with **no** counter — compatibility lives in the entry format instead |
+| The cache                                  | Its identity                                                                                               |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| every artifact under `.ruvyxa/cache/`      | `versioned_key()` in `artifact_cache.rs` — `env!("CARGO_PKG_VERSION")` mixed into the key                  |
+| a client route plan                        | `client_route_plan_variant()` — the serialized `BundleOptions` that produced it                            |
+| compiled modules (`ruvyxa_bundler::cache`) | `COMPILER_VERSION` — the crate version, nothing appended                                                   |
+| optimized images                           | `ENCODER_IDENTITY` — the crate version, mixed into the content-addressed key                               |
+| the config-load cache                      | `CONFIG_CACHE_TOOLCHAIN` — the crate version, at a fixed path with nothing else to distinguish it          |
+| the bundle-input manifest (`compiler.mjs`) | the sha256 of `compiler.mjs` itself: the file that defines the format is what changes when the format does |
+| the incremental module graph               | `MANIFEST_VERSION` — the crate version, nothing appended                                                   |
+| the artifact task graph                    | `ARTIFACT_GRAPH_IDENTITY` — the crate version, nothing appended                                            |
 
 Two rules follow, and `a_client_plan_key_follows_every_option_that_shapes_it` in
 `crates/ruvyxa_cli/src/tests.rs` holds the first:

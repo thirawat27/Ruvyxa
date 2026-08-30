@@ -34,16 +34,49 @@ export function workspacePackageDirs() {
   const dirs = []
   const ignored = []
   for (const parent of ['packages', 'packages/@ruvyxa']) {
-    for (const name of readdirSync(parent).sort()) {
-      // The scope directory itself, reached through `packages/*`.
-      if (parent === 'packages' && name === '@ruvyxa') continue
-      // Forward slashes rather than `join`, so the reported path reads the same
-      // on every host — these are printed in failure messages.
-      const dir = `${parent}/${name}`
-      if (!statSync(dir).isDirectory()) continue
-      if (existsSync(join(dir, 'package.json'))) dirs.push(dir)
-      else ignored.push(dir)
-    }
+    const found = manifestDirs(
+      parent,
+      'package.json',
+      // The scope directory itself, reached through the `packages` pass.
+      (name) => !(parent === 'packages' && name === '@ruvyxa'),
+    )
+    dirs.push(...found.dirs)
+    ignored.push(...found.ignored)
+  }
+  return { dirs, ignored }
+}
+
+/**
+ * Directories under `parent` that carry `manifestName`, and those that do not.
+ *
+ * The same rule as `workspacePackageDirs`, for the other two trees this
+ * repository walks. `crates/<name>/Cargo.toml` and `templates/<name>/package.json` were
+ * still being opened with a bare `readdirSync` + `readFileSync` in the very file
+ * that imports the helper written to stop that — so residue under either would
+ * reproduce the incident described above, verbatim, in a different directory.
+ * `bump-version.mjs` already guarded its `templates/` loop, so the two files
+ * disagreed about whether it mattered.
+ *
+ * Residue is less likely there than under `packages/`, because nothing writes to
+ * them. It is not impossible, and the cost of being wrong is a release check
+ * that fails on a clean tree naming a file nobody touched.
+ *
+ * A directory that genuinely lost its manifest is reported rather than dropped
+ * in silence, and for crates `cargo metadata --locked` in `pnpm check:cargo-lock`
+ * is the gate that answers for a workspace member with no manifest.
+ */
+export function manifestDirs(parent, manifestName, accept = () => true) {
+  const dirs = []
+  const ignored = []
+  if (!existsSync(parent)) return { dirs, ignored }
+  for (const name of readdirSync(parent).sort()) {
+    if (!accept(name)) continue
+    // Forward slashes rather than `join`, so the reported path reads the same
+    // on every host — these are printed in failure messages.
+    const dir = `${parent}/${name}`
+    if (!statSync(dir).isDirectory()) continue
+    if (existsSync(join(dir, manifestName))) dirs.push(dir)
+    else ignored.push(dir)
   }
   return { dirs, ignored }
 }

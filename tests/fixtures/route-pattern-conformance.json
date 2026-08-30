@@ -1,0 +1,193 @@
+{
+  "$comment": [
+    "Shared dynamic-route-segment syntax table.",
+    "",
+    "Two halves in two languages decide what a dynamic route segment is, and they",
+    "are not allowed to disagree:",
+    "",
+    "  - crates/ruvyxa_graph/src/lib.rs  (route_segment / validate_dynamic_name)",
+    "    decides which app/ folder names become routes at all, and writes the",
+    "    surviving pattern into the manifest.",
+    "  - packages/@ruvyxa/core/src/route-match.ts  (compilePattern) decides which",
+    "    manifest segments compile to a parameter capture. A segment it does not",
+    "    recognise becomes a *literal* URL component.",
+    "",
+    "When discovery accepts a name the matcher does not recognise, the route is",
+    "written into the manifest, shows up in the route table, passes `ruvyxa check`",
+    "— and never matches a request, because the only URL that would match is the",
+    "literal folder name. Nothing reports it: each half believes it is right.",
+    "That was RUV-H20, found with `app/blog/[post-id]/page.tsx`.",
+    "",
+    "The rule this file pins is one rule: a parameter name is one or more ASCII",
+    "letters, digits, or `_` — exactly JavaScript's `\\w` without the `u` flag,",
+    "which is what compilePattern already matched. Discovery was narrowed to it.",
+    "",
+    "The invariant every case encodes: for a bracketed segment, discovery accepts",
+    "it if and only if the matcher compiles it to a parameter.",
+    "",
+    "Every implementation replays this file:",
+    "  - crates/ruvyxa_graph/src/lib.rs  (replays_the_shared_route_pattern_conformance_table)",
+    "  - tests/packages/core/route-pattern-conformance.test.ts",
+    "",
+    "Add a case here first when changing segment syntax; a port that drifts then",
+    "fails in the language that drifted, not in review."
+  ],
+
+  "$kindComment": [
+    "kind is what the JavaScript matcher must produce for the segment:",
+    "  static             — no capture; the segment is a literal URL component",
+    "  dynamic            — one capture, one path segment              [name]",
+    "  catchAll           — one capture, one or more path segments     [...name]",
+    "  optionalCatchAll   — one capture, zero or more path segments    [[...name]]",
+    "  rejected           — route discovery refuses the folder (RUV1002)",
+    "",
+    "`param` is the parameter name the matcher must bind, or null when there is",
+    "none. A `rejected` case also asserts the matcher would NOT have bound a",
+    "parameter — that is precisely why the name has to be refused at build time",
+    "rather than allowed through to a silent 404.",
+    "",
+    "Every case is replayed as the final segment of a route, so a catch-all is",
+    "never in the position that would trip the separate 'catch-all must be last'",
+    "rule."
+  ],
+  "segments": [
+    {
+      "segment": "blog",
+      "kind": "static",
+      "param": null,
+      "why": "Control: an ordinary folder is a literal URL component in both halves."
+    },
+    {
+      "segment": "ทดสอบ",
+      "kind": "static",
+      "param": null,
+      "why": "A static segment carries any character. Only parameter *names* are restricted."
+    },
+    {
+      "segment": "[id]",
+      "kind": "dynamic",
+      "param": "id",
+      "why": "The common case, and the one every template ships."
+    },
+    {
+      "segment": "[postId]",
+      "kind": "dynamic",
+      "param": "postId",
+      "why": "camelCase is the shape the framework recommends, since params.postId has to be writable."
+    },
+    {
+      "segment": "[post_id]",
+      "kind": "dynamic",
+      "param": "post_id",
+      "why": "Underscore is inside \\w, so both halves have always agreed on it."
+    },
+    {
+      "segment": "[id2]",
+      "kind": "dynamic",
+      "param": "id2",
+      "why": "Digits are inside \\w."
+    },
+    {
+      "segment": "[2]",
+      "kind": "dynamic",
+      "param": "2",
+      "why": "\\w allows a leading digit. Not an identifier, but params['2'] is a usable key and neither half is confused by it — the rule is the character set, not JavaScript identifier syntax."
+    },
+    {
+      "segment": "[...slug]",
+      "kind": "catchAll",
+      "param": "slug",
+      "why": "Catch-all names go through the same validation as [name]."
+    },
+    {
+      "segment": "[[...slug]]",
+      "kind": "optionalCatchAll",
+      "param": "slug",
+      "why": "Optional catch-all names go through the same validation as [name]."
+    },
+    {
+      "segment": "[post-id]",
+      "kind": "rejected",
+      "param": null,
+      "why": "RUV-H20 itself. Discovery accepted a hyphen; compilePattern's \\w does not, so /blog/[post-id] compiled to a literal and /blog/hello 404'd on every host. A hyphenated name is also unwritable as params.post-id."
+    },
+    {
+      "segment": "[...post-id]",
+      "kind": "rejected",
+      "param": null,
+      "why": "The same hyphen in a catch-all: ^\\[\\.\\.\\.(\\w+)\\]$ fails it just the same."
+    },
+    {
+      "segment": "[[...post-id]]",
+      "kind": "rejected",
+      "param": null,
+      "why": "The same hyphen in an optional catch-all."
+    },
+    {
+      "segment": "[post.id]",
+      "kind": "rejected",
+      "param": null,
+      "why": "A dot was accepted anywhere but the first character. It is outside \\w, so the matcher read the whole segment as a literal."
+    },
+    {
+      "segment": "[$id]",
+      "kind": "rejected",
+      "param": null,
+      "why": "`$` is a legal JavaScript identifier character but is outside \\w, which is the character set the matcher actually implements. The matcher is the authority here."
+    },
+    {
+      "segment": "[post id]",
+      "kind": "rejected",
+      "param": null,
+      "why": "A space in a folder name was accepted by discovery and never matched."
+    },
+    {
+      "segment": "[หมวด]",
+      "kind": "rejected",
+      "param": null,
+      "why": "JavaScript's \\w without the `u` flag is ASCII-only, so a non-ASCII name is a literal to the matcher however valid an identifier it is."
+    },
+    {
+      "segment": "[]",
+      "kind": "rejected",
+      "param": null,
+      "why": "Empty name. Refused before and after; the matcher would have read it as the literal segment `[]`."
+    },
+    {
+      "segment": "[...]",
+      "kind": "rejected",
+      "param": null,
+      "why": "Empty catch-all name."
+    },
+    {
+      "segment": "[[...]]",
+      "kind": "rejected",
+      "param": null,
+      "why": "Empty optional catch-all name."
+    },
+    {
+      "segment": "[.hidden]",
+      "kind": "rejected",
+      "param": null,
+      "why": "A leading dot was already refused, to keep [.foo] from reading as a mangled catch-all."
+    },
+    {
+      "segment": "[[...slug]",
+      "kind": "rejected",
+      "param": null,
+      "why": "Unbalanced brackets: the name would be `[...slug`, which still contains a bracket."
+    },
+    {
+      "segment": "[slug]]",
+      "kind": "rejected",
+      "param": null,
+      "why": "Unbalanced the other way; the name would be `slug]`."
+    },
+    {
+      "segment": "post[id]",
+      "kind": "rejected",
+      "param": null,
+      "why": "A bracket outside the [name] forms is refused outright rather than becoming a literal segment with brackets in the URL."
+    }
+  ]
+}

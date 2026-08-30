@@ -279,10 +279,21 @@ pub fn paint(value: impl AsRef<str>, code: &str) -> String {
 }
 
 /// The pure half of [`paint`]: colour decided by the caller.
+///
+/// The value is filtered through [`crate::sanitize::sanitize_plain`] first, and
+/// on both branches. Repository file paths reach this function directly — the
+/// route table prints one per route — and nothing this crate paints carries a
+/// legitimate control character, so a name holding `\x1b[2J` or a run of
+/// newlines and forged glyphs is a value rewriting the reader's screen. Doing
+/// it here covers `path_text`, `label`, `dim`, `accent`, and every other role
+/// at once.
+///
+/// Filtering when `color` is false is not belt and braces: colour is off in a
+/// redirected CI log, which is the case the vector is aimed at.
 pub fn paint_when(color: bool, value: impl AsRef<str>, code: &str) -> String {
-    let value = value.as_ref();
+    let value = crate::sanitize::sanitize_plain(value.as_ref());
     if !color {
-        return value.to_string();
+        return value;
     }
 
     format!("\x1b[{code}m{value}\x1b[0m")

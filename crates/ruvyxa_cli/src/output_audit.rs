@@ -134,11 +134,24 @@ fn audit_documents(
             continue;
         };
         for url in document_asset_urls(&html) {
-            let target = if let Some(rest) = url.strip_prefix("/__ruvyxa/client/") {
+            // A document spells a file name the way a URL must be spelled, so
+            // `public/my photo.png` appears as `/my%20photo.png`. Every host
+            // that serves the URL decodes it before touching the filesystem;
+            // this audit joined the encoded form onto a directory and failed a
+            // build whose asset every one of those hosts serves.
+            let Some(relative) = decoded_relative_url(&url) else {
+                // Not this audit's to resolve. A segment that cannot be decoded,
+                // or that decodes to a path boundary or a traversal component,
+                // names nothing inside either output directory — and treating
+                // it as dangling would fail a build over a URL no host would
+                // have resolved either.
+                continue;
+            };
+            let target = if let Some(rest) = relative.strip_prefix("__ruvyxa/client/") {
                 client_dir.join(rest)
             } else {
                 // A `public/` file, published into the assets directory.
-                assets_dir.join(url.trim_start_matches('/'))
+                assets_dir.join(&relative)
             };
             if !target.is_file() {
                 dangling.insert(DanglingReference {
@@ -175,6 +188,70 @@ fn document_asset_urls(html: &str) -> Vec<String> {
         }
     }
     urls
+}
+
+/// The path, relative to an output directory, that an absolute document URL
+/// names — decoded exactly as the hosts that serve it decode it.
+///
+/// `canonical_request_path` in `ruvyxa_dev_server` is the same decision for the
+/// native server, and `serverless-handler.mjs` makes it for a deployed build.
+/// Neither is reachable from here (`canonical_request_path` is `pub(crate)` in
+/// its own crate), so the *reject list travels with the decode*: an encoded `/`,
+/// `\`, `.`, `..`, NUL, any other control character, malformed percent escape,
+/// or non-UTF-8 byte sequence answers `None`.
+///
+/// `None` therefore means "not this audit's to resolve", never "dangling":
+/// widening what the audit resolves must not widen where it looks, so a decoded
+/// `..` can never escape the directory the caller joins the result onto.
+///
+/// The returned path has no leading slash and uses `/` separators, which
+/// `Path::join` accepts on every host.
+fn decoded_relative_url(url: &str) -> Option<String> {
+    let mut segments = Vec::new();
+    for segment in url.split('/').filter(|segment| !segment.is_empty()) {
+        let decoded = decode_url_segment(segment)?;
+        if decoded.is_empty()
+            || matches!(decoded.as_str(), "." | "..")
+            || decoded.contains(['/', '\\'])
+            || decoded.chars().any(char::is_control)
+        {
+            return None;
+        }
+        segments.push(decoded);
+    }
+    if segments.is_empty() {
+        return None;
+    }
+    Some(segments.join("/"))
+}
+
+/// Percent-decode one path segment, or `None` when it is malformed or the
+/// decoded bytes are not UTF-8.
+fn decode_url_segment(segment: &str) -> Option<String> {
+    let bytes = segment.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            decoded.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        let high = bytes.get(index + 1).copied().and_then(hex_value)?;
+        let low = bytes.get(index + 2).copied().and_then(hex_value)?;
+        decoded.push((high << 4) | low);
+        index += 3;
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Whether a same-origin URL names a file rather than a route.
@@ -327,6 +404,99 @@ mod tests {
         assert_eq!(
             audit_emitted_output(&client, &prerender, &assets),
             Vec::new()
+        );
+    }
+
+    /// A space or a non-ASCII character in a `public/` file name is spelled
+    /// percent-encoded in a document, which is the *correct* HTML spelling —
+    /// and every host decodes it before touching the filesystem. This audit
+    /// joined the encoded form onto a directory, looked for a file literally
+    /// named `my%20photo.png`, and failed the build with `RUV1213` on a project
+    /// that had no way to build at all short of renaming the asset.
+    #[test]
+    fn a_percent_encoded_asset_url_resolves_to_the_file_it_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let client = temp.path().join("client");
+        let prerender = temp.path().join("prerender");
+        let assets = temp.path().join("assets");
+        fs::create_dir_all(&client).unwrap();
+        fs::create_dir_all(&prerender).unwrap();
+        fs::create_dir_all(assets.join("ทดสอบ")).unwrap();
+
+        fs::write(assets.join("my photo.png"), "png").unwrap();
+        fs::write(assets.join("ทดสอบ/logo.png"), "png").unwrap();
+        fs::write(
+            prerender.join("index.html"),
+            r#"<!doctype html><html><head>
+               <link rel="icon" href="/my%20photo.png">
+               <img src="/%E0%B8%97%E0%B8%94%E0%B8%AA%E0%B8%AD%E0%B8%9A/logo.png">
+               </head><body></body></html>"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            audit_emitted_output(&client, &prerender, &assets),
+            Vec::new(),
+            "a URL every host serves must not fail the build"
+        );
+    }
+
+    /// The reject list travels with the decode. Decoding widens what the audit
+    /// resolves, so a decoded `..`, an encoded separator, or a malformed escape
+    /// must answer "not mine to resolve" rather than reaching outside
+    /// `assets_dir` — and must not be reported as dangling either, which is the
+    /// same false build failure by another route.
+    #[test]
+    fn an_encoded_traversal_is_neither_resolved_nor_reported() {
+        assert_eq!(
+            decoded_relative_url("/my%20photo.png").as_deref(),
+            Some("my photo.png")
+        );
+        assert_eq!(
+            decoded_relative_url("/__ruvyxa/client/app.js").as_deref(),
+            Some("__ruvyxa/client/app.js")
+        );
+        assert_eq!(
+            decoded_relative_url("/%E0%B8%97%E0%B8%94%E0%B8%AA%E0%B8%AD%E0%B8%9A.png").as_deref(),
+            Some("ทดสอบ.png")
+        );
+
+        for refused in [
+            "/%2e%2e/secret.png",   // decoded parent traversal
+            "/a/%2E%2E/secret.png", // and mid-path
+            "/%2Fsecret.png",       // encoded path boundary
+            "/%5Csecret.png",       // encoded Windows separator
+            "/%00.png",             // NUL
+            "/%.png",               // malformed escape
+            "/%GG.png",             // malformed escape
+            "/%FF.png",             // not UTF-8
+            "/",                    // no segment at all
+        ] {
+            assert_eq!(
+                decoded_relative_url(refused),
+                None,
+                "{refused} must not be resolved"
+            );
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let client = temp.path().join("client");
+        let prerender = temp.path().join("prerender");
+        let assets = temp.path().join("assets");
+        fs::create_dir_all(&client).unwrap();
+        fs::create_dir_all(&prerender).unwrap();
+        fs::create_dir_all(&assets).unwrap();
+        fs::write(temp.path().join("secret.png"), "png").unwrap();
+        fs::write(
+            prerender.join("index.html"),
+            r#"<!doctype html><html><head><img src="/%2e%2e/secret.png"></head><body></body></html>"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            audit_emitted_output(&client, &prerender, &assets),
+            Vec::new(),
+            "an undecodable URL is not this audit's to resolve, and not dangling either"
         );
     }
 }

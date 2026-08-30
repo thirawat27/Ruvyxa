@@ -3,11 +3,13 @@
   "why": "Ruvyxa has two request hosts: the Axum server behind `ruvyxa dev`/`start`, and `createHandler` in packages/ruvyxa/runtime/serverless-handler.mjs, which every adapter's function artifact and the generated standalone server run. Endpoints were added to the Axum router by hand and ported to the handler one at a time, with nothing checking that the two agreed. `/__ruvyxa/image` was ported; `/__ruvyxa/action` was not, so every server action -- the crud template's forms, examples/demo/app/todos, and the markup `ruvyxa add` generates -- returned 404 on every deployed build while working locally. This table is the agreement. Add the endpoint here first; both languages replay it.",
   "fields": {
     "reserved": "Must appear in RESERVED_FRAMEWORK_ROUTES (crates/ruvyxa_dev_server/src/lib.rs) and RESERVED_FRAMEWORK_PATHS (packages/ruvyxa/runtime/plugin-http.mjs). A plugin that registers one of these paths panics axum, so both lists have to name the same set.",
-    "native": "Served by the Axum host. `always` in every mode, `dev` only when config.watch is set, `none` when that host deliberately does not serve the path at all. `every_contract_endpoint_is_registered_on_the_native_router` requires a route for every other value, including a misspelling of `none`, so the exemption cannot be taken by accident.",
+    "native": "Served by the Axum host. `always` in every mode, `dev` only when config.watch is set, `none` when that host deliberately does not serve the path at all. `every_contract_endpoint_is_registered_on_the_native_router` requires a route for every other value, including a misspelling of `none`, so the exemption cannot be taken by accident. `dev` is checked in the other direction too, by `no_dev_only_endpoint_is_served_in_production`: the route has to be registered inside `build_app_router`'s `if config.watch {` block, or handled by a function that reaches a `config.watch` guard. Nothing asserted that until 2026-08-29, so `dev` was honoured three different ways -- devtools at registration, `/__ruvyxa/trace` in the handler, and `/__ruvyxa/hmr` nowhere -- and a production `ruvyxa start` accepted unauthenticated WebSocket upgrades on a dev-only path while this table stayed green.",
     "serverless": "How createHandler answers. `dispatch` means the path is handled before route matching and must never fall through to the generic route-miss 404. `static` means the build emits the bytes and a CDN or publish directory answers, so a function never sees it. `none` means the endpoint does not exist outside the native host. `standalone` means the generated standalone server answers it and `createHandler` does not -- an endpoint that only makes sense to a long-running process, which the six self-hosted adapters emit and the four serverless ones do not.",
     "probe": "Request the Node conformance test sends when serverless is `dispatch`. Use `probes` instead when an endpoint answers more than one verb: a single probe checks one verb and says nothing about the others, which is how `POST /__ruvyxa/rsc` -- every server-function call on a deployed server-components page -- returned 405 with this table green.",
     "probes": "Several such requests, replayed one at a time. An endpoint that answers more than one verb lists each of them here rather than one in `probe`.",
-    "requiredHeaders": "Request headers the endpoint refuses with 400 when absent, as name -> value. This is where a same-origin gate that is not CORS is written down. `/__ruvyxa/rsc` renders with the visitor's cookies on GET and runs a server function on POST, and its only cross-origin defence is a header a third-party page cannot set without a preflight nothing answers -- spelled independently in `framework_endpoints.rs`, `serverless-handler.mjs`, `rsc-client-runtime.mjs`, and `@ruvyxa/react`'s router. The dispatch probes send these, and a companion test drops them one at a time, so a host that stopped checking answers 404-or-200 instead of 400 and fails here."
+    "requiredHeaders": "Request headers the endpoint refuses with 400 when absent, as name -> value. `/__ruvyxa/rsc` renders with the visitor's cookies on GET and runs a server function on POST, and both verbs demand a header a third-party page cannot set without a preflight -- spelled independently in `framework_endpoints.rs`, `serverless-handler.mjs`, `rsc-client-runtime.mjs`, and `@ruvyxa/react`'s router. The dispatch probes send these, and a companion test drops them one at a time, so a host that stopped checking answers 404-or-200 instead of 400 and fails here. This is a header gate and NOT a cross-origin gate: `requiredOrigin` below is where that is written down, and describing the header as one is exactly how `/__ruvyxa/rsc` shipped with a quarter of `/__ruvyxa/action`'s defences while this table stayed green.",
+    "requiredOrigin": "Whether the endpoint refuses a request that is not provably same-origin with 403, per host: `both`, `native` (the Axum host only), or `none`. Required on every `dispatch` endpoint, so a new one has to decide rather than inherit silence, and a value outside the three fails rather than reading as `none`. The check is the pair `security.sameOrigin` / `security.fetchMeta` configure, and it is fail-closed when neither `Origin` nor `Sec-Fetch-Site` is present -- which is why the dispatch probes for such an endpoint send a same-origin `Origin`. A `native` value is a real, tested gap: both replays assert the other host does *not* refuse, so closing it fails this table until the value moves to `both`.",
+    "rateLimited": "Whether a per-client rate limiter stands in front of the endpoint, same three values and the same requirement to declare. The key is client + route + the function being called, so a page issuing several server-function calls in one interaction spends a budget per function rather than one between them; `security.actionRateLimit` configures the ceiling for every endpoint that has one. This was the unconditional half of RUV-H5: `/__ruvyxa/action` refuses the 601st call in a minute and `POST /__ruvyxa/rsc` -- the other endpoint that runs project server functions -- had no ceiling at all on a production `ruvyxa start` host."
   },
   "endpoints": [
     {
@@ -32,6 +34,8 @@
       "probe": {
         "method": "POST"
       },
+      "requiredOrigin": "both",
+      "rateLimited": "both",
       "note": "Server actions. This is the endpoint whose absence from createHandler broke every deployed form."
     },
     {
@@ -43,7 +47,9 @@
         "method": "GET",
         "query": "path=/&artifact=0000000000000000"
       },
-      "note": "Public, version-bound Flight navigation payloads. Invalid or stale requests fail before ordinary route matching."
+      "requiredOrigin": "none",
+      "rateLimited": "none",
+      "note": "Public, version-bound Flight navigation payloads. Invalid or stale requests fail before ordinary route matching. No origin gate on purpose, and that is the whole difference from /__ruvyxa/rsc below: this payload is public and the endpoint refuses a credentialed request rather than rendering one, so there is nothing here a cross-origin caller could not fetch anyway."
     },
     {
       "path": "/__ruvyxa/rsc",
@@ -67,7 +73,9 @@
           }
         }
       ],
-      "note": "React Server Components. `GET` renders a route's payload for a soft navigation; `POST` runs one of the server functions that route exposes and answers with the payload its return value encodes to. Unlike /__ruvyxa/flight both are renders and carry the visitor's headers, so neither is cacheable. The deployed function answered 501 to `GET` and 405 to `POST` until the generated route registry learned to render through the server-components pipeline and to call into an action bundle."
+      "requiredOrigin": "both",
+      "rateLimited": "both",
+      "note": "React Server Components. `GET` renders a route's payload for a soft navigation; `POST` runs one of the server functions that route exposes and answers with the payload its return value encodes to. Unlike /__ruvyxa/flight both are renders and carry the visitor's headers, so neither is cacheable. The deployed function answered 501 to `GET` and 405 to `POST` until the generated route registry learned to render through the server-components pipeline and to call into an action bundle. `requiredOrigin` and `rateLimited` said `native` for one release after that -- the Axum host ran both guards and `handleRscPayload` / `handleRscAction` in serverless-handler.mjs still checked the navigation header alone, which the built-in CORS layer can make answerable, while `POST` there had no ceiling at all. Both hosts run both guards now: the origin/fetch-metadata pair on every verb, and a rate limiter on `POST` keyed `rsc:{client}:{canonical path}:{reference}` so a page issuing several server-function calls in one interaction spends a budget per function."
     },
     {
       "path": "/__ruvyxa/trace",
@@ -99,6 +107,8 @@
         "method": "GET",
         "query": "src=/a.png&w=64&q=80"
       },
+      "requiredOrigin": "none",
+      "rateLimited": "none",
       "note": "On-demand image optimization. Adapters that cannot optimize pass no optimizer and it answers 404, but the path is still claimed before routing."
     },
     {
@@ -137,6 +147,119 @@
       "note": "Prometheus text exposition for a long-running process, served only by the generated standalone server and only when RUVYXA_METRICS_TOKEN is set -- without it the path answers 404 rather than advertising that it exists. The numbers are the ones /__ruvyxa/health deliberately withholds (render concurrency, queue depth, refusals), which is why they sit behind a bearer token compared in constant time instead of beside the public probe. Not reserved, and that is the one trade here: a plugin may still register this path and the standalone server would shadow it. The alternative was reserving it in both lists, which would oblige the Axum host to serve it too -- and that host has no admission controller of its own, so it would have had to invent a metric set to report. An operator who turns metrics on is the one who would notice, and no first-party plugin claims the path."
     }
   ],
+
+  "$transportPathsComment": [
+    "Which paths a plugin may claim for the `realtime@1` / `presence@1` socket",
+    "transports. Two hosts decide this and both have to give the same answer:",
+    "  - packages/ruvyxa/runtime/plugin-http.mjs  (normalizeRealtime / normalizePresence)",
+    "  - crates/ruvyxa_dev_server/src/lib.rs      (validate_socket_path)",
+    "The JavaScript half runs first, inside the plugin host; the Axum half",
+    "re-checks the descriptor it is handed, because a bad path there does not",
+    "produce a diagnostic -- it panics matchit inside `Router::route` and takes",
+    "the server down before anything can be reported.",
+    "",
+    "Both halves used to be a denylist of `?`, `#`, and `*`: the axum 0.7",
+    "wildcard alphabet. The workspace is on axum 0.8, where a capture is",
+    "`{name}` and a catch-all `{*rest}`, so `/{room}` passed both guards and",
+    "registered a single-segment capture that shadowed every one-segment",
+    "project page, and `/{` passed both and panicked the router. A denylist is",
+    "only correct while it tracks the router's syntax, and nothing makes it.",
+    "The rule is an allowlist now: one or more `/`-prefixed segments of RFC",
+    "3986 unreserved characters (A-Z a-z 0-9 - . _ ~), which is a literal path",
+    "in every router version and can never acquire a meaning.",
+    "",
+    "`valid: false` means the host must refuse the descriptor with a",
+    "diagnostic. A reserved framework path is refused too, by the separate",
+    "check above; one is listed here so neither host can lose it."
+  ],
+  "transportPaths": [
+    {
+      "path": "/__ruvyxa/realtime",
+      "valid": true,
+      "why": "The realtime@1 default. Refusing it would refuse `native.claim('realtime@1')` with no options."
+    },
+    {
+      "path": "/__ruvyxa/collab",
+      "valid": true,
+      "why": "The presence@1 default."
+    },
+    {
+      "path": "/events",
+      "valid": true,
+      "why": "A single ordinary segment."
+    },
+    {
+      "path": "/api/socket",
+      "valid": true,
+      "why": "Several ordinary segments."
+    },
+    {
+      "path": "/live-2.0_beta~1",
+      "valid": true,
+      "why": "Every unreserved character the allowlist admits."
+    },
+    {
+      "path": "events",
+      "valid": false,
+      "why": "Not absolute. A relative path is not a route the router can register."
+    },
+    {
+      "path": "/events?room=1",
+      "valid": false,
+      "why": "A query string is not part of a path."
+    },
+    {
+      "path": "/events#room",
+      "valid": false,
+      "why": "A fragment never reaches the server."
+    },
+    {
+      "path": "/*rest",
+      "valid": false,
+      "why": "The axum 0.7 catch-all. Still refused, because a transport is one exact path."
+    },
+    {
+      "path": "/{room}",
+      "valid": false,
+      "why": "The axum 0.8 capture. Registers a single-segment wildcard that shadows every one-segment project page -- the whole reason this table exists."
+    },
+    {
+      "path": "/{*rest}",
+      "valid": false,
+      "why": "The axum 0.8 catch-all."
+    },
+    {
+      "path": "/{",
+      "valid": false,
+      "why": "Unbalanced brace. matchit panics on this inside Router::route, so it has to be refused before the route table is built."
+    },
+    {
+      "path": "/events/",
+      "valid": false,
+      "why": "Trailing slash. axum registers `/events/` and `/events` as different routes, so a client connecting to the path it read in the config would not reach the transport."
+    },
+    {
+      "path": "/api//socket",
+      "valid": false,
+      "why": "Empty segment."
+    },
+    {
+      "path": "/",
+      "valid": false,
+      "why": "The root. A transport that claims it shadows the project's index page."
+    },
+    {
+      "path": "/api/socket ",
+      "valid": false,
+      "why": "Trailing space. A path is compared byte-for-byte, and this is not the path anyone would type into a client."
+    },
+    {
+      "path": "/__ruvyxa/hmr",
+      "valid": false,
+      "why": "Reserved. Refused by the reserved-route check rather than the alphabet, and listed here so a host that lost one of the two checks still fails."
+    }
+  ],
+
   "capabilities": [
     {
       "id": "actions",

@@ -410,3 +410,118 @@ describe('the server-components dependency contract', () => {
     assert.equal(peerDependencies['react-server-dom-webpack'], peerDependencies['react-dom'])
   })
 })
+
+/**
+ * RTMS-07. `flight.tee()` makes two branches and the happy path owns only one.
+ *
+ * `worker-pool.mjs` reaches `rendered.payload` from `streamTrailer()`, which
+ * `emitApiStream` calls only from `endFrame()` — the success path. On a timeout
+ * or a client disconnect it cancels the HTML reader, writes an `api-error`
+ * frame, and returns. Nothing ever settled the payload branch, so a render that
+ * timed out retained the in-progress React render, the un-cancelled tee branch,
+ * and the accumulating payload string for the life of the worker. That is
+ * per-request heap growth on a route that reliably times out, and it is
+ * invisible to `registeredModuleUrls` reporting.
+ */
+describe('the abandoned payload branch', () => {
+  /**
+   * The real render, behind a stream that delivers every row and never closes.
+   *
+   * A page that suspends past the worker timeout is the shape that matters, and
+   * this is that shape without a second compile: the shell renders (so
+   * `renderServerComponentsStream` returns), and the payload branch is still
+   * reading when the caller gives up.
+   */
+  function stallingServerModule() {
+    const observed = { cancelled: false, reason: null }
+    return {
+      observed,
+      module: {
+        ...serverModule,
+        async flight(...args) {
+          const source = await serverModule.flight(...args)
+          const reader = source.getReader()
+          return new ReadableStream({
+            async pull(controller) {
+              const { done, value } = await reader.read()
+              // Deliberately never closes: `pull` is not called again while
+              // this promise is pending, so the branch stays open.
+              if (done) return new Promise(() => {})
+              controller.enqueue(value)
+            },
+            cancel(reason) {
+              observed.cancelled = true
+              observed.reason = reason
+              return reader.cancel(reason)
+            },
+          })
+        },
+      },
+    }
+  }
+
+  it('can be released, so a timed-out render does not retain it forever', async () => {
+    const { module, observed } = stallingServerModule()
+    const streamed = await renderServerComponentsStream({
+      serverModule: module,
+      references: serverBundle.clientReferences,
+      ctx: { path: '/', params: {} },
+      routePath: '/',
+    })
+
+    const settled = Symbol('pending')
+    const state = () =>
+      Promise.race([
+        streamed.payload.then(
+          () => 'resolved',
+          () => 'rejected',
+        ),
+        new Promise((resolve) => setTimeout(() => resolve(settled), 50)),
+      ])
+    assert.equal(await state(), settled, 'the payload branch must still be reading')
+
+    // Exactly what `emitApiStream`'s error path does: cancel the HTML reader,
+    // then release the trailer it will never await.
+    const failure = new Error('render timed out')
+    const reader = streamed.stream.getReader()
+    await reader.read()
+    await reader.cancel(failure)
+    await streamed.cancelPayload(failure)
+
+    assert.notEqual(
+      await state(),
+      settled,
+      'cancelling the payload branch must settle the promise nobody is awaiting',
+    )
+    assert.equal(observed.cancelled, true, 'the Flight source never observed a cancel')
+  })
+
+  it('never leaves the payload promise unhandled, even when nobody awaits it', async () => {
+    // The other half of the same ownership gap: if the branch can *reject*
+    // rather than hang, an abandoned `rendered.payload` is an unhandled
+    // rejection and Node takes the worker down with it. The promise is returned
+    // for `streamTrailer` to await, so it must still reject for that caller --
+    // being owned is not the same as being swallowed.
+    const { module } = stallingServerModule()
+    const streamed = await renderServerComponentsStream({
+      serverModule: module,
+      references: serverBundle.clientReferences,
+      ctx: { path: '/', params: {} },
+      routePath: '/',
+    })
+
+    const rejections = []
+    const onUnhandled = (reason) => rejections.push(reason)
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      await streamed.cancelPayload(new Error('abandoned'))
+      await streamed.payload
+      await new Promise((resolve) => setImmediate(resolve))
+      await new Promise((resolve) => setImmediate(resolve))
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+      await streamed.stream.cancel()
+    }
+    assert.deepEqual(rejections, [])
+  })
+})

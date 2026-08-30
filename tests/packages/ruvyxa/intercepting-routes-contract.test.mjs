@@ -2,7 +2,7 @@
  * The dev server's half of `tests/fixtures/intercepting-route-conformance.json`.
  *
  * An intercepting route is discovered twice: `route_intercepts()` in
- * `crates/ruvyxa_graph/src/lib.rs` answers for `ruvyxa build`, and
+ * `crates/ruvyxa_graph/src/parallel.rs` answers for `ruvyxa build`, and
  * `collectIntercepts()` in `packages/ruvyxa/runtime/route-intercepts.mjs` answers
  * for `ruvyxa dev`. An interception one host composes and the other does not is
  * a modal that opens in production and does nothing locally.
@@ -59,13 +59,29 @@ describe('intercepting route discovery', () => {
   }
 
   it('skips a marker that climbs above the app root', () => {
-    // Route discovery refuses this tree with RUV1006 before the dev server
+    // Route discovery refuses this tree with RUV1018 before the dev server
     // ever builds an entry from it, so the worker never sees one. Skipping is
     // the safe direction: an interception that resolves to nothing is a modal
     // that does not open, where a wrong target would overlay the wrong page.
     const { root, app } = materialise(['photo/page.tsx', '@modal/(..)photo/page.tsx'])
     try {
       assert.deepEqual(collectIntercepts(app, app), [])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('reports a directory it could not read rather than finding no interception', () => {
+    // The other half of the same rule. `route_intercepts` in
+    // `crates/ruvyxa_graph/src/parallel.rs` refuses an unreadable directory
+    // with RUV1021, because a walk that could not look has not established
+    // that there is nothing there — and an interception that disappears
+    // silently is a modal that opens under one host and not the other. A
+    // directory that is not there is the portable stand-in for one that cannot
+    // be read; a permission bit is not.
+    const { root, app } = materialise(['photo/page.tsx'])
+    try {
+      assert.throws(() => collectIntercepts(app, path.join(app, 'missing')), /RUV1021/)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

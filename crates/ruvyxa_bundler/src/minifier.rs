@@ -218,22 +218,85 @@ pub fn tree_shake_exports(source: &str) -> String {
 /// Fold CommonJS `NODE_ENV` branches while resolving a production client
 /// graph. This prevents packages such as React from pulling both development
 /// and production implementations into the same browser bundle.
+///
+/// This ran a fixed sixty-four times, and the ceiling bounded cost rather than
+/// the number of real guards: each pass called a finder that rescanned the
+/// module from its first byte, so sixty-five folds cost sixty-five full scans.
+/// The sixty-fifth guard and everything after it therefore survived into the
+/// browser bundle, where nothing downstream can remove it — the linker injects
+/// `var process = globalThis.process || { env: { NODE_ENV: "production" } }`,
+/// which oxc's compressor cannot treat as a constant — and a minified package
+/// carries far more than sixty-four.
+///
+/// The ceiling is gone because the cost it was bounding is gone. One pass
+/// collects every *disjoint* guard in the text (the scan continues past a
+/// match's end rather than descending into it) and applies them last-first, so
+/// an earlier match's offsets stay valid. Nested guards and `else if` chains
+/// that fold into another guard need another pass, so passes are bounded by
+/// nesting depth rather than by guard count, and each pass is one
+/// [`ast::masked_code`] scan.
+///
+/// Termination needs no counter: every replacement is one of the guard's own
+/// inner spans — the surviving block, the `else` block, the rest of an
+/// `else if` chain, or nothing — and each of those begins strictly after the
+/// `if` it replaces, so a pass that folds anything strictly shortens the text.
 pub(crate) fn fold_production_node_env(source: &str) -> String {
     let mut folded = source.to_string();
 
-    // A bounded loop handles nested guards without allowing malformed input to
-    // turn source preprocessing into an unbounded build step.
-    for _ in 0..64 {
-        let Some((start, end, replacement)) = find_node_env_conditional(&folded) else {
+    loop {
+        let folds = find_node_env_conditionals(&folded);
+        if folds.is_empty() {
             break;
-        };
-        folded.replace_range(start..end, &replacement);
+        }
+
+        let before = folded.len();
+        for (start, end, replacement) in folds.iter().rev() {
+            folded.replace_range(*start..*end, replacement);
+        }
+
+        // The safety net for the invariant above. If a future replacement kind
+        // ever broke it, this stops with the source partly unfolded rather than
+        // spinning — larger output, which is the direction that still ships
+        // working code.
+        debug_assert!(
+            folded.len() < before,
+            "a fold must shorten the source or the scan cannot terminate"
+        );
+        if folded.len() >= before {
+            break;
+        }
     }
 
     folded
 }
 
-/// Locate one foldable `if (process.env.NODE_ENV …)` guard.
+/// Every foldable guard in `source`, in ascending order and never overlapping.
+///
+/// A match is `(start, end, replacement)` over `source`'s own byte offsets, so
+/// the caller must apply them last-first. Scanning resumes at a match's `end`,
+/// which is what keeps them disjoint: a guard nested inside another one is
+/// found by the next pass, once the outer fold has decided whether its bytes
+/// survive at all.
+fn find_node_env_conditionals(source: &str) -> Vec<(usize, usize, String)> {
+    // Masked once for the whole pass. Every match's position is decided against
+    // it, and the mask is only valid for `source` as it stands — which is why a
+    // pass collects before it rewrites rather than rewriting as it goes.
+    let masked = crate::ast::masked_code(source);
+    let mut folds = Vec::new();
+    let mut search_from = 0;
+
+    while let Some((start, end, replacement)) =
+        find_node_env_conditional(source, &masked, search_from)
+    {
+        search_from = end;
+        folds.push((start, end, replacement));
+    }
+
+    folds
+}
+
+/// Locate the first foldable `if (process.env.NODE_ENV …)` guard at or after
+/// `search_from`.
 ///
 /// Every position decision is made against [`ast::masked_code`], where string,
 /// template, comment, and regex text has been blanked out but every byte offset
@@ -250,10 +313,13 @@ pub(crate) fn fold_production_node_env(source: &str) -> String {
 /// the browser. It also read every `/` as a regex with no check for whether a
 /// value was even expected there, a decision `ast` keeps private precisely
 /// because it is only correct alongside the rest of the scan.
-fn find_node_env_conditional(source: &str) -> Option<(usize, usize, String)> {
-    let masked = crate::ast::masked_code(source);
+fn find_node_env_conditional(
+    source: &str,
+    masked: &str,
+    search_from: usize,
+) -> Option<(usize, usize, String)> {
     let bytes = masked.as_bytes();
-    let mut search = 0;
+    let mut search = search_from;
 
     while search + 1 < bytes.len() {
         if bytes[search] != b'i' || bytes.get(search + 1) != Some(&b'f') {
@@ -276,7 +342,7 @@ fn find_node_env_conditional(source: &str) -> Option<(usize, usize, String)> {
             search = start + 2;
             continue;
         }
-        let condition_close = matching_delimiter(&masked, condition_open, b'(', b')')?;
+        let condition_close = matching_delimiter(masked, condition_open, b'(', b')')?;
         let condition = &source[condition_open + 1..condition_close];
         let Some(condition_result) = production_condition_result(condition) else {
             search = condition_close + 1;
@@ -288,17 +354,17 @@ fn find_node_env_conditional(source: &str) -> Option<(usize, usize, String)> {
             search = condition_close + 1;
             continue;
         }
-        let consequent_close = matching_delimiter(&masked, consequent_open, b'{', b'}')?;
+        let consequent_close = matching_delimiter(masked, consequent_open, b'{', b'}')?;
 
         let after_consequent = skip_ascii_whitespace(bytes, consequent_close + 1);
-        let else_start = else_keyword_at(&masked, after_consequent).then_some(after_consequent);
+        let else_start = else_keyword_at(masked, after_consequent).then_some(after_consequent);
 
         // What the `else` clause is, and where the whole statement ends.
         //
         // A clause that is neither a block nor another `if` is a brace-less
         // statement whose end cannot be found without parsing, so the guard is
         // left alone rather than half-removed.
-        let Some(clause) = else_clause(&masked, bytes, else_start, consequent_close) else {
+        let Some(clause) = else_clause(masked, bytes, else_start, consequent_close) else {
             search = consequent_close + 1;
             continue;
         };
@@ -1102,6 +1168,82 @@ if (process.env.NODE_ENV !== "production") {
             "interpolated code is code: {out}"
         );
         assert!(out.contains("<p>"), "literal text must survive: {out}");
+    }
+
+    /// However many guards a module has, all of them fold.
+    ///
+    /// The loop used to stop after a fixed 64 folds because each call rescanned
+    /// from offset 0 and the ceiling was there to bound that cost. The 65th
+    /// development-only guard and everything after it therefore shipped to the
+    /// browser, and nothing downstream could remove it: the linker injects
+    /// `var process = globalThis.process || { env: { NODE_ENV: "production" } }`,
+    /// which oxc's compressor cannot constant-fold. Minified npm packages carry
+    /// far more than 64 — `react-dom` alone is in the hundreds.
+    #[test]
+    fn every_development_guard_folds_however_many_there_are() {
+        let mut src = String::from("'use strict';\n");
+        for index in 0..100 {
+            src.push_str(&format!(
+                "if (process.env.NODE_ENV !== \"production\") {{ warn(\"development only {index}\"); }}\nkeep({index});\n"
+            ));
+        }
+
+        let out = fold_production_node_env(&src);
+        assert!(
+            !out.contains("development only"),
+            "no guard may survive, whatever its position: {out}"
+        );
+        assert!(out.contains("keep(99);"), "live code survives: {out}");
+        minify_javascript(&out, false, EsTarget::EsNext)
+            .expect("the folded output must still parse");
+    }
+
+    /// Nesting is not depth-limited either, and the scan resumes rather than
+    /// restarting — an inner guard sits at or after the outer one's start.
+    #[test]
+    fn deeply_nested_guards_all_fold() {
+        let depth = 100;
+        let mut src = String::new();
+        for _ in 0..depth {
+            src.push_str("if (process.env.NODE_ENV === 'production') {\n");
+        }
+        src.push_str("ship();\n");
+        for _ in 0..depth {
+            src.push_str("} else { warn(\"development only\"); }\n");
+        }
+
+        let out = fold_production_node_env(&src);
+        assert!(
+            !out.contains("development only"),
+            "an inner guard must fold too: {out}"
+        );
+        assert!(out.contains("ship();"), "the live branch survives: {out}");
+        minify_javascript(&out, false, EsTarget::EsNext)
+            .expect("the folded output must still parse");
+    }
+
+    /// A guard whose `else if` is another guard needs the second pass.
+    ///
+    /// The dropped branch leaves the chain behind as written, so the surviving
+    /// `if` is a fresh foldable guard at the same offset — the one case where a
+    /// pass cannot finish the work and the next one has to.
+    #[test]
+    fn an_else_if_chain_of_guards_folds_all_the_way_down() {
+        let src = concat!(
+            "if (process.env.NODE_ENV !== \"production\") { warn(\"development only\"); }\n",
+            "else if (process.env.NODE_ENV === \"production\") { ship(); }\n",
+            "else { other(); }\n"
+        );
+        let out = fold_production_node_env(src);
+        assert!(!out.contains("development only"), "{out}");
+        assert!(!out.contains("other()"), "{out}");
+        assert!(out.contains("ship();"), "{out}");
+        assert!(
+            !out.contains("process.env.NODE_ENV"),
+            "no guard may be left behind: {out}"
+        );
+        minify_javascript(&out, false, EsTarget::EsNext)
+            .expect("the folded output must still parse");
     }
 
     // ── Tree-shaking tests ──

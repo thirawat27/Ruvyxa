@@ -27,6 +27,18 @@ export interface StandaloneServerOptions {
    * @default 'bundle'
    */
   isrCache?: 'bundle' | 'tmp'
+  /**
+   * The build this program is being emitted from, as
+   * `manifest.json`'s `deploy.buildId`.
+   *
+   * Only `isrCache: 'tmp'` reads it, and only to name the directory it writes
+   * to: the host's temporary directory is shared with every other deployment
+   * on the machine and with every previous build of this one. Absent, the
+   * directory is still per-deployment — it is named from where the bundle was
+   * deployed as well — but two builds deployed to the same path share it,
+   * which is exactly a redeploy.
+   */
+  buildId?: string
   /** Validated build runtime policy embedded into the generated server. */
   runtimePolicy?: Readonly<Record<string, unknown>>
   /**
@@ -74,10 +86,57 @@ function sharedServerSource(
   options: StandaloneServerOptions,
   runtime: StandaloneServerRuntime,
 ): string {
-  const isrCacheDirectory =
-    options.isrCache === 'tmp' ? "path.join(os.tmpdir(), 'ruvyxa-isr-cache')" : 'prerenderDir'
+  const temporaryIsrCache = options.isrCache === 'tmp'
 
-  return `import { createHandler, logRecord, parseByteRange, prerenderRelativePath } from './serverless-handler.mjs';
+  // A name nothing else on the host answers to.
+  //
+  // `os.tmpdir()` is shared with every other program on the machine, and the
+  // fixed `ruvyxa-isr-cache` under it was shared with every other Ruvyxa
+  // deployment and with every previous build of this one — read *before* the
+  // bundled prerender output, so whatever was already there won. A redeploy of
+  // an Amplify compute bundle served the previous build's documents, whose
+  // `<script src>` names client chunks the new build no longer publishes, until
+  // each page's revalidate window expired.
+  //
+  // Both halves of the identity are hashed rather than either alone: the build
+  // id is what changes on a redeploy to the same path, and `here` is what
+  // differs between two deployments on one host — which the build id does not,
+  // for two deployments of the same application. Hashed rather than joined,
+  // because a caller-supplied string is not a path segment until something says
+  // it is.
+  const isrCacheDirectory = temporaryIsrCache
+    ? `path.join(
+  os.tmpdir(),
+  'ruvyxa-isr-cache',
+  createHash('sha256')
+    .update(${JSON.stringify(options.buildId ?? '')} + ':' + here)
+    .digest('hex')
+    .slice(0, 32),
+)`
+    : 'prerenderDir'
+
+  // Created up front and owner-only, because the parent is mode 1777 on Linux:
+  // anything may create a name there first, and a file or a symlink planted at
+  // a route's cache path would be served as that page and written through on
+  // the next refresh. Fail-soft on purpose — a host whose temporary directory
+  // cannot be written to still serves every page, because an ordinary ISR write
+  // that fails is caught by `persistPrerendered`. Making this fatal would turn a
+  // degraded cache into a deployment that does not boot.
+  const isrCacheSetup = temporaryIsrCache
+    ? `
+try {
+  mkdirSync(isrCacheDir, { recursive: true, mode: 0o700 });
+} catch (error) {
+  log('warn', 'isr cache directory unavailable', {
+    directory: isrCacheDir,
+    error: error instanceof Error ? error.message : String(error),
+  });
+}
+
+`
+    : ''
+
+  return `import { clientAddress, createHandler, logRecord, parseByteRange, parseTrustedProxies, prerenderRelativePath } from './serverless-handler.mjs';
 import { applyPluginHttp, loadActionModule, loadRouteModule } from './route-modules.mjs';
 // The controller the render worker pool already runs on, reused rather than
 // rewritten: bounded FIFO admission is one decision, and two implementations of
@@ -86,7 +145,7 @@ import { WorkerAdmissionController } from './worker-admission.mjs';
 // Imported so the directory stays deployable through any bundler that a host
 // puts in front of it, matching the serverless adapters.
 import manifest from './manifest.mjs';
-import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import { readFileSync, realpathSync, writeFileSync, mkdirSync, statSync } from 'node:fs';${temporaryIsrCache ? "\n// Only the temporary ISR cache needs one: it is what names the directory.\nimport { createHash } from 'node:crypto';" : ''}
 // Imported by specifier rather than taken from the global scope: \`process\` is a
 // global on Node and on Bun, and on Deno only under its Node compatibility
 // layer, which the specifier is what turns on.
@@ -117,7 +176,7 @@ const log = (level, message, fields) => logRecord(LOG_FORMAT, level, message, fi
 const here = import.meta.dirname;
 const prerenderDir = path.join(here, 'prerender');
 const isrCacheDir = ${isrCacheDirectory};
-const publicDir = path.resolve(here, '..', 'public');
+${isrCacheSetup}const publicDir = path.resolve(here, '..', 'public');
 
 const handler = createHandler({
   routes: manifest.routes,
@@ -162,9 +221,67 @@ const handler = createHandler({
   supportedStrategies: ['ssr', 'ssg', 'csr', 'isr', 'ppr', 'api'],
 });
 
+// The headers that state who a request belongs to when something in front of
+// this server overwrote them, and that state nothing at all when nothing did.
+const FORWARDED_IDENTITY_HEADERS = ['x-forwarded-for', 'x-real-ip'];
+
+const TRUSTED_PROXIES = parseTrustedProxies(runtimePolicy.security?.trustedProxyIps);
+
+/**
+ * Whether this connection's own peer may state who the client is.
+ *
+ * \`createHandler\` scans \`X-Forwarded-For\` from the right and has no peer to
+ * weigh it against — a deployed function does not have one. This is a socket
+ * server and does: \`ruvyxa start\` has always gated the forwarded chain on the
+ * transport peer, and this program did not, so every self-hosted deployment
+ * reachable without a header-overwriting proxy in front of it believed whatever
+ * the caller typed. One client rotating the header collected a fresh bucket per
+ * request from the built-in \`rate\` middleware, the server-action rate limiter,
+ * and the action replay guard's per-client quota at once, and poisoned the
+ * \`client\` field in the request log so the abuse was invisible afterwards.
+ *
+ * The rule itself is \`clientAddress\` from serverless-handler.mjs, asked rather
+ * than restated: it attributes a request to the rightmost hop that is *not* a
+ * trusted proxy, so a peer it declines to attribute is one. A second copy of
+ * the prefix matcher here would be a second answer to who may speak for a
+ * client, which is the shape this whole module exists to avoid.
+ *
+ * Loopback is trusted without configuration, matching the native host: a proxy
+ * terminating on the same host is the ordinary deployment. Anything else has to
+ * be named in \`security.trustedProxyIps\`.
+ */
+function peerMayStateClientIdentity(peer) {
+  if (typeof peer !== 'string' || peer.trim() === '') return false;
+  // \`parseTrustedProxies\` drops whatever is not an address, so a one-entry
+  // result is the proof that the peer parsed as one. Without this a peer that
+  // is not an address at all — a closed socket, a Unix domain socket — would
+  // reach the check below, be attributed to nobody, and read as trusted.
+  if (parseTrustedProxies([peer]).length !== 1) return false;
+  return clientAddress(new Headers({ 'x-forwarded-for': peer }), TRUSTED_PROXIES) === 'unknown';
+}
+
 // Serialized from STATIC_CONTENT_TYPES so this server and the Rust one answer
 // from the same table; see tests/fixtures/static-asset-conformance.json.
 const MIME_TYPES = ${JSON.stringify(STATIC_CONTENT_TYPES)};
+
+/**
+ * The name a file answers to, so two spellings of one file count once.
+ *
+ * \`resolve_public_asset\` compares canonicalized paths for the same reason: on a
+ * case-insensitive file system \`logo.png\` and \`logo.PNG\` name one file, and an
+ * ambiguity check that counted them twice would refuse a project that only has
+ * one image. Used as a key and never as a path to open, so a symlink cannot
+ * widen what this server is willing to serve.
+ */
+function realFilePath(candidate) {
+  try {
+    return typeof realpathSync.native === 'function'
+      ? realpathSync.native(candidate)
+      : realpathSync(candidate);
+  } catch {
+    return candidate;
+  }
+}
 
 // Resolve a request path to a file inside publicDir, or null. Containment is
 // enforced by resolving and prefix-checking before touching the file system.
@@ -187,6 +304,33 @@ function resolveStaticFile(pathname) {
   // and under this standalone server.
   if (/\\.(?:png|jpe?g)$/i.test(resolved)) {
     candidates.push(resolved.replace(/\\.(?:png|jpe?g)$/i, '.webp'));
+  }
+  // And the other direction, which \`resolve_public_asset\` mirrors and this
+  // server did not. \`<Image>\` rewrites every source to \`webpUrl(src)\`
+  // unconditionally — it has no access to \`image.optimize\` — and
+  // \`image.optimize: false\` publishes the source untouched with no \`.webp\`
+  // beside it. Without this, every \`<Image>\` on the page 404s on every
+  // self-hosted deployment of such a project, invisibly, because \`ruvyxa dev\`
+  // and \`ruvyxa start\` both resolve it. The same applies to any source the
+  // optimizer skipped.
+  //
+  // Exactly one source may answer, which is the Rust guard's rule: \`logo.png\`
+  // and \`logo.jpg\` beside each other is the collision the build refuses, and a
+  // first-hit loop would resolve it by array order and make the two hosts
+  // disagree about the same publish directory. Upper-case spellings are
+  // candidates because a case-sensitive file system stores \`hero.PNG\` under
+  // that name, and are counted once because a case-insensitive one does not.
+  if (/\\.webp$/i.test(resolved)) {
+    const sources = new Map();
+    for (const extension of ['png', 'jpg', 'jpeg', 'PNG', 'JPG', 'JPEG']) {
+      const candidate = resolved.replace(/\\.webp$/i, '.' + extension);
+      try {
+        if (statSync(candidate).isFile()) sources.set(realFilePath(candidate), candidate);
+      } catch {
+        // no source published under that extension
+      }
+    }
+    if (sources.size === 1) candidates.push(...sources.values());
   }
   for (const candidate of candidates) {
     try {
@@ -291,8 +435,41 @@ const COMPRESSION_MIN_BYTES = 256;
 const COMPRESSIBLE_TYPE =
   /^(?:text\\/|application\\/(?:json|javascript|xml|xhtml\\+xml|rss\\+xml|atom\\+xml|ld\\+json|manifest\\+json|wasm)|image\\/svg\\+xml)/i;
 
-function isCompressibleType(contentType) {
-  return COMPRESSION_ENABLED && COMPRESSIBLE_TYPE.test(String(contentType ?? ''));
+/**
+ * The types that are never encoded, refused ahead of the allow-list above.
+ *
+ * The allow-list is a prefix regex, and \`^text\\/\` swallows the one text type
+ * that must never be buffered. An SSE response also has no declared length, so
+ * the size floor is waived for it too — and Node's default-flush \`gzip\` and
+ * \`CompressionStream\` both hold a small write until roughly 16 KB has
+ * accumulated or the stream ends. An \`EventSource\` against a self-hosted
+ * deployment therefore received nothing while the same route streamed normally
+ * under \`ruvyxa start\`, whose tower-http \`DefaultPredicate\` excludes this type.
+ * \`application/grpc\` is excluded for the same reason and by the same predicate.
+ */
+const NON_COMPRESSIBLE_TYPE = /^(?:text\\/event-stream|application\\/grpc)/i;
+
+/**
+ * \`no-transform\` as a directive rather than as a substring, so it cannot be
+ * matched inside some other directive's value.
+ */
+const NO_TRANSFORM = /(?:^|,)\\s*no-transform\\s*(?:$|,|;)/i;
+
+/**
+ * Whether this payload may be encoded at all.
+ *
+ * Answers the \`Vary\` question as well as the compression one, because they are
+ * the same question: a response that will never be encoded must not advertise a
+ * variance it does not have.
+ */
+function isCompressibleType(contentType, cacheControl) {
+  if (!COMPRESSION_ENABLED) return false;
+  const type = String(contentType ?? '');
+  if (NON_COMPRESSIBLE_TYPE.test(type)) return false;
+  // The header an application has to say "do not re-encode this" with, which
+  // neither host read.
+  if (NO_TRANSFORM.test(String(cacheControl ?? ''))) return false;
+  return COMPRESSIBLE_TYPE.test(type);
 }
 
 /**
@@ -342,12 +519,20 @@ function negotiateEncoding(acceptEncoding) {
  * offsets describe the identity encoding, and a body compressed underneath a
  * \`content-range\` is a range the client cannot use.
  */
-function compressionFor(status, method, contentType, contentLength, contentEncoding, accept) {
+function compressionFor(
+  status,
+  method,
+  contentType,
+  contentLength,
+  contentEncoding,
+  cacheControl,
+  accept,
+) {
   if (method === 'HEAD') return null;
   if (status === 204 || status === 206 || status === 304 || status === 416) return null;
   // Already encoded by whatever produced it; re-encoding would mislabel it.
   if (contentEncoding) return null;
-  if (!isCompressibleType(contentType)) return null;
+  if (!isCompressibleType(contentType, cacheControl)) return null;
   if (contentLength !== null && contentLength < COMPRESSION_MIN_BYTES) return null;
   return negotiateEncoding(accept);
 }
@@ -419,7 +604,24 @@ function staticResponsePlan(pathname, rangeHeader, conditional = {}) {
   // Ranges, decided by the same table the Rust server answers. This host and
   // \`ruvyxa start\` serve the same public/ directory, so a video that scrubs
   // under one has to scrub under the other.
-  const range = parseByteRange(rangeHeader ?? '', hit.size);
+  // \`if-range\` makes the range conditional on the client still holding the
+  // representation it is continuing. Without it a resumed download assembled
+  // bytes from two different versions of the file into one corrupt result --
+  // and this server sends both an entity tag and a \`last-modified\`, so clients
+  // do send it. A mismatch is not an error: the whole file is the correct
+  // answer, and it is how the client learns the file changed underneath it.
+  // Same rule as \`requested_range\` on the native host, which serves the same
+  // public/ directory.
+  const ifRange = String(conditional.ifRange ?? '').trim();
+  const rangeStillApplies =
+    ifRange === ''
+      ? true
+      : ifRange.startsWith('"') || ifRange.startsWith('W/')
+        ? ifRange.replace(/^W\\//, '') === validator.etag.replace(/^W\\//, '')
+        : Date.parse(ifRange) === validator.modified * 1000;
+  const range = rangeStillApplies
+    ? parseByteRange(rangeHeader ?? '', hit.size)
+    : { kind: 'whole' };
   if (range.kind === 'unsatisfiable') {
     return {
       status: 416,
@@ -454,8 +656,18 @@ function staticResponsePlan(pathname, rangeHeader, conditional = {}) {
   // Declared for every compressible file, not only the ones actually
   // compressed: a shared cache that stored one client's gzip copy without this
   // would hand it to the next client whether or not that client can read it.
-  if (isCompressibleType(contentType)) headers['vary'] = 'accept-encoding';
-  return { status: partial ? 206 : 200, headers, file: hit.file, partial };
+  if (isCompressibleType(contentType, cacheControl)) headers['vary'] = 'accept-encoding';
+  return {
+    status: partial ? 206 : 200,
+    headers,
+    file: hit.file,
+    partial,
+    // A range was asked for and refused, because \`if-range\` named a version
+    // this is no longer serving. Recorded rather than inferred downstream:
+    // the Bun transport has to know, for the reason written above
+    // \`openStaticBody\` there.
+    declinedRange: !rangeStillApplies && String(rangeHeader ?? '').trim() !== '',
+  };
 }
 
 const port = Number(process.env.PORT || 3000);
@@ -622,11 +834,40 @@ function tokenMatches(presented) {
   return difference === 0;
 }
 
-function metricsResponse(request) {
+/**
+ * Takes a method and a credential rather than a \`Request\`, the way
+ * \`healthResponse\` takes a method.
+ *
+ * The Node transport has no \`Request\` at this point and used to build one to
+ * ask — which was harmless while only the header was read and stopped being so
+ * once the verb mattered: \`new Request(url, { method })\` throws a \`TypeError\`
+ * for CONNECT and TRACE, so a probe using either would have become a 500 on
+ * that transport and a 405 on the other two.
+ */
+function metricsResponse(method, authorization) {
   // Not configured: the path does not exist, as far as anyone asking can tell.
+  // Checked before the verb, so an unset token answers a POST the same 404 it
+  // answers a GET rather than admitting the path is there to be scraped.
   if (METRICS_TOKEN === '') return null;
 
-  const authorization = request.headers.get('authorization') ?? '';
+  // The path exists and this verb does not, which is the same thing
+  // \`/__ruvyxa/health\` answers 405 to say. Falling through to routing told an
+  // operator who had pointed a scraper at it with the wrong method that the
+  // endpoint was never deployed. Before the token check on purpose: an
+  // unauthorised GET already answers 401, so a 405 here reveals nothing a
+  // caller could not already learn, and answering 401 to a verb this endpoint
+  // will never serve would send them looking for a credential instead.
+  if (method !== 'GET' && method !== 'HEAD') {
+    return new Response('Method Not Allowed', {
+      status: 405,
+      headers: {
+        allow: 'GET, HEAD',
+        'content-type': 'text/plain; charset=utf-8',
+        'cache-control': 'no-store',
+      },
+    });
+  }
+
   const presented = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
   if (!tokenMatches(presented)) {
     return new Response('Unauthorized', {
@@ -726,7 +967,16 @@ function overloaded(reason) {
 }
 
 /**
- * Take a render slot, run the handler, and give the slot back.
+ * Take a render slot, build the request, run the handler, and give the slot
+ * back.
+ *
+ * The request is built *inside* the slot rather than handed in already made,
+ * because on the Node transport making one means reading the body off the
+ * socket: \`node:http\` gives a stream and \`new Request\` needs bytes. That read
+ * ran before admission, so the controller did not bound the one path in this
+ * program that allocates per request — 200 concurrent uploads were 200 buffers
+ * on the heap, while the Bun and Deno deployments of the same artifact refused
+ * them after four. What is admitted is the work, not the \`Request\`.
  *
  * The slot is released when the **response** exists, not when its body has
  * finished — the same boundary the render deadline uses, and for a sharper
@@ -739,18 +989,20 @@ function overloaded(reason) {
  * answered under load, so a page that is failing does not take its own
  * stylesheet down with it.
  */
-async function handleAdmitted(request) {
-  if (!admission) return handleWithTimeout(request);
+async function handleAdmitted(buildRequest, pathname) {
+  if (!admission) return handleWithTimeout(await buildRequest());
   const admitted = await admission.acquire();
   if (!admitted) {
     // Either the queue is full or the server is draining. Both mean the same
-    // thing to the caller, and \`Retry-After\` is true of both.
+    // thing to the caller, and \`Retry-After\` is true of both. Nothing has been
+    // read off the socket yet, so refusing here costs one response and no
+    // memory.
     return overloaded(
-      \`refused \${new URL(request.url).pathname}: \${MAX_CONCURRENT_RENDERS} renders running and \${MAX_QUEUED_RENDERS} waiting\`,
+      \`refused \${pathname}: \${MAX_CONCURRENT_RENDERS} renders running and \${MAX_QUEUED_RENDERS} waiting\`,
     );
   }
   try {
-    return await handleWithTimeout(request);
+    return await handleWithTimeout(await buildRequest());
   } finally {
     admission.release();
   }
@@ -848,13 +1100,35 @@ function applySecurityHeaders(res) {
   }
 }
 
-// Matches \`security.apiLimit\`. The body is buffered here before the handler
-// sees it, so the handler's own cap would arrive too late to prevent the
-// allocation — this is where the limit has to be enforced for this server.
-const REQUEST_BODY_LIMIT = Number.isInteger(runtimePolicy.security?.apiLimit)
-  && runtimePolicy.security.apiLimit > 0
-  ? runtimePolicy.security.apiLimit
-  : 10 * 1024 * 1024;
+// The largest body any endpoint of this deployment may accept.
+//
+// The body is buffered here before the handler sees it, so the handler's own
+// cap would arrive too late to prevent the allocation — this is where the
+// number has to bound the read. What it must *not* do is decide the policy:
+// that belongs to \`requestBodyPolicy\` in \`serverless-handler.mjs\`, which is
+// per endpoint. \`/__ruvyxa/action\` is bounded by \`security.actionLimit\` and
+// \`/__ruvyxa/rsc\` by a fixed \`RSC_ACTION_BODY_LIMIT\`, neither of which a
+// project's \`security.apiLimit\` speaks for.
+//
+// Deriving this from \`apiLimit\` alone meant a project that lowered the bound on
+// its own API routes also lowered the transport under an endpoint the framework
+// allows: a server-function call sized between the two was answered 413 here,
+// before the endpoint that would have accepted it ever ran — and the same
+// artifact accepted that call under Bun and Deno, which hand the handler the
+// runtime's own \`Request\` and never buffer.
+//
+// So: the maximum of what any endpoint may allow, which bounds the allocation
+// without overriding anyone's limit — every request still meets its own, one
+// layer in. What bounds the *number* of buffers is admission, which is why the
+// read happens inside \`handleAdmitted\` and not before it.
+const RSC_ACTION_BODY_LIMIT = 4 * 1024 * 1024;
+const configuredLimit = (value, fallback) =>
+  Number.isInteger(value) && value > 0 ? value : fallback;
+const REQUEST_BODY_LIMIT = Math.max(
+  configuredLimit(runtimePolicy.security?.apiLimit, 10 * 1024 * 1024),
+  configuredLimit(runtimePolicy.security?.actionLimit, 1024 * 1024),
+  RSC_ACTION_BODY_LIMIT,
+);
 
 function sendStatic(req, res, plan) {
   res.statusCode = plan.status;
@@ -869,6 +1143,7 @@ function sendStatic(req, res, plan) {
     plan.headers['content-type'],
     contentLengthOf(plan.headers['content-length']),
     null,
+    plan.headers['cache-control'],
     req.headers['accept-encoding'],
   );
   if (encoding) {
@@ -930,12 +1205,12 @@ const server = createServer(async (req, res) => {
       res.end(req.method === 'HEAD' ? undefined : await health.text());
       return;
     }
-    if (isRead && url.pathname === METRICS_PATH) {
+    if (url.pathname === METRICS_PATH) {
       // A null answer means no token is configured, so the path falls through
-      // to routing and answers whatever an unknown URL answers.
-      const metrics = metricsResponse(
-        new Request(url.toString(), { headers: { authorization: req.headers.authorization ?? '' } }),
-      );
+      // to routing and answers whatever an unknown URL answers. Every verb is
+      // offered, because the 405 for the ones this endpoint does not serve is
+      // decided there rather than by which requests reach it.
+      const metrics = metricsResponse(req.method, req.headers.authorization ?? '');
       if (metrics) {
         res.statusCode = metrics.status;
         for (const [key, value] of metrics.headers.entries()) res.setHeader(key, value);
@@ -952,6 +1227,7 @@ const server = createServer(async (req, res) => {
       const plan = staticResponsePlan(url.pathname, req.headers.range, {
         ifNoneMatch: req.headers['if-none-match'],
         ifModifiedSince: req.headers['if-modified-since'],
+        ifRange: req.headers['if-range'],
       });
       if (plan) {
         sendStatic(req, res, plan);
@@ -959,21 +1235,41 @@ const server = createServer(async (req, res) => {
       }
     }
 
+    // The trust decision is made here, where the peer exists, and the headers
+    // an untrusted peer wrote are dropped rather than weighed: with them gone
+    // \`clientAddress\` falls through to \`unknown\`, which buckets more
+    // aggressively than the traffic warrants — the direction a limiter is
+    // allowed to be wrong in. \`node:http\` has already lowercased every field
+    // name and joined repeated field lines with \`", "\`. The peer is weighed
+    // only when there is something to weigh it against, so a request that
+    // carries neither header pays two property lookups.
+    const forwardedAllowed =
+      !FORWARDED_IDENTITY_HEADERS.some((name) => req.headers[name] !== undefined) ||
+      peerMayStateClientIdentity(req.socket?.remoteAddress);
     const headers = new Headers();
     for (const [key, value] of Object.entries(req.headers)) {
+      if (!forwardedAllowed && FORWARDED_IDENTITY_HEADERS.includes(key)) continue;
       if (value) headers.set(key, Array.isArray(value) ? value.join(', ') : value);
     }
-    const requestInit = { method: req.method, headers };
-    if (!isRead) {
-      requestInit.body = await readRequestBody(req);
-    }
-    const request = new Request(url.toString(), requestInit);
-    const response = await handleAdmitted(request);
+    // The body is read with a slot in hand, which is what makes
+    // MAX_CONCURRENT_RENDERS bound it: reading first meant a burst larger than
+    // the machine became a heap holding every upload at once, before anything
+    // had asked whether there was anywhere to put them. A caller refused here
+    // is refused before it has finished sending, and the unread remainder is
+    // discarded by \`node:http\` rather than buffered by this program.
+    const response = await handleAdmitted(async () => {
+      const requestInit = { method: req.method, headers };
+      if (!isRead) {
+        requestInit.body = await readRequestBody(req);
+      }
+      return new Request(url.toString(), requestInit);
+    }, url.pathname);
 
     if (response.status === 404 && isRead) {
       const plan = staticResponsePlan(url.pathname, req.headers.range, {
         ifNoneMatch: req.headers['if-none-match'],
         ifModifiedSince: req.headers['if-modified-since'],
+        ifRange: req.headers['if-range'],
       });
       if (plan) {
         sendStatic(req, res, plan);
@@ -990,7 +1286,8 @@ const server = createServer(async (req, res) => {
     if (setCookies.length > 0) res.setHeader('set-cookie', setCookies);
 
     const contentType = response.headers.get('content-type');
-    if (isCompressibleType(contentType)) {
+    const cacheControl = response.headers.get('cache-control');
+    if (isCompressibleType(contentType, cacheControl)) {
       res.setHeader('vary', withVaryAcceptEncoding(res.getHeader('vary')));
     }
     const encoding = compressionFor(
@@ -999,6 +1296,7 @@ const server = createServer(async (req, res) => {
       contentType,
       contentLengthOf(response.headers.get('content-length')),
       response.headers.get('content-encoding'),
+      cacheControl,
       req.headers['accept-encoding'],
     );
     if (encoding) {
@@ -1211,6 +1509,19 @@ server.listen(port, host, () => {
  * into a body, which is `openStaticBody` below and nothing else.
  */
 function fetchTransport(runtime: 'bun' | 'deno'): string {
+  // Neither runtime puts the peer on the `Request` — it arrives as the handler's
+  // second argument, which is the whole reason this file never had one to weigh.
+  const peerAddress =
+    runtime === 'bun'
+      ? `// Bun hands \`fetch\` its own \`Server\`, and the peer is asked of it by request.
+function peerAddress(request, server) {
+  return server?.requestIP?.(request)?.address ?? '';
+}`
+      : `// Deno's second argument carries the connection the request arrived on.
+function peerAddress(_request, info) {
+  return info?.remoteAddr?.hostname ?? '';
+}`
+
   const openStaticBody =
     runtime === 'bun'
       ? `// \`Bun.file\` hands the socket a file rather than a copy of its bytes, and a
@@ -1219,11 +1530,25 @@ function fetchTransport(runtime: 'bun' | 'deno'): string {
 // 1.4.0, a sliced \`BunFile\` read through \`.text()\`, \`.bytes()\`, or as a
 // response body all give the window, while the same slice's \`.stream()\` served
 // by \`Bun.serve\` sends the whole file — a 206 whose body is the entire video,
-// which is what a seek would have played. Bun leaves a handler's own
-// \`content-range\` and status alone, so nothing here has to work around its
-// static-route range handling either.
+// which is what a seek would have played.
+//
+// Bun leaves a handler's own \`content-range\` and status alone, but only while
+// the handler answers the range. When it *declines* one — \`if-range\` naming a
+// version this is no longer serving — \`Bun.serve\` applies its own range
+// handling and turns the deliberate 200 into a 206 window of the *current*
+// file. That is exactly the corrupt resumed download \`if-range\` exists to
+// prevent, reintroduced one layer below the decision.
+//
+// Measured against Bun 1.4.0, a 200 carrying \`Range\`: a \`BunFile\` body is
+// ranged to 206, and so is that file's own \`.stream()\` — Bun recognises its
+// own file stream. A byte array is not ranged, but buffering the file is the
+// peak-memory failure the streaming path exists to prevent. A stream Bun does
+// not own is not ranged and still streams, so the file's stream is handed over
+// through an identity transform. Only requests that actually declined a range
+// pay for it; every other response keeps the sendfile path.
 function openStaticBody(plan) {
   const file = Bun.file(plan.file);
+  if (plan.declinedRange) return file.stream().pipeThrough(new TransformStream());
   return plan.partial ? file.slice(plan.partial.start, plan.partial.end + 1) : file;
 }`
       : `// A whole file is Deno's own readable, which closes its handle when the
@@ -1260,14 +1585,21 @@ const server = Bun.serve({
   hostname: host,
   ...idleTimeout,
   fetch: handleRequest,
+  // Outside \`handleRequest\`, and therefore outside the one place the security
+  // defaults are added to a handler response. The Node transport's equivalent
+  // is a \`catch\` inside a request whose \`res\` already carries them, so without
+  // this the same build answered its own 500 with seven headers on one runtime
+  // and none on another.
   error: (error) => {
     log('error', 'request failed', {
       error: error instanceof Error ? error.message : String(error),
     });
-    return new Response('Internal Server Error', {
-      status: 500,
-      headers: { 'content-type': 'text/plain; charset=utf-8' },
-    });
+    return withSecurityHeaders(
+      new Response('Internal Server Error', {
+        status: 500,
+        headers: { 'content-type': 'text/plain; charset=utf-8' },
+      }),
+    );
   },
 });
 
@@ -1287,14 +1619,18 @@ function closeServer() {
         url: \`http://\${hostname === '0.0.0.0' ? 'localhost' : hostname}:\${boundPort}\`,
       });
     },
+    // Outside \`handleRequest\`, for the reason the Bun transport's \`error\` hook
+    // gives.
     onError: (error) => {
       log('error', 'request failed', {
         error: error instanceof Error ? error.message : String(error),
       });
-      return new Response('Internal Server Error', {
-        status: 500,
-        headers: { 'content-type': 'text/plain; charset=utf-8' },
-      });
+      return withSecurityHeaders(
+        new Response('Internal Server Error', {
+          status: 500,
+          headers: { 'content-type': 'text/plain; charset=utf-8' },
+        }),
+      );
     },
   },
   handleRequest,
@@ -1315,7 +1651,9 @@ function closeServer() {
 `
       : ''
 
-  return `${openStaticBody}
+  return `${peerAddress}
+
+${openStaticBody}
 
 /**
  * Add the security defaults a response has not set for itself.
@@ -1349,7 +1687,15 @@ function withSecurityHeaders(response) {
 async function staticResponse(plan, method) {
   const headers = new Headers(plan.headers);
   if (SECURITY_HEADERS_ENABLED) {
-    for (const [name, value] of Object.entries(DEFAULT_SECURITY_HEADERS)) headers.set(name, value);
+    // Added only where the plan is silent, which is what \`applySecurityHeaders\`
+    // does on the Node transport and what \`apply_security_headers\` does on the
+    // Axum host. Setting them over the plan agreed with both only because no
+    // name collides today — a default that outranked a deliberate per-file
+    // header would have been a divergence nobody could see until the day
+    // something in \`staticResponsePlan\` set one.
+    for (const [name, value] of Object.entries(DEFAULT_SECURITY_HEADERS)) {
+      if (!headers.has(name)) headers.set(name, value);
+    }
   }
   // A 416 carries no body, and a HEAD asks for the headers of the body it
   // would have received — including its \`content-length\`, which is why the
@@ -1372,7 +1718,8 @@ async function staticResponse(plan, method) {
  */
 function withCompression(response, request) {
   const contentType = response.headers.get('content-type');
-  if (!isCompressibleType(contentType)) return response;
+  const cacheControl = response.headers.get('cache-control');
+  if (!isCompressibleType(contentType, cacheControl)) return response;
 
   const encoding = compressionFor(
     response.status,
@@ -1380,6 +1727,7 @@ function withCompression(response, request) {
     contentType,
     contentLengthOf(response.headers.get('content-length')),
     response.headers.get('content-encoding'),
+    cacheControl,
     request.headers.get('accept-encoding'),
   );
 
@@ -1428,15 +1776,41 @@ function withCompression(response, request) {
   });
 }
 
-async function handleRequest(request) {
+/**
+ * The request as the handler is allowed to see it.
+ *
+ * A forwarded identity from a peer that is neither loopback nor listed in
+ * \`security.trustedProxyIps\` is the caller's own text, so it is deleted rather
+ * than weighed — with it gone \`clientAddress\` falls through to \`unknown\`, which
+ * buckets more aggressively than the traffic warrants. Rebuilt rather than
+ * mutated: a \`Request\` these runtimes hand a fetch handler does not promise
+ * mutable headers, and only \`init.headers\` is replaced, so the body is carried
+ * across untouched and unread.
+ */
+function admissibleRequest(request, peer) {
+  if (!FORWARDED_IDENTITY_HEADERS.some((name) => request.headers.has(name))) return request;
+  if (peerMayStateClientIdentity(peer)) return request;
+  const headers = new Headers(request.headers);
+  for (const name of FORWARDED_IDENTITY_HEADERS) headers.delete(name);
+  return new Request(request, { headers });
+}
+
+async function handleRequest(request, connection) {
   const url = new URL(request.url);
   const isRead = request.method === 'GET' || request.method === 'HEAD';
 
-  // Ahead of everything, for the reason the Node transport gives.
-  if (url.pathname === HEALTH_PATH) return healthResponse(request.method);
-  if (isRead && url.pathname === METRICS_PATH) {
-    const metrics = metricsResponse(request);
-    if (metrics) return metrics;
+  // Ahead of everything, for the reason the Node transport gives — and through
+  // \`withSecurityHeaders\` for the reason it does not have to: the Node
+  // transport sets the defaults on \`res\` before it looks at the URL, so every
+  // path it answers carries them, while here the only two places they were
+  // added were the static and handler responses below. That left this
+  // deployment's \`/__ruvyxa/health\` without a single one of them while the
+  // identical build on Node, and the same path under \`ruvyxa start\`, carried
+  // all seven.
+  if (url.pathname === HEALTH_PATH) return withSecurityHeaders(healthResponse(request.method));
+  if (url.pathname === METRICS_PATH) {
+    const metrics = metricsResponse(request.method, request.headers.get('authorization') ?? '');
+    if (metrics) return withSecurityHeaders(metrics);
   }
 
   // Hashed client bundles and asset-shaped paths are served before routing,
@@ -1447,20 +1821,26 @@ async function handleRequest(request) {
     const plan = staticResponsePlan(url.pathname, request.headers.get('range'), {
       ifNoneMatch: request.headers.get('if-none-match'),
       ifModifiedSince: request.headers.get('if-modified-since'),
+      ifRange: request.headers.get('if-range'),
     });
     if (plan) return withCompression(await staticResponse(plan, request.method), request);
   }
 
-  // The request goes to the handler as it arrived. Its own \`security.apiLimit\`
+  // The request goes to the handler as it arrived, minus a forwarded identity
+  // nothing in front of this server vouched for. Its own \`security.apiLimit\`
   // check reads \`content-length\` and answers 413 before a body is consumed,
   // so there is nothing for this transport to buffer or bound — the Node one
   // buffers only because \`node:http\` gave it a stream and not a \`Request\`.
-  const response = await handleAdmitted(request);
+  const response = await handleAdmitted(
+    () => admissibleRequest(request, peerAddress(request, connection)),
+    url.pathname,
+  );
 
   if (response.status === 404 && isRead) {
     const plan = staticResponsePlan(url.pathname, request.headers.get('range'), {
       ifNoneMatch: request.headers.get('if-none-match'),
       ifModifiedSince: request.headers.get('if-modified-since'),
+      ifRange: request.headers.get('if-range'),
     });
     if (plan) return withCompression(await staticResponse(plan, request.method), request);
   }

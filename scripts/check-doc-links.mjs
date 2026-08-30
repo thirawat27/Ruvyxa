@@ -21,10 +21,24 @@ const REFERENCE_LINK = /^\s{0,3}\[[^\]]+\]:\s*<?([^\s<>]+)>?/gm
 const FENCED_CODE = /^\s{0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\s{0,3}\1[^\n]*$/gm
 const INLINE_CODE = /`[^`\n]*`/g
 
-const files = execFileSync('git', ['ls-files', '*.md'], { encoding: 'utf8' })
-  .split('\n')
-  .map((file) => file.trim())
-  .filter((file) => file && !file.includes('node_modules/'))
+// Tracked files *and* untracked ones that are not ignored, which is what
+// `check-source-path-refs.mjs` does and says why: `ls-files` alone lists only
+// what is already committed, so a document added in the working tree --
+// including the one that introduces the broken link -- passed this check and
+// failed for whoever ran it next. The two checks answer the same question about
+// the same tree and had no reason to disagree about which files are in it.
+// `--exclude-standard` keeps `node_modules/`, `dist/` and the rest of
+// `.gitignore` out.
+const files = [
+  ...new Set(
+    execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '--', '*.md'], {
+      encoding: 'utf8',
+    })
+      .split('\n')
+      .map((file) => file.trim())
+      .filter((file) => file && !file.includes('node_modules/')),
+  ),
+]
 
 const anchorCache = new Map()
 const failures = []

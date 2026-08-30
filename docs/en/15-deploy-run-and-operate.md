@@ -163,7 +163,7 @@ mean:
 - **Emitted code differing** is a defect and fails the check. It means something in the build
   depends on wall-clock time, iteration order, a random value, an absolute path, or the host locale.
 - **Build telemetry** — `build.json`'s `createdAtUnix` and `timing`, and the cache counters in
-  `client/manifest.json` that `ruvyxa bench` reads — describes how the build _ran_, so it varies by
+  `client-report.json` that `ruvyxa bench` reads — describes how the build _ran_, so it varies by
   design and is reported without failing.
 - **Prerendered HTML differing** is almost always your own page rendering a clock or a random value.
   Ruvyxa cannot tell that apart from a bug, so it is reported for you to judge.

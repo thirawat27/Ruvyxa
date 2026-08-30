@@ -1,16 +1,18 @@
+import { canonicalRoutePath } from './route-match.js'
 import type {
   PluginBuildContext,
   PluginBuildLoadHandler,
   PluginBuildResolveHandler,
   PluginBuildStartHook,
   PluginBuildTransformHandler,
-  PluginDevFileChangeRegistration,
+  PluginDevFileChangeHandler,
   PluginDiagnostic,
   PluginEnvironment,
   PluginHeadEntry,
   PluginHostEnvironment,
-  PluginHttpRequestRegistration,
-  PluginHttpResponseRegistration,
+  PluginHttpRequestHandler,
+  PluginHttpResponseHandler,
+  PluginHttpRouteContext,
   PluginHttpRouteRegistration,
   PluginNativeCapability,
   PluginRegistrationApi,
@@ -41,6 +43,23 @@ import type {
  *
  * Route-pattern semantics match the server's: `*` matches everything, a
  * trailing `*` matches by prefix, anything else matches exactly.
+ *
+ * ## Why registration validates
+ *
+ * The harness used to record every registration into an array and check none of
+ * it, so a plugin whose `match` pattern, route path, method token, diagnostic
+ * level, or capability claim `createPluginRegistry` refuses at construction had
+ * a green suite and a `ruvyxa dev` that would not start — the one failure the
+ * harness exists to prevent. The refusals below mirror
+ * `runtime/plugin-http.mjs` rule for rule; the dispatch order and the decoded
+ * pathname mirror `dispatchPluginRequest`.
+ *
+ * The rules are duplicated here rather than shared because the dependency runs
+ * the wrong way: `ruvyxa` depends on `@ruvyxa/core`, so the harness cannot
+ * import the runtime's copy. The end state is the normalisers moving *into*
+ * this package and `plugin-http.mjs` importing them through the generated-copy
+ * mechanism in `packages/ruvyxa/scripts/sync-shared-runtime.mjs`, which is
+ * `--check`-gated. Until that lands, any change to one copy belongs in both.
  */
 
 /** A native capability a plugin claimed, in claim order. */
@@ -87,10 +106,14 @@ export interface PluginHarness {
   readonly nativeClaims: readonly HarnessNativeClaim[]
 
   /**
-   * Run the request hooks for one incoming request.
+   * Run the request pipeline for one incoming request.
    *
-   * Returns the `Response` a plugin short-circuited with, or the (possibly
-   * replaced) `Request` that would have continued to the router.
+   * Routes and `onRequest` hooks share one registration-ordered list, as they do
+   * in the server, so a route registered before a hook answers first.
+   *
+   * Returns the `Response` a plugin short-circuited with — from a hook or from a
+   * matching route — or the (possibly replaced) `Request` that would have
+   * continued to the router.
    */
   request(
     input: Request | string,
@@ -133,6 +156,43 @@ const DEFAULT_ROOT = '/project'
 const DEFAULT_ORIGIN = 'http://localhost'
 
 /**
+ * One entry of the registration-ordered request pipeline.
+ *
+ * Routes and `onRequest` hooks live in a single list because the server
+ * dispatches them from one: a route registered before a hook answers before the
+ * hook ever runs. Two arrays reached by two methods could not express that, so
+ * a plugin whose behaviour depends on the order had no way to be tested.
+ */
+type HarnessRequestEntry =
+  | {
+      kind: 'hook'
+      plugin: string
+      match?: readonly PluginRoutePattern[]
+      handler: PluginHttpRequestHandler
+    }
+  | {
+      kind: 'route'
+      plugin: string
+      path: string
+      methods: readonly string[]
+      handler: (context: PluginHttpRouteContext) => Response | Promise<Response>
+    }
+
+interface HarnessResponseEntry {
+  plugin: string
+  match?: readonly PluginRoutePattern[]
+  handler: PluginHttpResponseHandler
+}
+
+interface HarnessFileChangeEntry {
+  plugin: string
+  match?: readonly string[]
+  handler: PluginDevFileChangeHandler
+}
+
+const NATIVE_CAPABILITIES = new Set<string>(['realtime@1', 'presence@1'])
+
+/**
  * Register one or more plugins against recording sockets.
  *
  * Plugins run in the order given, which is the order `config({ plugins })`
@@ -149,11 +209,11 @@ export async function createPluginHarness(
   // `environment: 'development'` to exercise the other branch.
   const environment = options.environment ?? 'production'
 
-  const requestHooks: Array<{ plugin: string; registration: PluginHttpRequestRegistration }> = []
-  const responseHooks: Array<{ plugin: string; registration: PluginHttpResponseRegistration }> = []
-  const routes: Array<{ plugin: string; registration: PluginHttpRouteRegistration }> = []
-  const fileChangeHooks: Array<{ plugin: string; registration: PluginDevFileChangeRegistration }> =
-    []
+  const httpRequest: HarnessRequestEntry[] = []
+  const responseHooks: HarnessResponseEntry[] = []
+  const routes: PluginHttpRouteRegistration[] = []
+  const routeOwners = new Map<string, string>()
+  const fileChangeHooks: HarnessFileChangeEntry[] = []
   const buildHooks = {
     start: [] as PluginBuildStartHook[],
     resolve: [] as PluginBuildResolveHandler[],
@@ -165,20 +225,41 @@ export async function createPluginHarness(
   const nativeClaims: HarnessNativeClaim[] = []
   const head: PluginHeadEntry[] = []
 
-  for (const plugin of list) {
+  const names = new Set<string>()
+  const capabilityOwners = new Map<PluginNativeCapability, string>()
+
+  for (const [index, plugin] of list.entries()) {
+    if (!plugin || typeof plugin !== 'object' || Array.isArray(plugin)) {
+      throw new TypeError(`plugins[${index}] must be a plugin object`)
+    }
+    const name = typeof plugin.name === 'string' ? plugin.name.trim() : ''
+    if (!name) throw new TypeError(`plugins[${index}] must have a non-empty name`)
+    if (names.has(name)) throw new TypeError(`duplicate plugin name: ${name}`)
+    if (typeof plugin.register !== 'function') {
+      throw new TypeError(`plugin "${name}" must provide register(api)`)
+    }
+    names.add(name)
+
     for (const entry of plugin.head ?? []) head.push(entry)
 
     const api: PluginRegistrationApi = {
       environment,
       http: {
         onRequest(registration) {
-          requestHooks.push({ plugin: plugin.name, registration: asRegistration(registration) })
+          const normalized = normalizeHttpHook(name, 'onRequest', registration)
+          httpRequest.push({ kind: 'hook', plugin: name, ...normalized })
         },
         onResponse(registration) {
-          responseHooks.push({ plugin: plugin.name, registration: asRegistration(registration) })
+          responseHooks.push({
+            plugin: name,
+            ...normalizeHttpHook<PluginHttpResponseHandler>(name, 'onResponse', registration),
+          })
         },
         route(registration) {
-          routes.push({ plugin: plugin.name, registration })
+          const route = normalizeHttpRoute(name, registration)
+          claimRoute(routeOwners, name, route)
+          routes.push(registration)
+          httpRequest.push({ kind: 'route', plugin: name, ...route })
         },
       },
       build: {
@@ -201,25 +282,46 @@ export async function createPluginHarness(
       dev: {
         onFileChange(registration) {
           fileChangeHooks.push({
-            plugin: plugin.name,
-            registration:
-              typeof registration === 'function' ? { handler: registration } : registration,
+            plugin: name,
+            ...normalizeDevFileChange(name, registration),
           })
         },
       },
       diagnostics: {
         report(diagnostic) {
-          diagnostics.push({ ...diagnostic, plugin: plugin.name })
+          diagnostics.push(normalizeDiagnostic(name, diagnostic))
         },
       },
       native: {
         claim(capability, claimOptions) {
-          nativeClaims.push({ plugin: plugin.name, capability, options: claimOptions ?? {} })
+          if (!NATIVE_CAPABILITIES.has(capability)) {
+            throw new TypeError(
+              `plugin "${name}" requested unsupported native capability "${String(capability)}"`,
+            )
+          }
+          const owner = capabilityOwners.get(capability)
+          if (owner) {
+            throw new TypeError(
+              `plugin "${name}" cannot claim ${capability}; it is already owned by plugin "${owner}"`,
+            )
+          }
+          capabilityOwners.set(capability, name)
+          nativeClaims.push({ plugin: name, capability, options: claimOptions ?? {} })
         },
       },
     }
 
     await plugin.register(api)
+  }
+
+  // The registry rejects the whole configuration when any plugin reported an
+  // error, so a harness that merely collected them said a plugin was fine that
+  // the framework refuses to boot with.
+  const errors = diagnostics.filter((diagnostic) => diagnostic.level === 'error')
+  if (errors.length > 0) {
+    throw new TypeError(
+      errors.map((diagnostic) => `${diagnostic.code} ${diagnostic.message}`).join('\n'),
+    )
   }
 
   const buildContext = (options: HarnessBuildOptions = {}): PluginBuildContext => ({
@@ -234,68 +336,95 @@ export async function createPluginHarness(
 
   return {
     head,
-    routes: routes.map((entry) => entry.registration),
+    routes,
     diagnostics,
     nativeClaims,
 
     async request(input, requestOptions = {}) {
       let request = toRequest(input, requestOptions)
-      const path = requestOptions.path ?? pathOf(request)
-      for (const { plugin, registration } of requestHooks) {
-        if (!matchesAny(registration.match, path)) continue
-        const result = await registration.handler({
-          plugin,
+      for (const entry of httpRequest) {
+        // Recomputed per entry: a hook may have replaced the request.
+        const path = requestOptions.path ?? decodedRequestPathname(request)
+        if (entry.kind === 'route') {
+          if (entry.path !== path || !methodMatches(entry.methods, request.method)) continue
+          const result = await entry.handler({ plugin: entry.plugin, root, request })
+          if (!(result instanceof Response)) throw unsupportedReturn(entry.plugin, 'http.route')
+          return { response: result, request }
+        }
+        if (!matchesPatterns(entry.match, path)) continue
+
+        let continued = request
+        const current = request
+        const result = await entry.handler({
+          plugin: entry.plugin,
           root,
           request,
           // `next()` is how a hook says "keep going"; a returned value wins.
-          next(replacement) {
-            if (replacement) request = replacement
+          next(replacement = current) {
+            if (!(replacement instanceof Request)) {
+              throw new TypeError(
+                `plugin "${entry.plugin}" http.onRequest().next() expects a Request`,
+              )
+            }
+            continued = replacement
           },
         })
         if (result instanceof Response) return { response: result, request }
         if (result instanceof Request) request = result
+        else if (result === undefined) request = continued
+        else throw unsupportedReturn(entry.plugin, 'http.onRequest')
       }
       return { request }
     },
 
     async respond(response, input = '/', requestOptions = {}) {
       const request = toRequest(input, requestOptions)
-      const path = requestOptions.path ?? pathOf(request)
+      const path = requestOptions.path ?? decodedRequestPathname(request)
       let current = response
-      for (const { plugin, registration } of responseHooks) {
-        if (!matchesAny(registration.match, path)) continue
-        const result = await registration.handler({
-          plugin,
+      for (const entry of responseHooks) {
+        if (!matchesPatterns(entry.match, path)) continue
+        let continued = current
+        const incoming = current
+        const result = await entry.handler({
+          plugin: entry.plugin,
           root,
           request,
           response: current,
-          next(replacement) {
-            if (replacement) current = replacement
+          next(replacement = incoming) {
+            if (!(replacement instanceof Response)) {
+              throw new TypeError(
+                `plugin "${entry.plugin}" http.onResponse().next() expects a Response`,
+              )
+            }
+            continued = replacement
           },
         })
         if (result instanceof Response) current = result
+        else if (result === undefined) current = continued
+        else throw unsupportedReturn(entry.plugin, 'http.onResponse')
       }
       return current
     },
 
     async route(input, requestOptions = {}) {
       const request = toRequest(input, requestOptions)
-      const path = requestOptions.path ?? pathOf(request)
-      const method = request.method.toUpperCase()
-      for (const { plugin, registration } of routes) {
-        if (registration.path !== path) continue
-        if (!methodMatches(registration.method, method)) continue
-        return registration.handler({ plugin, root, request })
+      const path = requestOptions.path ?? decodedRequestPathname(request)
+      for (const entry of httpRequest) {
+        if (entry.kind !== 'route') continue
+        if (entry.path !== path || !methodMatches(entry.methods, request.method)) continue
+        const result = await entry.handler({ plugin: entry.plugin, root, request })
+        if (!(result instanceof Response)) throw unsupportedReturn(entry.plugin, 'http.route')
+        return result
       }
       return undefined
     },
 
     async fileChange(change) {
       const paths = normalizeChangedPaths(change)
-      for (const { registration } of fileChangeHooks) {
-        const matched = paths.filter((path) => matchesAny(registration.match, path))
+      for (const entry of fileChangeHooks) {
+        const matched = paths.filter((path) => matchesPatterns(entry.match, path))
         if (matched.length === 0) continue
-        await registration.handler({ root, paths: matched })
+        await entry.handler({ root, paths: matched })
       }
     },
 
@@ -342,12 +471,184 @@ export async function createPluginHarness(
   }
 }
 
-function asRegistration<THandler>(
-  registration: { match?: readonly PluginRoutePattern[]; handler: THandler } | THandler,
+/**
+ * Accept a bare handler or an options object, and refuse anything else.
+ *
+ * Mirrors `normalizeHttpHook` in `runtime/plugin-http.mjs`.
+ */
+function normalizeHttpHook<THandler>(
+  plugin: string,
+  socket: 'onRequest' | 'onResponse',
+  value: { match?: readonly PluginRoutePattern[]; handler: THandler } | THandler,
 ): { match?: readonly PluginRoutePattern[]; handler: THandler } {
-  return typeof registration === 'function'
-    ? { handler: registration as THandler }
-    : (registration as { match?: readonly PluginRoutePattern[]; handler: THandler })
+  const registration =
+    typeof value === 'function'
+      ? { handler: value as THandler }
+      : (value as { match?: readonly PluginRoutePattern[]; handler: THandler })
+  if (!registration || typeof registration !== 'object' || Array.isArray(registration)) {
+    throw new TypeError(`plugin "${plugin}" http.${socket}() expects a handler or options object`)
+  }
+  if (typeof registration.handler !== 'function') {
+    throw new TypeError(`plugin "${plugin}" http.${socket}() requires handler`)
+  }
+  return {
+    match: normalizePatterns(plugin, `http.${socket}().match`, registration.match),
+    handler: registration.handler,
+  }
+}
+
+/** Accept one method, a list, or nothing, and always answer with a list. */
+function normalizeMethodList(method: PluginHttpRouteRegistration['method']): readonly unknown[] {
+  if (method === undefined) return ['*']
+  return Array.isArray(method) ? method : [method]
+}
+
+/** Mirrors `normalizeHttpRoute` in `runtime/plugin-http.mjs`. */
+function normalizeHttpRoute(
+  plugin: string,
+  value: PluginHttpRouteRegistration,
+): {
+  path: string
+  methods: readonly string[]
+  handler: (context: PluginHttpRouteContext) => Response | Promise<Response>
+} {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError(`plugin "${plugin}" http.route() expects an options object`)
+  }
+  if (typeof value.path !== 'string' || !isExactApplicationPath(value.path)) {
+    throw new TypeError(`plugin "${plugin}" http.route().path must be an exact absolute path`)
+  }
+  if (typeof value.handler !== 'function') {
+    throw new TypeError(`plugin "${plugin}" http.route() requires handler`)
+  }
+  const input = normalizeMethodList(value.method)
+  if (
+    input.length === 0 ||
+    input.some(
+      (method) =>
+        typeof method !== 'string' || !/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(method.trim()),
+    )
+  ) {
+    throw new TypeError(
+      `plugin "${plugin}" http.route().method must contain valid HTTP method tokens`,
+    )
+  }
+  return {
+    path: value.path,
+    methods: [
+      ...new Set((input as readonly string[]).map((method) => method.trim().toUpperCase())),
+    ],
+    handler: value.handler,
+  }
+}
+
+/**
+ * Refuse a path a previously registered route already answers.
+ *
+ * Mirrors the conflict check in `createRegistrationApi`: two plugins claiming
+ * one route is a startup `TypeError`, not a first-registration-wins race.
+ */
+function claimRoute(
+  routeOwners: Map<string, string>,
+  plugin: string,
+  route: { path: string; methods: readonly string[] },
+): void {
+  for (const method of route.methods) {
+    const key = `${method} ${route.path}`
+    const conflict = routeOwners.get(key) ?? routeOwners.get(`* ${route.path}`)
+    if (conflict) {
+      throw new TypeError(`plugin "${plugin}" route ${key} conflicts with plugin "${conflict}"`)
+    }
+    if (method === '*') {
+      const pathConflict = [...routeOwners.entries()].find(([candidate]) =>
+        candidate.endsWith(` ${route.path}`),
+      )
+      if (pathConflict) {
+        throw new TypeError(
+          `plugin "${plugin}" route ${key} conflicts with plugin "${pathConflict[1]}"`,
+        )
+      }
+    }
+    routeOwners.set(key, plugin)
+  }
+}
+
+/** Mirrors `normalizeDevFileChange` in `runtime/plugin-http.mjs`. */
+function normalizeDevFileChange(
+  plugin: string,
+  value:
+    { match?: readonly string[]; handler: PluginDevFileChangeHandler } | PluginDevFileChangeHandler,
+): { match?: readonly string[]; handler: PluginDevFileChangeHandler } {
+  const registration =
+    typeof value === 'function'
+      ? { handler: value }
+      : (value as { match?: readonly string[]; handler: PluginDevFileChangeHandler })
+  if (!registration || typeof registration !== 'object' || Array.isArray(registration)) {
+    throw new TypeError(`plugin "${plugin}" dev.onFileChange() expects a handler or options object`)
+  }
+  if (typeof registration.handler !== 'function') {
+    throw new TypeError(`plugin "${plugin}" dev.onFileChange() requires handler`)
+  }
+  return {
+    // Watched paths are application-relative, so they carry no leading slash.
+    match: normalizePatterns(plugin, 'dev.onFileChange().match', registration.match, false),
+    handler: registration.handler,
+  }
+}
+
+/** Mirrors `normalizePatterns` in `runtime/plugin-http.mjs`. */
+function normalizePatterns(
+  plugin: string,
+  field: string,
+  value: readonly string[] | undefined,
+  requireSlash = true,
+): readonly string[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new TypeError(`plugin "${plugin}" ${field} must contain at least one pattern`)
+  }
+  if (value.some((pattern) => typeof pattern !== 'string')) {
+    throw new TypeError(`plugin "${plugin}" ${field} must be an array of strings`)
+  }
+  for (const [index, pattern] of value.entries()) {
+    const wildcard = pattern.indexOf('*')
+    const validStart = !requireSlash || pattern === '*' || pattern.startsWith('/')
+    const validWildcard =
+      wildcard === -1 || (wildcard === pattern.length - 1 && wildcard === pattern.lastIndexOf('*'))
+    if (!pattern || !validStart || !validWildcard) {
+      throw new TypeError(
+        `plugin "${plugin}" ${field}[${index}] must ${requireSlash ? 'start with "/" and ' : ''}use a wildcard only at the end`,
+      )
+    }
+  }
+  return [...value]
+}
+
+function isExactApplicationPath(value: string): boolean {
+  return (
+    value.startsWith('/') && !value.includes('?') && !value.includes('#') && !value.includes('*')
+  )
+}
+
+/** Mirrors `normalizeDiagnostic` in `runtime/plugin-http.mjs`. */
+function normalizeDiagnostic(plugin: string, value: PluginDiagnostic): HarnessDiagnostic {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError(`plugin "${plugin}" diagnostics.report() expects an object`)
+  }
+  if (!['info', 'warning', 'error'].includes(value.level)) {
+    throw new TypeError(`plugin "${plugin}" diagnostic level must be info, warning, or error`)
+  }
+  if (typeof value.code !== 'string' || !/^[A-Z][A-Z0-9_-]{2,31}$/.test(value.code)) {
+    throw new TypeError(`plugin "${plugin}" diagnostic code must be an uppercase identifier`)
+  }
+  if (typeof value.message !== 'string' || !value.message.trim()) {
+    throw new TypeError(`plugin "${plugin}" diagnostic message must be non-empty`)
+  }
+  return { plugin, level: value.level, code: value.code, message: value.message.trim() }
+}
+
+function unsupportedReturn(plugin: string, socket: string): TypeError {
+  return new TypeError(`plugin "${plugin}" ${socket} returned an unsupported value`)
 }
 
 function asTransformResult(result: string | TransformResult | null | void): TransformResult | null {
@@ -372,22 +673,40 @@ function normalizeChangedPaths(change: HarnessFileChange | string | readonly str
   return [...(change as HarnessFileChange).paths]
 }
 
-function pathOf(request: Request): string {
-  return new URL(request.url).pathname
+/**
+ * The path a hook is scoped against — the same one the server resolves.
+ *
+ * The server matches the *decoded* pathname, through the router's own
+ * `canonicalRoutePath`, so `/files/my%20doc` is in scope for a hook declared as
+ * `['/files/my doc']` and `//api/users` is in scope for `['/api/*']`. Matching
+ * the raw pathname here reported "not in scope" for requests the server hands
+ * straight to the hook, which is how a scoped `originGuard()` could look
+ * correctly configured and never run.
+ *
+ * `canonicalRoutePath` answers `null` for a path the router refuses outright;
+ * falling back to the raw pathname keeps the hook running rather than failing
+ * open, exactly as `decodedRequestPathname` does in `plugin-http.mjs`.
+ */
+function decodedRequestPathname(request: Request): string {
+  const pathname = new URL(request.url).pathname
+  return canonicalRoutePath(pathname) ?? pathname
 }
 
-function methodMatches(declared: PluginHttpRouteRegistration['method'], method: string): boolean {
-  if (declared === undefined) return true
-  const allowed = typeof declared === 'string' ? [declared] : declared
-  return allowed.some((value) => value.toUpperCase() === method)
+function methodMatches(declared: readonly string[], method: string): boolean {
+  return declared.includes('*') || declared.includes(method)
 }
 
 /**
  * Server route-pattern semantics: `*` matches everything, a trailing `*`
  * matches by prefix, anything else matches exactly. An absent list matches
  * every path.
+ *
+ * Mirrors `matchesPatterns` in `runtime/plugin-http.mjs`.
  */
-function matchesAny(patterns: readonly PluginRoutePattern[] | undefined, path: string): boolean {
+function matchesPatterns(
+  patterns: readonly PluginRoutePattern[] | undefined,
+  path: string,
+): boolean {
   if (!patterns || patterns.length === 0) return true
   return patterns.some((pattern) => {
     if (pattern === '*') return true

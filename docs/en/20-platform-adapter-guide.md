@@ -168,7 +168,7 @@ on should not advertise that the endpoint is there. With it, a scrape must send
 `Authorization: Bearer <token>`; the token is compared in constant time, so the time a refusal takes
 does not say how long a guessed prefix was. These are exactly the numbers `/__ruvyxa/health`
 withholds, which is why they sit behind a token instead of beside the public probe. Standalone only:
-`ruvyxa start` has no admission controller of its own to report on.
+`ruvyxa start` admits and sheds the same way, but does not serve this endpoint.
 
 **Capacity.** More renders than the machine can run are refused rather than started.
 `RUVYXA_MAX_CONCURRENCY` is how many run at once — by default the container's share of the cores,
@@ -177,9 +177,10 @@ slows down the ones already going — and `RUVYXA_MAX_QUEUE` is how many may wai
 default. Past that a caller gets the same `503` with `Retry-After` rather than being parked on
 memory this process would have to keep. Unbounded, a burst larger than the machine becomes a heap
 holding every in-flight render at once, and the failure is not a slow server but an out-of-memory
-kill that takes the nearly-finished requests down with the ones that caused it. `ruvyxa start` has
-never had that problem: its render worker is bounded by the same controller, and the standalone
-server now runs the same one.
+kill that takes the nearly-finished requests down with the ones that caused it. `ruvyxa start` reads
+the same two variables and refuses the same way, so one project sheds load identically under it and
+under its own build; `ruvyxa dev` defaults to off, because one developer with a browser is not a
+load event.
 
 A slot is held until the **response** exists, not until its body has finished, so a streamed
 document and a server-sent-event stream cost a slot for milliseconds rather than for their lifetime

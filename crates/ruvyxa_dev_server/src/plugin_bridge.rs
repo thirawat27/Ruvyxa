@@ -342,7 +342,61 @@ pub(crate) fn request_method_allows_body(method: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::split_plugin_target;
+    use super::{canonical_request_path, split_plugin_target};
+
+    /// Replay the shared plugin path-scope table.
+    ///
+    /// `tests/fixtures/plugin-path-scope-conformance.json` is also replayed by
+    /// `tests/packages/ruvyxa/plugins.test.mjs`, which drives the whole scoping
+    /// decision because the deployed host owns it. This host runs the same
+    /// JavaScript registry in a child process, so the only thing it decides is
+    /// which path string it hands over — and handing over the raw request line
+    /// while routing on the canonical one is what let `//api/x` past every
+    /// path-scoped hook, `originGuard()` included.
+    #[test]
+    fn hands_plugins_the_same_path_the_router_resolves() {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/plugin-path-scope-conformance.json");
+        let fixture: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&fixture_path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", fixture_path.display())),
+        )
+        .expect("plugin path scope fixture is valid JSON");
+
+        for case in fixture["cases"].as_array().expect("fixture declares cases") {
+            let target = case["target"].as_str().expect("case target");
+            let canonical = canonical_request_path(target);
+
+            let Some(expected) = case["canonical"].as_str() else {
+                // A refused path never reaches the plugin stage on this host:
+                // `handle_request` answers 400 before it builds the payload.
+                assert!(
+                    canonical.is_err(),
+                    "{target} must be refused before the plugin stage"
+                );
+                continue;
+            };
+
+            let canonical = canonical.unwrap_or_else(|_| panic!("{target} must canonicalise"));
+            assert_eq!(canonical, expected, "canonical form of {target}");
+
+            // The path handed over carries the canonical form and nothing else.
+            assert_eq!(
+                crate::plugin_request_target(&canonical, target),
+                expected,
+                "plugin target for {target}"
+            );
+
+            // The query string is not part of the scoping decision, but this
+            // target becomes the request target for the rest of the pipeline
+            // once a plugin has run, so it has to survive.
+            assert_eq!(
+                crate::plugin_request_target(&canonical, &format!("{target}?page=2&q=a%20b")),
+                format!("{expected}?page=2&q=a%20b"),
+                "plugin target query for {target}"
+            );
+        }
+    }
 
     #[test]
     fn plugin_request_rewrites_use_the_same_canonical_path_contract_as_routing() {

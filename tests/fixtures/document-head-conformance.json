@@ -71,6 +71,12 @@
       "expect": ""
     },
     {
+      "name": "an upper-case single-quoted attribute is the same declaration",
+      "document": "<html><head><META NAME='VIEWPORT' CONTENT='width=1024'></head></html>",
+      "assetLinks": "",
+      "expect": ""
+    },
+    {
       "name": "rel=icon stands the icon link down",
       "document": "<html><head><link rel=\"icon\" href=\"/mine.svg\"></head></html>",
       "assetLinks": "<link rel=\"icon\" type=\"image/png\" href=\"/ruvyxa.png\">",
@@ -113,6 +119,12 @@
       "expect": "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
     },
     {
+      "name": "an upper-case single-quoted rel is the same declaration",
+      "document": "<html><head><LINK REL='ICON' HREF='/mine.svg'></head></html>",
+      "assetLinks": "<link rel=\"icon\" type=\"image/png\" href=\"/ruvyxa.png\">",
+      "expect": "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+    },
+    {
       "name": "a document declaring both keeps both of its own",
       "document": "<html><head><meta name=\"viewport\" content=\"width=1024\"><link rel=\"icon\" href=\"/mine.svg\"></head></html>",
       "assetLinks": "<link rel=\"icon\" type=\"image/png\" href=\"/ruvyxa.png\">",
@@ -124,5 +136,75 @@
       "assetLinks": "<link rel=\"icon\" type=\"image/png\" href=\"/ruvyxa.png\">",
       "expect": "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><link rel=\"icon\" type=\"image/png\" href=\"/ruvyxa.png\">"
     }
-  ]
+  ],
+  "escaping": {
+    "$comment": [
+      "The one character set every HTML escaper in this workspace applies.",
+      "",
+      "`escape_html` in `crates/ruvyxa_dev_server/src/html_document.rs` calls",
+      "itself the one place that rule lives, and it is re-exported into the CLI",
+      "prerenderer -- but the same rule is written again as",
+      "`__ruvyxaEscapeAttribute` inside the prelude `entry-templates.mjs`",
+      "generates, and again as `escapeHtmlAttribute` in `serverless-handler.mjs`,",
+      "which is the writer a deployed request-time render goes through. Three",
+      "copies, three hosts, and nothing held them level: `'` was missing from",
+      "all three, which was inert only because every call site today happens to",
+      "be element text or a double-quoted attribute.",
+      "",
+      "`&#39;` and not `&apos;`: HTML 4 does not define `&apos;`, so an older",
+      "parser reads it as literal text.",
+      "",
+      "Not a table of every character -- a table of the ones a value carrying",
+      "them could change the meaning of the surrounding markup with, plus the",
+      "ordering trap underneath them: `&` has to be replaced first, or every",
+      "entity the later replacements introduce is escaped a second time."
+    ],
+    "cases": [
+      {
+        "name": "leaves ordinary text alone",
+        "input": "Hello, world",
+        "expect": "Hello, world"
+      },
+      {
+        "name": "escapes the ampersand first, so entities are not doubled",
+        "input": "a & b",
+        "expect": "a &amp; b"
+      },
+      {
+        "name": "does not re-escape an entity it just wrote",
+        "input": "<",
+        "expect": "&lt;"
+      },
+      {
+        "name": "closes neither a tag nor a double-quoted attribute",
+        "input": "\"><script>alert(1)</script>",
+        "expect": "&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"
+      },
+      {
+        "name": "closes a single-quoted attribute either",
+        "input": "'onmouseover='alert(1)",
+        "expect": "&#39;onmouseover=&#39;alert(1)"
+      },
+      {
+        "name": "escapes an apostrophe in ordinary prose",
+        "input": "Ruvyxa's docs",
+        "expect": "Ruvyxa&#39;s docs"
+      },
+      {
+        "name": "escapes every character of the set at once",
+        "input": "&<>\"'",
+        "expect": "&amp;&lt;&gt;&quot;&#39;"
+      },
+      {
+        "name": "leaves an already-escaped-looking value ambiguous, by design",
+        "input": "&amp;",
+        "expect": "&amp;amp;"
+      },
+      {
+        "name": "is a no-op on the empty string",
+        "input": "",
+        "expect": ""
+      }
+    ]
+  }
 }
