@@ -31,6 +31,19 @@
 // reason nothing stands behind is how a list like this rots.
 import { readFile } from 'node:fs/promises'
 import { execFileSync } from 'node:child_process'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+// This repository's root, from this file's own location rather than from
+// `process.cwd()`. A git pathspec resolves against the working directory, so
+// `crates/**` asked from inside a package directory names `<package>/crates/**`
+// and selects nothing -- and a gate that looked at no files reports no
+// failures, which is indistinguishable from a clean tree. `pnpm -r test` runs
+// each package's script from that package's own directory, so that is the
+// caller this check was silent for. The paths stay repository-relative because
+// that is how they read in a failure message; they are resolved against this
+// before anything opens them.
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
 // Reading and decoding only. Serializing a value this process already owns is
 // deliberately out of scope: `serde_json::to_string` of a `&str`, a `BTreeMap`,
@@ -338,7 +351,10 @@ const ALLOWED_JS = [
   },
 ]
 
-const tracked = execFileSync('git', ['ls-files', 'crates/**/*.rs'], { encoding: 'utf8' })
+const tracked = execFileSync('git', ['ls-files', 'crates/**/*.rs'], {
+  encoding: 'utf8',
+  cwd: REPO_ROOT,
+})
   .split('\n')
   .filter(Boolean)
   // Test code may fabricate freely: it is asserting on values it wrote itself.
@@ -404,11 +420,14 @@ const failures = []
 const used = new Set()
 
 for (const file of tracked) {
-  for (const { line, statement } of fabricatedSites(await readFile(file, 'utf8'), {
-    allowed: ALLOWED,
-    file,
-    onAllowed: (entry) => used.add(`${entry.file}::${entry.contains}`),
-  })) {
+  for (const { line, statement } of fabricatedSites(
+    await readFile(path.resolve(REPO_ROOT, file), 'utf8'),
+    {
+      allowed: ALLOWED,
+      file,
+      onAllowed: (entry) => used.add(`${entry.file}::${entry.contains}`),
+    },
+  )) {
     failures.push(`${file}:${line}\n      ${statement}`)
   }
 }
@@ -424,7 +443,7 @@ const jsTracked = execFileSync(
     'packages/**/*.mjs',
     'packages/**/*.ts',
   ],
-  { encoding: 'utf8' },
+  { encoding: 'utf8', cwd: REPO_ROOT },
 )
   .split('\n')
   .map((file) => file.trim())
@@ -440,11 +459,14 @@ const jsTracked = execFileSync(
   )
 
 for (const file of jsTracked) {
-  for (const { line, statement } of swallowedReads(await readFile(file, 'utf8'), {
-    allowed: ALLOWED_JS,
-    file,
-    onAllowed: (entry) => used.add(`${entry.file}::${entry.contains}`),
-  })) {
+  for (const { line, statement } of swallowedReads(
+    await readFile(path.resolve(REPO_ROOT, file), 'utf8'),
+    {
+      allowed: ALLOWED_JS,
+      file,
+      onAllowed: (entry) => used.add(`${entry.file}::${entry.contains}`),
+    },
+  )) {
     failures.push(`${file}:${line}\n      ${statement}`)
   }
 }

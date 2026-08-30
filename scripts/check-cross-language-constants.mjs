@@ -55,6 +55,15 @@
 import { readFileSync, existsSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+/**
+ * This repository's root, from this file's own location rather than from
+ * `process.cwd()`. The paths this gate reports are repository-relative because
+ * that is how they read in a failure message; they are resolved against this
+ * before anything opens them.
+ */
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
 /** Anything shorter reads as an abbreviation and collides by accident. */
 const MIN_NAME_LENGTH = 4
@@ -276,9 +285,21 @@ export const SOURCE_PATHSPEC = [
   'scripts/*.mjs',
 ]
 
-/** Every tracked source file of either language, in `git ls-files` order. */
+/**
+ * Every tracked source file of either language, in `git ls-files` order.
+ *
+ * Run from `REPO_ROOT`, not from wherever the caller happens to be. A git
+ * pathspec is resolved against the working directory, so `crates/**` asked from
+ * inside a package directory names `<package>/crates/**` and matches nothing —
+ * and this gate answers a question whose correct answer is "nothing to report"
+ * either way, so it passed. `pnpm -r test` runs each package's script from that
+ * package's own directory, which is exactly the caller it was silent for.
+ */
 export function trackedSources() {
-  return execFileSync('git', ['ls-files', ...SOURCE_PATHSPEC], { encoding: 'utf8' })
+  return execFileSync('git', ['ls-files', ...SOURCE_PATHSPEC], {
+    encoding: 'utf8',
+    cwd: REPO_ROOT,
+  })
     .split('\n')
     .filter(Boolean)
     .filter((file) => !file.includes('/dist/') && !file.endsWith('.d.ts'))
@@ -305,7 +326,9 @@ export function declarations(files, pattern, cutAtTestModule) {
     // at end of line. A `\r` left in place makes this check quietly see half
     // the declarations on Windows and all of them on CI, which is the exact
     // failure mode it exists to catch.
-    let source = readFileSync(file, 'utf8').replace(/\r\n/g, '\n')
+    // Resolved against the repository root, which leaves an absolute path — a
+    // test's scratch file — exactly as it was given.
+    let source = readFileSync(path.resolve(REPO_ROOT, file), 'utf8').replace(/\r\n/g, '\n')
     if (cutAtTestModule) {
       // The test *module*, not every `#[cfg(test)]`. That attribute also marks
       // individual test-only helpers, and several files carry one hundreds of
@@ -417,7 +440,7 @@ export function inspect(rust, js, registry = REGISTRY) {
       continue
     }
     if (entry.kind === 'fixture' || entry.kind === 'test') {
-      if (!existsSync(entry.held)) {
+      if (!existsSync(path.resolve(REPO_ROOT, entry.held))) {
         failures.push(
           `${name} is registered as held by ${entry.held}, which does not exist.\n` +
             '      Point the entry at what actually holds the pair, or change its kind.',

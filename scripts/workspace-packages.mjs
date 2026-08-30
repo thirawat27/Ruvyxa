@@ -1,5 +1,20 @@
 import { existsSync, readdirSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+/**
+ * This repository's root, from this file's own location rather than from
+ * `process.cwd()`.
+ *
+ * Every path below names a repository-wide fact — `packages/@ruvyxa` is that
+ * directory, not whichever `packages/@ruvyxa` happens to sit beneath the
+ * caller's working directory. Resolved against the process's cwd it answered
+ * correctly only for a caller started at the root, and answered *nothing* for
+ * anyone else: `pnpm -r test` runs each package's script from that package's
+ * own directory, where `existsSync('packages')` is false, so the walk returned
+ * an empty list and every gate built on it passed by having looked at no files.
+ */
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 /**
  * The published packages in this workspace, discovered the way pnpm discovers
@@ -68,14 +83,19 @@ export function workspacePackageDirs() {
 export function manifestDirs(parent, manifestName, accept = () => true) {
   const dirs = []
   const ignored = []
-  if (!existsSync(parent)) return { dirs, ignored }
-  for (const name of readdirSync(parent).sort()) {
+  // Anchored for the filesystem, relative for the caller. `resolve` leaves an
+  // absolute `parent` alone, so a caller naming a scratch directory still gets
+  // the directory it named.
+  const parentPath = resolve(REPO_ROOT, parent)
+  if (!existsSync(parentPath)) return { dirs, ignored }
+  for (const name of readdirSync(parentPath).sort()) {
     if (!accept(name)) continue
     // Forward slashes rather than `join`, so the reported path reads the same
     // on every host — these are printed in failure messages.
     const dir = `${parent}/${name}`
-    if (!statSync(dir).isDirectory()) continue
-    if (existsSync(join(dir, manifestName))) dirs.push(dir)
+    const dirPath = join(parentPath, name)
+    if (!statSync(dirPath).isDirectory()) continue
+    if (existsSync(join(dirPath, manifestName))) dirs.push(dir)
     else ignored.push(dir)
   }
   return { dirs, ignored }

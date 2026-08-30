@@ -36,8 +36,11 @@ describe('the version bump leaves manifests formatted', () => {
    * manifest took forty seconds.
    */
   it('rewrites at least one manifest that JSON.stringify would format differently', () => {
-    // `workspacePackageDirs` reads relative to the working directory, which is
-    // the repository root for every runner in this suite.
+    // Repository-relative, and repository-anchored: `workspacePackageDirs`
+    // resolves against the root it derives from its own location, not against
+    // the working directory. It used to do the latter, and `pnpm -r test` runs
+    // this suite from `packages/ruvyxa`, where the walk found nothing and this
+    // assertion failed for having been handed an empty list.
     const { dirs } = workspacePackageDirs()
     const manifests = [
       path.join(repoRoot, 'package.json'),
