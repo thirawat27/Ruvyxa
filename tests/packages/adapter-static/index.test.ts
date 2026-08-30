@@ -1,5 +1,8 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { static as staticOutput } from '../../../packages/@ruvyxa/adapter-static/dist/index.js'
 
@@ -81,5 +84,81 @@ describe('static', () => {
       () => staticOutput({ outputDir: 'client-report.json/nested' }),
       /overlaps protected build output/,
     )
+  })
+})
+
+/**
+ * The refusal list and the build output it protects.
+ *
+ * `outputDir` may not be spelled after anything the build writes, or the static
+ * site is written over the files the pre-renderer and every adapter function
+ * read. The list lives in the adapter and the directories live in
+ * `crates/ruvyxa_cli/src/build.rs`, so nothing connected the two: a directory
+ * added to the build was writable from here until somebody noticed.
+ *
+ * Not an equality check, because the two sets are deliberately different. The
+ * adapter's own destinations are in the build's list and must stay *writable*;
+ * the compile cache is not in it and must stay protected. What has to hold is
+ * the direction that matters: everything the build writes is refused unless it
+ * is a destination this adapter tells authors to use.
+ */
+describe('the protected build output', () => {
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
+
+  /** A `const NAME: [&str; N] = [ … ];` list of string literals, from Rust. */
+  function rustList(source: string, name: string): string[] {
+    const start = source.indexOf(`const ${name}`)
+    assert.notEqual(start, -1, `${name} is no longer declared in build.rs`)
+    const open = source.indexOf('[', source.indexOf('=', start))
+    const close = source.indexOf('];', open)
+    assert.ok(close > open, `${name} is no longer a bracketed list`)
+    return [...source.slice(open, close).matchAll(/"([^"]+)"/g)].map((match) => match[1])
+  }
+
+  /** The adapter's own list, read from its source rather than exported for this. */
+  function adapterList(): string[] {
+    const source = readFileSync(
+      path.join(repoRoot, 'packages/@ruvyxa/adapter-static/src/index.ts'),
+      'utf8',
+    )
+    const start = source.indexOf('const PROTECTED_BUILD_OUTPUT')
+    assert.notEqual(start, -1, 'PROTECTED_BUILD_OUTPUT is no longer declared')
+    const open = source.indexOf('[', start)
+    const close = source.indexOf(']', open)
+    return [...source.slice(open, close).matchAll(/'([^']+)'/g)].map((match) => match[1])
+  }
+
+  it('refuses everything the build writes, except this adapter’s own destinations', () => {
+    const buildRs = readFileSync(path.join(repoRoot, 'crates/ruvyxa_cli/src/build.rs'), 'utf8')
+    const dirs = rustList(buildRs, 'BUILD_OUTPUT_DIRS')
+    const files = rustList(buildRs, 'BUILD_OUTPUT_FILES')
+    const protectedNames = adapterList()
+
+    assert.ok(dirs.length > 0 && files.length > 0, 'the Rust lists were not read')
+
+    // Where adapter output is meant to go. Refusing these would refuse the
+    // directory this adapter's own error message recommends.
+    const destinations = new Set(['deploy', 'static'])
+
+    const writable = [...dirs, ...files].filter(
+      (name) => !destinations.has(name) && !protectedNames.includes(name),
+    )
+    assert.deepEqual(
+      writable,
+      [],
+      'the build writes these and the static adapter would let an outputDir overwrite them',
+    )
+
+    // The compile cache is not in either Rust list and is protected anyway.
+    assert.ok(protectedNames.includes('cache'), 'the compile cache has to stay protected')
+
+    // And the destinations really are still writable, or the recommendation in
+    // the RUV2001 message names a directory the adapter refuses.
+    for (const destination of destinations) {
+      assert.ok(
+        !protectedNames.includes(destination),
+        `${destination} is where adapter output goes; refusing it contradicts RUV2001`,
+      )
+    }
   })
 })

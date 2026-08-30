@@ -78,6 +78,12 @@ export const REGISTRY = [
     why: 'The build report the pre-renderer and every deployed function read each route’s browser assets out of. The build writes it; the adapter runner reads it back. A split silently loads nothing, and every deployed page then ships without its script tag.',
   },
   {
+    name: 'COMPONENT_EXTENSIONS',
+    kind: 'fixture',
+    held: 'tests/fixtures/route-chain-conformance.json',
+    why: 'The extensions a route component may be written in, and the order they are probed in. Both graphs walk the same `app/` tree: a rule taught to one leaves a project written in the other extension losing every layout and template in that host alone — no diagnostic, a successful build, and a page rendered without its `<html>`/`<body>` shell. The order matters too, because it decides which file a project holding both composes.',
+  },
+  {
     name: 'DEFAULT_REVALIDATE_SECONDS',
     kind: 'sameValue',
     why: 'The ISR window a route gets when it names none. A split makes the same route revalidate on two schedules depending on where it is served.',

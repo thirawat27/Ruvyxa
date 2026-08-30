@@ -1915,3 +1915,78 @@ describe('rate limiter conformance with the native middleware', () => {
     })
   }
 })
+
+/**
+ * The shared preflight table, replayed against `createHandler`.
+ *
+ * `crates/ruvyxa_middleware/src/builtin.rs` replays the same cases against the
+ * layered native stack. The two disagreed: the native host puts the limiter
+ * outside CORS so an `OPTIONS` is charged, and this handler answered preflights
+ * before the limiter saw them — so the same `rateLimit.max` bought a different
+ * number of real requests depending on where a project was deployed, and a
+ * cross-origin page sends one preflight for every request it cannot simplify.
+ */
+describe('a preflight against the shared rate-limit table', () => {
+  const contract = JSON.parse(
+    readFileSync(path.join(workspaceRoot, 'tests/fixtures/rate-limit-conformance.json'), 'utf8'),
+  )
+
+  for (const testCase of contract.preflightCases.cases) {
+    it(testCase.name, async () => {
+      const handler = createHandler({
+        routes: [pageRoute('app/page', '/')],
+        importPage: async () => ({ render: async () => '<html>ok</html>' }),
+        importApi: async () => ({}),
+        middleware: {
+          builtin: {
+            cors: { origins: ['https://app.example'], credentials: true, methods: ['GET', 'POST'] },
+            rate: { max: testCase.max, window: testCase.windowSeconds, key: 'ip' },
+          },
+        },
+      })
+
+      const request = () =>
+        new Request('https://deployed.example/', {
+          method: testCase.preflight ? 'OPTIONS' : 'GET',
+          headers: testCase.preflight
+            ? {
+                origin: 'https://app.example',
+                'access-control-request-method': 'POST',
+                'x-forwarded-for': '203.0.113.7',
+              }
+            : { origin: 'https://app.example', 'x-forwarded-for': '203.0.113.7' },
+        })
+
+      let refusal = null
+      for (let attempt = 1; attempt <= testCase.requests; attempt += 1) {
+        const response = await handler(request())
+        if (attempt < testCase.expectRefusedAt) {
+          assert.notEqual(response.status, 429, `request ${attempt} was refused early`)
+        } else if (attempt === testCase.expectRefusedAt) {
+          assert.equal(
+            response.status,
+            429,
+            `request ${attempt} was not refused, so a preflight cost nothing`,
+          )
+          refusal = response
+        }
+      }
+
+      assert.ok(refusal, 'the table names a refusal')
+      if (testCase.expectAllowOrigin) {
+        assert.equal(
+          refusal.headers.get('access-control-allow-origin'),
+          'https://app.example',
+          'a refusal the browser cannot read is an opaque failure',
+        )
+      }
+      if (testCase.expectNegotiationHeaders === false) {
+        assert.equal(
+          refusal.headers.get('access-control-allow-methods'),
+          null,
+          'a refusal is not a preflight answer',
+        )
+      }
+    })
+  }
+})

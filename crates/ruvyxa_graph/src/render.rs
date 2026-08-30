@@ -180,13 +180,6 @@ pub(crate) fn detect_render_meta(
     }
 }
 
-/// Parse the additive route hydration export while preserving boolean input.
-///
-/// `hydrate` decides whether a page ships a client bundle at all, so reading it
-/// wrongly in either direction is expensive: a missed opt-out ships JavaScript
-/// the author disabled, and a false positive drops the hydration a working page
-/// depends on. Both happened while this read the raw source — see
-/// [`export_const_value`].
 /// Node built-ins an edge route may not reach.
 ///
 /// Conservative on purpose: these are the modules that need a filesystem, a
@@ -289,6 +282,13 @@ pub(crate) fn detect_runtime_target(file: &Path, cache: &mut ModuleCache) -> Res
     }
 }
 
+/// Parse the additive route hydration export while preserving boolean input.
+///
+/// `hydrate` decides whether a page ships a client bundle at all, so reading it
+/// wrongly in either direction is expensive: a missed opt-out ships JavaScript
+/// the author disabled, and a false positive drops the hydration a working page
+/// depends on. Both happened while this read the raw source — see
+/// [`export_const_value`].
 pub(crate) fn parse_hydration_mode(source: &str, masked: &str) -> HydrationMode {
     let Some(value) = export_const_value(source, masked, "hydrate") else {
         return HydrationMode::Load;

@@ -12,7 +12,7 @@ import {
 /**
  * The JavaScript half of the dynamic-segment syntax rule.
  *
- * `crates/ruvyxa_graph/src/lib.rs::replays_the_shared_route_pattern_conformance_table`
+ * `crates/ruvyxa_graph/src/tests.rs::replays_the_shared_route_pattern_conformance_table`
  * drives the same file through route discovery, which decides which `app/`
  * folder names become routes at all. This file drives `compilePattern`, which
  * decides which of those segments capture anything.

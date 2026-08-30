@@ -821,7 +821,9 @@ export interface RequestCookies {
  *
  * Reading a cookie makes a page's output depend on who is asking, so a route
  * that calls this is served per request and is never stored in a shared render
- * cache. See `route_reads_request_state` in `crates/ruvyxa_graph/src/lib.rs`.
+ * cache. The flag is set at call time rather than found by scanning source:
+ * the accessor marks the request's store, and `usedRequestContext` in
+ * `packages/ruvyxa/runtime/request-context.mjs` is what the host reads back.
  *
  * @example
  * ```tsx

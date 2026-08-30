@@ -114,10 +114,20 @@
     {
       "name": "a 16 KB header value is bounded before it is tracked",
       "keyBy": "header:x-api-key",
-      "keyHeader": { "repeat": "k", "times": 16384 },
+      "keyHeader": {
+        "repeat": "k",
+        "times": 16384
+      },
       "client": "198.51.100.7",
-      "identity": { "repeat": "k", "times": 16384 },
-      "distinctFrom": { "repeat": "k", "times": 16384, "suffix": "x" }
+      "identity": {
+        "repeat": "k",
+        "times": 16384
+      },
+      "distinctFrom": {
+        "repeat": "k",
+        "times": 16384,
+        "suffix": "x"
+      }
     }
   ],
   "admissionCases": [
@@ -127,10 +137,22 @@
       "windowSeconds": 60,
       "prefill": null,
       "requests": [
-        { "identity": "steady-client", "allowed": true },
-        { "identity": "steady-client", "allowed": true },
-        { "identity": "steady-client", "allowed": false },
-        { "identity": "another-client", "allowed": true }
+        {
+          "identity": "steady-client",
+          "allowed": true
+        },
+        {
+          "identity": "steady-client",
+          "allowed": true
+        },
+        {
+          "identity": "steady-client",
+          "allowed": false
+        },
+        {
+          "identity": "another-client",
+          "allowed": true
+        }
       ],
       "expectTracked": 2
     },
@@ -138,16 +160,32 @@
       "name": "a full map of expired buckets is swept rather than evicted",
       "max": 1,
       "windowSeconds": 1,
-      "prefill": { "count": "capacity", "state": "expired" },
-      "requests": [{ "identity": "new-client", "allowed": true }],
+      "prefill": {
+        "count": "capacity",
+        "state": "expired"
+      },
+      "requests": [
+        {
+          "identity": "new-client",
+          "allowed": true
+        }
+      ],
       "expectTracked": 1
     },
     {
       "name": "a full map of unexpired buckets still admits a brand new client",
       "max": 1,
       "windowSeconds": 60,
-      "prefill": { "count": "capacity", "state": "staggered" },
-      "requests": [{ "identity": "a-visitor-the-map-has-never-seen", "allowed": true }],
+      "prefill": {
+        "count": "capacity",
+        "state": "staggered"
+      },
+      "requests": [
+        {
+          "identity": "a-visitor-the-map-has-never-seen",
+          "allowed": true
+        }
+      ],
       "expectTracked": "capacity",
       "expectEvicted": "oldest",
       "expectRetained": "newest"
@@ -156,14 +194,77 @@
       "name": "admitting a new client costs one bucket, not the whole allowance",
       "max": 3,
       "windowSeconds": 60,
-      "prefill": { "count": "capacity", "state": "staggered" },
+      "prefill": {
+        "count": "capacity",
+        "state": "staggered"
+      },
       "requests": [
-        { "identity": "a-visitor-the-map-has-never-seen", "allowed": true },
-        { "identity": "a-visitor-the-map-has-never-seen", "allowed": true },
-        { "identity": "a-visitor-the-map-has-never-seen", "allowed": true },
-        { "identity": "a-visitor-the-map-has-never-seen", "allowed": false }
+        {
+          "identity": "a-visitor-the-map-has-never-seen",
+          "allowed": true
+        },
+        {
+          "identity": "a-visitor-the-map-has-never-seen",
+          "allowed": true
+        },
+        {
+          "identity": "a-visitor-the-map-has-never-seen",
+          "allowed": true
+        },
+        {
+          "identity": "a-visitor-the-map-has-never-seen",
+          "allowed": false
+        }
       ],
       "expectTracked": "capacity"
     }
-  ]
+  ],
+  "preflightCases": {
+    "$comment": [
+      "Whether a CORS preflight spends a token, and what a refusal owes.",
+      "",
+      "It spends one. The native host puts the limiter outside CORS on purpose",
+      "so an `OPTIONS` is charged like anything else; the deployed handler",
+      "answered preflights first and charged nothing. The same `rateLimit.max`",
+      "then bought a different number of real requests depending on where a",
+      "project was deployed, and a cross-origin page sends one preflight for",
+      "every request it cannot simplify.",
+      "",
+      "`allowOrigin` and the negotiation headers are separate questions. A 429",
+      "owes the browser `Access-Control-Allow-Origin`, or the page sees an",
+      "opaque network failure instead of a rate limit. It does *not* owe",
+      "`Access-Control-Allow-Methods`: a refusal is not a preflight answer, and",
+      "sending the negotiation set would claim the request was approved."
+    ],
+    "cases": [
+      {
+        "name": "a preflight spends a token like any other request",
+        "preflight": true,
+        "max": 1,
+        "windowSeconds": 60,
+        "requests": 2,
+        "expectRefusedAt": 2
+      },
+      {
+        "name": "a refused preflight still names the origin it refused",
+        "preflight": true,
+        "max": 1,
+        "windowSeconds": 60,
+        "requests": 2,
+        "expectRefusedAt": 2,
+        "expectAllowOrigin": true,
+        "expectNegotiationHeaders": false
+      },
+      {
+        "name": "an ordinary cross-origin request is charged the same way",
+        "preflight": false,
+        "max": 1,
+        "windowSeconds": 60,
+        "requests": 2,
+        "expectRefusedAt": 2,
+        "expectAllowOrigin": true,
+        "expectNegotiationHeaders": false
+      }
+    ]
+  }
 }

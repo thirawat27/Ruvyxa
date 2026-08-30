@@ -2,7 +2,7 @@
  * The dev server's half of `tests/fixtures/route-chain-conformance.json`.
  *
  * A route's layout and template chains are discovered twice: `layout_chain()`
- * and `template_chain()` in `crates/ruvyxa_graph/src/lib.rs` answer for
+ * and `template_chain()` in `crates/ruvyxa_graph/src/discovery.rs` answer for
  * `ruvyxa build`, and `collectLayouts()`/`collectTemplates()` in
  * `packages/ruvyxa/runtime/compiler.mjs` answer for `ruvyxa dev` and for every
  * route a deployed function composes. A layout one host wraps a page in and the

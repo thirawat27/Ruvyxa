@@ -621,9 +621,22 @@ fn write_route_bundles(
             fs::write(client_dir.join(&chunk.file_name), chunk.code.as_bytes())?;
         }
 
+        // Root-relative in the report, absolute in the record. The report is a
+        // build artifact that has to read the same on every machine, and
+        // `verify:reproducible` compares two builds byte for byte; an absolute
+        // path would make it name the directory the build ran in.
+        // Against the *canonical* root: `root` is whatever `--root` was typed
+        // and is usually relative, while the entry is now absolute, so a raw
+        // `strip_prefix` never matches and silently ships the absolute path.
+        let canonical_root = ruvyxa_diagnostics::normalized_canonical_path(root);
+        let reported_entry = bundle
+            .entry
+            .strip_prefix(&canonical_root)
+            .unwrap_or(&bundle.entry)
+            .to_path_buf();
         let mut route_info = serde_json::json!({
             "path": bundle.path,
-            "entry": bundle.entry,
+            "entry": reported_entry,
             "file": bundle.file_name,
             "src": format!("/__ruvyxa/client/{}", bundle.file_name),
             "sourceMap": bundle.source_map_file,
@@ -1107,7 +1120,19 @@ pub(crate) fn bundle_client_route(
 
     let bundle = ClientBundle {
         path: route.path.clone(),
-        entry: route.file.clone(),
+        // Absolute, like every other path in this record.
+        //
+        // `route.file` is spelled relative to whatever `--root` this run was
+        // given, and this whole struct is cached under a content-derived key
+        // that says nothing about that root. So a build run as
+        // `--root examples/demo` from the repository root stored
+        // `examples/demo/app/page.tsx`, and a later `--root .` from inside
+        // `examples/demo` reused the record and resolved it against its own
+        // root -- producing `./examples/demo/app/page.tsx`, which does not
+        // exist. `module_paths`, `dependency_paths` and the chunk module lists
+        // beside it were already canonical; this one field was not, and it is
+        // the one the Flight read below resolves.
+        entry: canonical_route_file(root, &route.file),
         file_name,
         script,
         source_map_file,

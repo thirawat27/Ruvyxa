@@ -184,24 +184,31 @@ export function compilerCacheStats() {
  * third caller arrived: `adapter-runner.mjs` composes a server-components route
  * for a deployed function, and a route composed one way by `ruvyxa start` and
  * another by its own build is the failure this file exists to prevent. Each
- * mirrors a rule in `crates/ruvyxa_graph/src/lib.rs`, named on the function.
+ * mirrors a rule in `crates/ruvyxa_graph/src/discovery.rs`, named on the function.
  */
 
 /**
  * Extensions a route file written as a component may carry, in probe order.
  *
- * Mirrors `COMPONENT_EXTENSIONS` in `crates/ruvyxa_graph/src/lib.rs`. The two
+ * Mirrors `COMPONENT_EXTENSIONS` in `crates/ruvyxa_graph/src/discovery.rs`. The two
  * halves both used to pass a single literal `layout.tsx` / `template.tsx` down
  * their nested walk while accepting `page.jsx` as a route, so a project written
  * in `.jsx` lost every layout and template in both hosts at once — no
  * diagnostic, a successful build, and a page rendered without its
  * `<html>`/`<body>` shell. `.tsx` is probed first, so a project holding a stray
  * `layout.jsx` beside its `layout.tsx` composes the file it always did.
+ *
+ * Named for its Rust twin rather than in this file's own casing. It was
+ * `componentExtensions` for one reason: `check-cross-language-constants.mjs`
+ * pairs declarations by name, so a matching name would have failed as an
+ * unregistered pair — and the fix was to rename the constant rather than to
+ * register it. A rule kept out of the gate by its spelling is exactly what the
+ * gate exists to stop.
  */
-const componentExtensions = ['tsx', 'jsx']
+const COMPONENT_EXTENSIONS = ['tsx', 'jsx']
 
 /** The file names `stem` may take, in probe order. */
-function routeFileNames(stem, extensions = componentExtensions) {
+function routeFileNames(stem, extensions = COMPONENT_EXTENSIONS) {
   return extensions.map((extension) => `${stem}.${extension}`)
 }
 

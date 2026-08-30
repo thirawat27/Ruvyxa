@@ -252,8 +252,8 @@ export const DOCUMENT_CACHE_CONTROL = 'public, max-age=0, must-revalidate'
  * `ssr` and `ppr` are absent because their document is produced for this request:
  * it may carry one visitor's data, it may still be streaming, and it is
  * `no-store` either way, so there is nothing for a validator to be about. The
- * same table is `document_validator_strategies` in
- * `crates/ruvyxa_graph/src/lib.rs`; both are replayed against
+ * same table is `DOCUMENT_VALIDATOR_STRATEGIES` in
+ * `crates/ruvyxa_graph/src/cache_policy.rs`; both are replayed against
  * `tests/fixtures/deploy-output-conformance.json`.
  */
 export const DOCUMENT_VALIDATOR_STRATEGIES = Object.freeze(['ssg', 'csr', 'isr'])
@@ -1962,14 +1962,27 @@ function createFetchMiddleware(config, trustedProxies = [], ingressHeaders = [],
       normalizedRequestId(request.headers.get('x-request-id')) ??
       `ruvyxa-${(nextRequestId++).toString(16)}`
 
+    // The limiter runs first, preflight included.
+    //
+    // This used to answer a preflight before the limiter saw it, so an `OPTIONS`
+    // cost nothing here and one token on the native host — where the limiter
+    // deliberately sits *outside* CORS, as `CorsPolicy` in
+    // `crates/ruvyxa_middleware/src/builtin.rs` explains at length. The same
+    // `rateLimit.max` therefore bought a different number of real requests
+    // depending on where the project was deployed, and a browser doing
+    // cross-origin work sends one preflight per request it cannot simplify.
+    //
+    // A 429 for a preflight still owes the browser its CORS headers. Without
+    // them the page sees an opaque network failure rather than a rate limit,
+    // which is the same reasoning behind `RateLimitLayerWithKey::with_cors` on
+    // the native side.
     let response
-    const preflight = corsPreflightResponse(request, cors)
-    if (preflight) {
-      response = preflight
+    const limited = rateLimitResponse(request, rate, buckets, trustedProxies, ingressHeaders)
+    if (limited) {
+      response = withCorsHeaders(limited, request, cors)
     } else {
-      const limited = rateLimitResponse(request, rate, buckets, trustedProxies, ingressHeaders)
-      response = limited ?? (await next())
-      response = withCorsHeaders(response, request, cors)
+      const preflight = corsPreflightResponse(request, cors)
+      response = preflight ?? withCorsHeaders(await next(), request, cors)
     }
 
     const headers = new Headers(response.headers)

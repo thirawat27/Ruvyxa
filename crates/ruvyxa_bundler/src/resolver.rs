@@ -2481,6 +2481,31 @@ fn is_project_local(path: &Path, project_root: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// A drive-relative subpath is not a subpath.
+    ///
+    /// On Windows `C:foo` means "foo, relative to the current directory on drive
+    /// C" — it carries a `Prefix` component, so joining it onto a package
+    /// directory does not land inside that directory at all. The same string is
+    /// an ordinary file name on Unix, which is what makes it easy to miss.
+    #[test]
+    fn a_drive_relative_subpath_is_refused() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let pkg = temp.path().join("node_modules").join("pkg");
+        std::fs::create_dir_all(&pkg).expect("mkdir");
+        std::fs::write(pkg.join("index.js"), b"export default 1\n").expect("write");
+
+        // The ordinary case still resolves, or this test proves nothing.
+        assert!(resolve_package_relative(&pkg, "index.js").is_some());
+
+        for drive_relative in ["C:index.js", "C:/index.js", "C:\\index.js"] {
+            assert_eq!(
+                resolve_package_relative(&pkg, drive_relative),
+                None,
+                "{drive_relative} is not a path inside the package",
+            );
+        }
+    }
+
     /// The Rust half of the shared ordering table.
     ///
     /// Everything this side sorts into an artifact comes out in `str::cmp`

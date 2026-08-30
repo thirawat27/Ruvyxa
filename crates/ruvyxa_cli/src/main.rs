@@ -439,6 +439,40 @@ struct PluginCreateArgs {
     dir: Option<PathBuf>,
 }
 
+/// End quietly when the reader of our output goes away.
+///
+/// `ruvyxa routes | head -3` is an ordinary thing to type, and it used to end in
+/// a panic: `head` exits after three lines, the next `println!` fails, and
+/// Rust's macro panics on a failed write. The message names `stdout` and a
+/// broken pipe, which reads like a bug in the command rather than like the
+/// pipeline working exactly as intended.
+///
+/// This is a process-level policy rather than 87 edited call sites. There are 64
+/// `println!`s in this crate and 23 more in `ruvyxa_dev_server`, and a closing
+/// pipe is felt by whichever one prints next, so guarding a few of them moves
+/// the panic rather than removing it. `ruvyxa_tui` already routes its own seven
+/// through a writer that treats `BrokenPipe` as the end of the work; this
+/// covers everything that does not.
+///
+/// Rust ignores `SIGPIPE` at startup precisely so a write returns `EPIPE` and
+/// the program can decide. This decides: restore the default, and the process is
+/// terminated by the signal before the failed write can panic — which is what
+/// every other tool in a pipeline does. There is nothing to flush at that point,
+/// because the thing that would have read it is gone.
+///
+/// Windows has no `SIGPIPE`. A closed pipe surfaces as an ordinary write error
+/// there, and a panic hook matching on a message std does not promise would be
+/// worse than the panic. Left as it is, and said so here rather than implied by
+/// a `cfg` with no comment.
+fn quiet_on_a_closed_pipe() {
+    #[cfg(unix)]
+    // SAFETY: `signal` with `SIG_DFL` restores the platform default for a signal
+    // this process has not installed a handler for, before any thread is spawned.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -462,6 +496,8 @@ async fn main() -> anyhow::Result<()> {
         // results on stdout, everything transient beside them on stderr.
         .with_writer(std::io::stderr)
         .init();
+
+    quiet_on_a_closed_pipe();
 
     let cli = Cli::parse_from(normalized_cli_args(std::env::args_os()));
 

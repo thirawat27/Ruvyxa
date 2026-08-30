@@ -394,22 +394,6 @@ const WINDOWS_VERBATIM_PREFIX: &str = "\\\\?\\";
 #[cfg(windows)]
 const WINDOWS_VERBATIM_UNC_PREFIX: &str = "\\\\?\\UNC\\";
 
-/// Spell a path already in hand without its Windows extended-length prefix.
-///
-/// Separate from [`normalized_canonical_path`] because the two answer different
-/// questions. That one asks the file system what a path really is; this one only
-/// respells the path it is given, touching no disk — which is what a lookup key
-/// needs, and a key that canonicalized would pay a syscall for every module a
-/// bundle loads.
-///
-/// The prefix matters because it is contagious: a root carrying it hands it to
-/// every path derived from it, while a path the same build receives from a Node
-/// worker never has one. Two spellings of one file then fail to compare equal,
-/// and the failure surfaces nowhere near the comparison — a server-components
-/// build whose root had been canonicalized lost every `'use server'`
-/// substitution and was refused as `RUV1820`, naming an import the project is
-/// right to have.
-///
 /// Join a diagnostic code and a message without repeating a code the message
 /// already carries.
 ///
@@ -471,6 +455,22 @@ fn starts_with_diagnostic_code(message: &str) -> bool {
 
 /// A no-op on other platforms and on any Windows path without the prefix.
 #[must_use]
+/// Spell a path already in hand without its Windows extended-length prefix.
+///
+/// Separate from [`normalized_canonical_path`] because the two answer different
+/// questions. That one asks the file system what a path really is; this one only
+/// respells the path it is given, touching no disk — which is what a lookup key
+/// needs, and a key that canonicalized would pay a syscall for every module a
+/// bundle loads.
+///
+/// The prefix matters because it is contagious: a root carrying it hands it to
+/// every path derived from it, while a path the same build receives from a Node
+/// worker never has one. Two spellings of one file then fail to compare equal,
+/// and the failure surfaces nowhere near the comparison — a server-components
+/// build whose root had been canonicalized lost every `'use server'`
+/// substitution and was refused as `RUV1820`, naming an import the project is
+/// right to have.
+///
 pub fn without_verbatim_prefix(path: &std::path::Path) -> std::path::PathBuf {
     #[cfg(windows)]
     {

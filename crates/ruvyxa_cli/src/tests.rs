@@ -1850,9 +1850,14 @@ fn an_emitted_bundle_and_its_source_map_agree_after_the_shared_import() {
             .expect("sourcesContent")
             .iter()
             .map(|value| {
+                // `null` is a legal entry meaning "content not available", and
+                // reading it as an empty line list would let this test locate a
+                // token at a position no source has. Every source in this
+                // fixture carries content, so a `null` here means the map is not
+                // the one the assertions below are written against.
                 value
                     .as_str()
-                    .unwrap_or_default()
+                    .expect("every source in this fixture carries its content")
                     .lines()
                     .map(str::to_string)
                     .collect::<Vec<_>>()

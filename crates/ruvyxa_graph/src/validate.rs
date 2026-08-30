@@ -37,20 +37,6 @@ impl ValidationReport {
     }
 }
 
-/// Every project module the routes reach that does **not** live in `app/`.
-///
-/// `ruvyxa build` stages the application into `<out>/server/` and `ruvyxa start`
-/// compiles pages from that copy, so a module the copy does not contain cannot
-/// be resolved at request time. Only `app/` and two hard-coded directory names
-/// were staged, and the ordinary layout — `app/` beside `lib/` — therefore
-/// answered a request-time render with
-/// `RUV1801 cannot resolve '../../lib/x'`, naming a path under `.ruvyxa` that
-/// the author never wrote. A page importing the same module through a tsconfig
-/// alias worked, because that path resolves from the project root.
-///
-/// Returned as absolute, normalized paths. Anything under `node_modules` is
-/// left out: a deployed function bundles what it needs, and `start` resolves
-/// packages from the project's own tree.
 /// Routes that would render one of `modules` on the server *and* hydrate it in
 /// the browser, paired with the module they reach.
 ///
@@ -103,6 +89,20 @@ pub fn hydrated_routes_reaching(
     found
 }
 
+/// Every project module the routes reach that does **not** live in `app/`.
+///
+/// `ruvyxa build` stages the application into `<out>/server/` and `ruvyxa start`
+/// compiles pages from that copy, so a module the copy does not contain cannot
+/// be resolved at request time. Only `app/` and two hard-coded directory names
+/// were staged, and the ordinary layout — `app/` beside `lib/` — therefore
+/// answered a request-time render with
+/// `RUV1801 cannot resolve '../../lib/x'`, naming a path under `.ruvyxa` that
+/// the author never wrote. A page importing the same module through a tsconfig
+/// alias worked, because that path resolves from the project root.
+///
+/// Returned as absolute, normalized paths. Anything under `node_modules` is
+/// left out: a deployed function bundles what it needs, and `start` resolves
+/// packages from the project's own tree.
 pub fn reachable_project_modules(root: &Path, manifest: &RouteManifest) -> BTreeSet<PathBuf> {
     let canonical_root = normalized_canonical_path(root);
     let canonical_app = normalized_canonical_path(&manifest.app_dir);

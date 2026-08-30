@@ -9,7 +9,8 @@
  *
  * The Rust half is `route_runtime_declarations_match_the_shared_conformance_table`
  * and `edge_unavailable_builtins_match_the_shared_conformance_table` in
- * `crates/ruvyxa_graph/src/lib.rs`.
+ * `crates/ruvyxa_graph/src/tests.rs`; the list itself is `EDGE_UNAVAILABLE_BUILTINS`
+ * in `crates/ruvyxa_graph/src/render.rs`.
  */
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'

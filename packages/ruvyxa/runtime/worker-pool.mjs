@@ -112,7 +112,7 @@ import { compareEntryKeys } from './order.mjs'
  * served dynamically with no diagnostic anywhere.
  *
  * Held to the same list as `STATIC_PARAMS_EXPORTS` in
- * `crates/ruvyxa_graph/src/lib.rs`, which decides whether a route *has* static
+ * `crates/ruvyxa_graph/src/exports.rs`, which decides whether a route *has* static
  * params; this decides what to call when it does. Recognising a name in one and
  * not the other is a route that discovers as SSG and then pre-renders nothing.
  */

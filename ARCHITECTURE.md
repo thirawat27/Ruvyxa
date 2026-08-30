@@ -409,7 +409,7 @@ alphabetically. The table below maps each user-visible concern to its primary so
 | --------------------------------- | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------- |
 | Command parsing and orchestration | `crates/ruvyxa_cli/src/main.rs`                                                  | CLI surface, argument precedence, dispatch                             | [CLI & Build Pipeline](#cli-architecture)           |
 | Configuration translation         | `crates/ruvyxa_cli/src/config.rs`, `packages/ruvyxa/runtime/config-renderer.mjs` | Config files, validation, runtime config hand-off                      | [CLI & Build Pipeline](#cli-architecture)           |
-| Route discovery and validation    | `crates/ruvyxa_graph/src/lib.rs`                                                 | File conventions, manifests, rendering detection, boundary diagnostics | [Route Discovery](#route-discovery-and-validation)  |
+| Route discovery and validation    | `crates/ruvyxa_graph/src/`                                                       | File conventions, manifests, rendering detection, boundary diagnostics | [Route Discovery](#route-discovery-and-validation)  |
 | Client compilation and linking    | `crates/ruvyxa_bundler/src`                                                      | AST scanning, resolution, boundary checks, output                      | [Bundler](#bundler)                                 |
 | HTTP serving and rendering        | `crates/ruvyxa_dev_server/src`                                                   | Axum routes, request dispatch, HMR, render cache, security application | [Dev Server](#dev-server)                           |
 | Middleware and plugin bridge      | `crates/ruvyxa_middleware/src` and `packages/ruvyxa/runtime/plugin-runtime.mjs`  | Middleware stacking and JavaScript-plugin communication                | [Middleware](#middleware)                           |
@@ -666,7 +666,11 @@ matching to canonical forms). This makes `ruvyxa BUILD --Target node` equivalent
 
 ## Route Discovery and Validation
 
-**Crate**: `ruvyxa_graph` **Module**: `crates/ruvyxa_graph/src/lib.rs`
+**Crate**: `ruvyxa_graph` **Modules**: `discovery.rs` (the `app/` walk and the layout, template and
+sibling chains), `parallel.rs` (`@name` slots and intercepting routes), `render.rs` (strategy,
+runtime target and hydration detection), `exports.rs` (route-export lexing), `manifest.rs` (the
+serde contract and the manifest write), `validate.rs` and `conflicts.rs` (boundary and conflict
+diagnostics), `cache_policy.rs`, and `graph.rs` (the per-run module cache)
 
 ### Summary
 

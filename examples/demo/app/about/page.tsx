@@ -1,3 +1,5 @@
+import { SITE_FACTS } from '~/lib/site-facts'
+
 export const meta = {
   title: 'About',
   description: 'A static nested route rendered from app/about/page.tsx.',
@@ -13,8 +15,13 @@ export default function About() {
         Rendered from <code>app/about/page.tsx</code> — a static page with no dynamic parameters.
       </p>
       <p>
-        This demonstrates basic file-system routing: every <code>page.tsx</code> file becomes a
-        route at its directory path.
+        This demonstrates basic {SITE_FACTS.routingModel} routing: every <code>page.tsx</code> file
+        becomes a route at its directory path.
+      </p>
+      <p>
+        The sentence above reads a value from <code>lib/site-facts.ts</code>, imported as{' '}
+        <code>{SITE_FACTS.aliasPrefix}lib/site-facts</code> — a tsconfig <code>paths</code> alias,
+        resolved by both module graphs, from a module that lives outside <code>app/</code>.
       </p>
     </main>
   )

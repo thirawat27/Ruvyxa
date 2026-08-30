@@ -73,6 +73,36 @@ function createStatic(options: StaticAdapterOptions = {}): Adapter {
   }
 }
 
+/**
+ * Build output an `outputDir` may not be spelled after.
+ *
+ * Not the same set as the build's own `BUILD_OUTPUT_DIRS` and
+ * `BUILD_OUTPUT_FILES` in `crates/ruvyxa_cli/src/build.rs`, and deliberately so
+ * — which is why it is written out here rather than derived. It differs in two
+ * directions, and both matter:
+ *
+ * - `cache` is protected here and is not in either Rust list. It is still a
+ *   directory the build writes into, and a static site written over it destroys
+ *   the compile cache.
+ * - `deploy` and `static` are in the Rust list and are *not* protected here.
+ *   They are where adapter output is supposed to go, and this adapter's own
+ *   error message tells the author to use one of them.
+ *
+ * `keeps-step-with-the-build-output` in this package's tests holds the
+ * relationship, so a directory added to the build cannot quietly become
+ * writable from here.
+ */
+const PROTECTED_BUILD_OUTPUT = new Set([
+  'assets',
+  'build.json',
+  'cache',
+  'client',
+  'client-report.json',
+  'manifest.json',
+  'prerender',
+  'server',
+])
+
 function normalizeOutputDir(value: string | undefined): string {
   const normalized = (value ?? 'static').trim().replaceAll('\\', '/')
   const segments = normalized.split('/')
@@ -91,18 +121,7 @@ function normalizeOutputDir(value: string | undefined): string {
   // that also took it out from behind `client`, and an `outputDir` spelled
   // after it would write the static site over the file the pre-renderer and
   // every adapter function read.
-  if (
-    [
-      'assets',
-      'build.json',
-      'cache',
-      'client',
-      'client-report.json',
-      'manifest.json',
-      'prerender',
-      'server',
-    ].includes(segments[0])
-  ) {
+  if (PROTECTED_BUILD_OUTPUT.has(segments[0])) {
     throw new Error(
       '[RUV2001] staticAdapter: "outputDir" overlaps protected build output; use a directory such as static or deploy/public',
     )

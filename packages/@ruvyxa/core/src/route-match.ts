@@ -82,7 +82,7 @@ function escapeRegex(value: string): string {
  * Without the `u` flag it is exactly `[A-Za-z0-9_]`, and a bracketed segment
  * whose name falls outside it is not rejected — it falls through to the literal
  * branch below and becomes an ordinary URL component. Route discovery in
- * `crates/ruvyxa_graph/src/lib.rs` (`validate_dynamic_name`) used to accept a
+ * `crates/ruvyxa_graph/src/discovery.rs` (`validate_dynamic_name`) used to accept a
  * wider set, so `app/blog/[post-id]/page.tsx` was written into the manifest as
  * a dynamic route and compiled here to the literal path `/blog/[post-id]`: a
  * route that passed `ruvyxa check`, appeared in the route table, and matched no

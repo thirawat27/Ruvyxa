@@ -852,6 +852,96 @@ mod tests {
         );
     }
 
+    /// The shared preflight table, replayed against the layered stack.
+    ///
+    /// `tests/packages/ruvyxa/serverless-handler.test.mjs` replays the same
+    /// cases against `createHandler`. The two hosts disagreed about this: here
+    /// the limiter sits outside CORS so an `OPTIONS` is charged, and the
+    /// deployed handler answered preflights before the limiter saw them, so the
+    /// same `rateLimit.max` bought a different number of real requests
+    /// depending on where a project was deployed.
+    #[tokio::test]
+    async fn replays_the_shared_preflight_rate_limit_table() {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/rate-limit-conformance.json");
+        let fixture: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&fixture_path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", fixture_path.display())),
+        )
+        .expect("the rate-limit fixture is valid JSON");
+
+        let cases = fixture["preflightCases"]["cases"]
+            .as_array()
+            .expect("the fixture carries preflight cases");
+        assert!(!cases.is_empty(), "an empty table asserts nothing");
+
+        for case in cases {
+            let name = case["name"].as_str().expect("each case is named");
+            let preflight = case["preflight"].as_bool().unwrap_or(false);
+            let inner = tower::service_fn(|_request: Request<Body>| async {
+                Ok::<_, Infallible>(Response::new(Body::from("handled")))
+            });
+            let mut service = RateLimitLayerWithKey::from_config(
+                &RateLimitConfig {
+                    max_requests: case["max"].as_u64().expect("max") as usize,
+                    window_secs: case["windowSeconds"].as_u64().expect("windowSeconds"),
+                    key_by: "ip".to_string(),
+                },
+                TrustedProxies::default(),
+            )
+            .with_cors(Some(test_cors_layer().policy()))
+            .layer(inner);
+
+            let request = || {
+                let mut builder = Request::builder().header(header::ORIGIN, "https://app.example");
+                if preflight {
+                    builder = builder
+                        .method(axum::http::Method::OPTIONS)
+                        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST");
+                }
+                builder.body(Body::empty()).unwrap()
+            };
+
+            let refused_at = case["expectRefusedAt"].as_u64().expect("expectRefusedAt") as usize;
+            let total = case["requests"].as_u64().expect("requests") as usize;
+            let mut refusal = None;
+            for attempt in 1..=total {
+                let response = service.call(request()).await.unwrap();
+                if attempt < refused_at {
+                    assert_ne!(
+                        response.status(),
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "{name}: request {attempt} was refused early",
+                    );
+                } else if attempt == refused_at {
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "{name}: request {attempt} was not refused, so a preflight cost nothing",
+                    );
+                    refusal = Some(response);
+                }
+            }
+
+            let refusal = refusal.expect("the table names a refusal");
+            if case["expectAllowOrigin"].as_bool().unwrap_or(false) {
+                assert_eq!(
+                    refusal.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+                    Some(&HeaderValue::from_static("https://app.example")),
+                    "{name}: a refusal the browser cannot read is an opaque failure",
+                );
+            }
+            if case["expectNegotiationHeaders"].as_bool() == Some(false) {
+                assert!(
+                    !refusal
+                        .headers()
+                        .contains_key(header::ACCESS_CONTROL_ALLOW_METHODS),
+                    "{name}: a refusal is not a preflight answer",
+                );
+            }
+        }
+    }
+
     /// The preflight-only headers are the ones a browser reads from a preflight
     /// response and nowhere else. This asserts both halves in one place so a
     /// change that moves a header across the line has to move this test too.

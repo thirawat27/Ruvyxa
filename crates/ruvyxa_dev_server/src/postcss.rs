@@ -257,9 +257,19 @@ impl PostcssRunner {
 /// created, and both name components are guessable by anyone who can watch the
 /// process table. On a shared build host that is a readable copy of the
 /// project's stylesheet and root path, and a directory an attacker can put
-/// content into for the PostCSS runner to read. `tempfile` creates with
-/// `O_EXCL` and mode 0700 and retries on collision, so the directory is this
-/// process's or the call fails.
+/// content into for the PostCSS runner to read. `tempfile` creates exclusively
+/// and retries on collision, so the directory is this process's or the call
+/// fails.
+///
+/// The mode is asked for explicitly. `tempfile` creates a *file* with 0600, but
+/// a *directory* with the platform default -- 0755 under a normal umask -- which
+/// its own documentation says and which CI proved: the first version of this
+/// asserted 0700 and failed on Linux with `mode was 755`. Since the whole point
+/// here is that another user on a shared host cannot read the project's compiled
+/// stylesheet or learn its absolute root, the permission has to be requested
+/// rather than assumed. Requested rather than applied afterwards, too:
+/// `tempfile` passes it to `DirBuilderExt::mode`, so the directory exists with
+/// that mode from the moment it exists and there is no window to race.
 struct ScratchDir {
     /// Held for its `Drop`, which removes the directory however the run ends.
     dir: tempfile::TempDir,
@@ -267,10 +277,16 @@ struct ScratchDir {
 
 impl ScratchDir {
     fn new() -> Result<Self> {
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("ruvyxa-postcss-");
+        // Windows has no mode; the per-user temp directory is what answers there.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            builder.permissions(std::fs::Permissions::from_mode(0o700));
+        }
         Ok(Self {
-            dir: tempfile::Builder::new()
-                .prefix("ruvyxa-postcss-")
-                .tempdir()?,
+            dir: builder.tempdir()?,
         })
     }
 
@@ -315,9 +331,14 @@ mod tests {
     /// Not readable by anyone else on the host.
     ///
     /// The project's whole compiled stylesheet and the absolute project root go
-    /// into this directory. On Windows the equivalent guarantee comes from the
-    /// per-user temp directory rather than from a mode, so there is nothing to
-    /// assert there -- stated rather than silently skipped.
+    /// into this directory. This assertion earned its place immediately: the
+    /// first version of `ScratchDir` relied on `tempfile` for the mode, and CI
+    /// answered `mode was 755` -- `tempfile` restricts a temporary *file* to the
+    /// owner and creates a temporary *directory* with the platform default.
+    ///
+    /// On Windows the equivalent guarantee comes from the per-user temp
+    /// directory rather than from a mode, so there is nothing to assert there --
+    /// stated rather than silently skipped.
     #[cfg(unix)]
     #[test]
     fn the_scratch_directory_is_private_to_this_user() {
