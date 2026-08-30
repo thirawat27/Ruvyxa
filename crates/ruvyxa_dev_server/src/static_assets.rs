@@ -928,6 +928,14 @@ pub(crate) async fn serve_client_file(
 /// Resolution is driven entirely by the requested URL extension, never by the
 /// `Accept` header, so responses are not content-negotiated and need no `Vary`.
 pub(crate) fn resolve_public_asset(public_dir: &Path, request_path: &str) -> Option<PathBuf> {
+    // Decided here as well as in the callers. Every one of them checks the same
+    // rule today, which is exactly why this function stopped checking it -- and
+    // a resolver that joins whatever it is handed reaches the filesystem with a
+    // traversal the moment a new caller forgets. The join below is the first
+    // thing in this file to touch a user-shaped path, so the rule belongs on it.
+    if !is_safe_relative_path(request_path) {
+        return None;
+    }
     let requested = public_dir.join(request_path);
     if requested.is_file() {
         return contained_public_asset(public_dir, &requested);
@@ -984,7 +992,19 @@ pub(crate) fn resolve_public_asset(public_dir: &Path, request_path: &str) -> Opt
 /// IO error, a filesystem returning `EIO`, or a path past `MAX_PATH` on a
 /// Windows host without long-path support -- and in every one of those a
 /// refusal is the answer this function's name promises.
+///
+/// Containment is decided lexically *before* either `.exists()` call. The
+/// canonicalising check below is what proves containment once symlinks are
+/// resolved, but it can only run after the process has already asked the disk
+/// about a path the caller may have had no right to name -- and asking is
+/// itself an answer, because a candidate built from a request path could
+/// otherwise be used to probe which files exist outside the root. The lexical
+/// pass refuses a `..` component without a syscall; the canonicalising pass
+/// still refuses the symlink that no component walk can see.
 pub(crate) fn contained_public_asset(public_dir: &Path, candidate: &Path) -> Option<PathBuf> {
+    if !lexically_contained(public_dir, candidate) {
+        return None;
+    }
     if !public_dir.exists() || !candidate.exists() {
         return None;
     }
@@ -992,6 +1012,25 @@ pub(crate) fn contained_public_asset(public_dir: &Path, candidate: &Path) -> Opt
         ruvyxa_diagnostics::without_verbatim_prefix(&fs::canonicalize(public_dir).ok()?);
     let candidate = ruvyxa_diagnostics::without_verbatim_prefix(&fs::canonicalize(candidate).ok()?);
     candidate.starts_with(&public_root).then_some(candidate)
+}
+
+/// Whether `candidate` names a path under `root` by component text alone.
+///
+/// Only `Normal` components may follow the root: `..` escapes it, and a root or
+/// prefix component means the candidate was rebuilt from an absolute path
+/// rather than joined onto `root`. `.` is refused too, though it resolves to
+/// the same file -- nothing in this crate builds a candidate that way, and a
+/// guard that answers "no" for a path it was not designed to reason about is
+/// the one that stays correct.
+///
+/// Text, not disk: this decides whether the candidate may be looked at, so it
+/// may not itself look. Symlink containment is the canonicalising check's job.
+fn lexically_contained(root: &Path, candidate: &Path) -> bool {
+    candidate.strip_prefix(root).is_ok_and(|relative| {
+        relative
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+    })
 }
 
 /// Extensions that only ever name a build or public asset.

@@ -85,8 +85,18 @@ describe('the version bump leaves manifests formatted', () => {
 
     assert.match(
       source,
-      /prettier --write/,
+      /'--write', \.\.\.rewritten/,
       'the bump has to reformat what it wrote, or the release fails `format:check`',
+    )
+
+    // Argv, never a command string. The file list is built from workspace
+    // directory names read off disk, so interpolating it into a shell command
+    // let a directory containing a quote, a space, or a `$` decide what the
+    // bump executed. `execFileSync` with an argument array cannot be reached
+    // that way; `execSync` always can, which is why its absence is the check.
+    assert.ok(
+      !/\bexecSync\(/.test(source),
+      'the bump must not build a shell command string from paths it read off disk',
     )
   })
 })

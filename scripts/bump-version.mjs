@@ -8,9 +8,26 @@
  *   node scripts/bump-version.mjs 1.2.0    # set all to 1.2.0
  */
 import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
-import { execSync } from 'node:child_process'
-import { join } from 'node:path'
+import { execFileSync } from 'node:child_process'
+import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
 import { workspacePackageDirs } from './workspace-packages.mjs'
+
+/**
+ * Prettier's CLI entry, resolved from this workspace's own installed copy.
+ *
+ * Run as `node <bin> --write <file>...` rather than `npx prettier ...` inside a
+ * shell, and with the file list as argv entries rather than interpolated into a
+ * command string. A manifest path is a directory name off disk, so the shell
+ * form let a workspace directory containing a quote, a space, or a `$` decide
+ * what the bump executed -- and `npx` is a `.cmd` on Windows, which is why the
+ * shell was there at all. Addressing the JavaScript entry through `node` needs
+ * no shell on any host, so both problems leave together.
+ */
+function prettierBin() {
+  const resolve = createRequire(import.meta.url).resolve
+  return join(dirname(resolve('prettier/package.json')), 'bin', 'prettier.cjs')
+}
 
 const rootPkg = JSON.parse(readFileSync('package.json', 'utf8'))
 const newVersion = process.argv[2] || rootPkg.version
@@ -110,7 +127,7 @@ for (const dir of templateDirs) {
 
 // Regenerate Cargo.lock so --locked CI checks pass
 try {
-  execSync('cargo update --workspace', { stdio: 'inherit' })
+  execFileSync('cargo', ['update', '--workspace'], { stdio: 'inherit' })
   console.log('Cargo.lock regenerated')
 } catch (err) {
   console.error('Warning: failed to update Cargo.lock — run `cargo update --workspace` manually')
@@ -122,7 +139,7 @@ try {
 // should not quietly reformat something it did not change.
 if (rewritten.length > 0) {
   try {
-    execSync(`npx prettier --write ${rewritten.map((file) => JSON.stringify(file)).join(' ')}`, {
+    execFileSync(process.execPath, [prettierBin(), '--write', ...rewritten], {
       stdio: 'inherit',
     })
     console.log(`Formatted ${rewritten.length} manifest(s)`)

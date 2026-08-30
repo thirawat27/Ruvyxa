@@ -23,8 +23,8 @@
     "plugin": "ruvyxa plugin"
   },
   "dependencies": {
-    "@ruvyxa/react": "^1.1.3",
-    "ruvyxa": "^1.1.3",
+    "@ruvyxa/react": "^1.1.4",
+    "ruvyxa": "^1.1.4",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },
