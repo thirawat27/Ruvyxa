@@ -936,6 +936,10 @@ pub(crate) fn resolve_public_asset(public_dir: &Path, request_path: &str) -> Opt
     if !is_safe_relative_path(request_path) {
         return None;
     }
+    // Again, inline, beside the join it guards. See `is_safe_relative_path`.
+    if request_path.contains("../") {
+        return None;
+    }
     let requested = public_dir.join(request_path);
     if requested.is_file() {
         return contained_public_asset(public_dir, &requested);
@@ -1090,6 +1094,30 @@ pub(crate) fn is_convertible_image_url(path: &Path) -> bool {
     )
 }
 
+/// Whether `path` is a relative path this server may resolve against a root.
+///
+/// ## The `contains("../")` line that sits beside each caller
+///
+/// Every function in this crate that turns a request string into a filesystem
+/// path refuses `../` again, inline, one statement before the join — a rule
+/// this function already enforces, and by a stronger reading: a `..` segment is
+/// refused wherever it appears, including a trailing `foo/..` that no `../`
+/// substring covers.
+///
+/// It is written out anyway because it is the only shape a static analyser
+/// reads as a traversal check. CodeQL's Rust path-injection query recognises
+/// exactly one sanitiser — a literal `contains("..")`, `contains("../")`, or
+/// `contains("..\\")` guarding the block that uses the value. A segment walk is
+/// invisible to it, and so is *this* function from a caller's point of view: a
+/// guard does not travel across a call, so a `bool`-returning validator, however
+/// correct, leaves the caller looking unvalidated. Every asset path in this
+/// crate was reported that way, and wrapping the substring test in a helper
+/// would have reported them all over again.
+///
+/// The separator form rather than a bare `".."`: a file named `sprite..png` is
+/// legal and is not a traversal, and refusing it to satisfy a pattern match
+/// would be answering the analyser instead of the attacker. One call rather than
+/// two, because the backslash spelling is already refused outright below.
 pub(crate) fn is_safe_relative_path(path: &str) -> bool {
     if path.is_empty() || path.contains('\\') {
         return false;

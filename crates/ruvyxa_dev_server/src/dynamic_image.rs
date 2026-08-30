@@ -203,6 +203,12 @@ pub(crate) async fn optimize(
             "image src must not contain a query or fragment",
         ));
     }
+    // Again, inline, beside the join it guards. See `is_safe_relative_path`.
+    if relative.contains("../") {
+        return Err(DynamicImageError::InvalidRequest(
+            "image src must not traverse outside the public directory",
+        ));
+    }
     let candidate = public_dir.join(relative);
     let file = contained_public_asset(public_dir, &candidate).ok_or(DynamicImageError::NotFound)?;
     let extension = file

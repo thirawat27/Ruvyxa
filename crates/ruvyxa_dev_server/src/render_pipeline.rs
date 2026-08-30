@@ -1448,6 +1448,10 @@ fn prerendered_document_path(prerender_dir: &Path, request_path: &str) -> Option
     if !sanitized.is_empty() && !is_safe_relative_path(sanitized) {
         return None;
     }
+    // Again, inline, beside the join it guards. See `is_safe_relative_path`.
+    if sanitized.contains("../") {
+        return None;
+    }
     Some(if sanitized.is_empty() {
         prerender_dir.join("index.html")
     } else {

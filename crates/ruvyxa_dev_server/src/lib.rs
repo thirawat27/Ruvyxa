@@ -4180,6 +4180,24 @@ Host: localhost
         assert!(resolve_public_asset(&public, "../secret.txt").is_none());
     }
 
+    /// The traversal rule is textual, and a text rule can overreach.
+    ///
+    /// `resolve_public_asset` refuses `../` on the string as well as by segment,
+    /// because a substring test is the only traversal check a static analyser
+    /// follows. Widening that literal to a bare `".."` — the other spelling the
+    /// analyser accepts — would pass the same scan and 404 a legitimate file,
+    /// silently, for as long as nobody happened to ship one. So the file this
+    /// asserts on is exactly that: a name with two dots in it and no traversal.
+    #[test]
+    fn serves_a_public_file_whose_name_merely_contains_two_dots() {
+        let temp = tempfile::tempdir().unwrap();
+        let public = temp.path().join("public");
+        fs::create_dir_all(&public).unwrap();
+        fs::write(public.join("sprite..png"), b"png").unwrap();
+
+        assert!(resolve_public_asset(&public, "sprite..png").is_some());
+    }
+
     #[test]
     fn applies_default_security_headers() {
         let response = html_response(StatusCode::OK, "<main />".to_string());
