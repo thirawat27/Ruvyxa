@@ -453,8 +453,6 @@ fn starts_with_diagnostic_code(message: &str) -> bool {
     matches!(rest[4..].chars().next(), None | Some(' ') | Some(':'))
 }
 
-/// A no-op on other platforms and on any Windows path without the prefix.
-#[must_use]
 /// Spell a path already in hand without its Windows extended-length prefix.
 ///
 /// Separate from [`normalized_canonical_path`] because the two answer different
@@ -471,6 +469,8 @@ fn starts_with_diagnostic_code(message: &str) -> bool {
 /// substitution and was refused as `RUV1820`, naming an import the project is
 /// right to have.
 ///
+/// A no-op on other platforms and on any Windows path without the prefix.
+#[must_use]
 pub fn without_verbatim_prefix(path: &std::path::Path) -> std::path::PathBuf {
     #[cfg(windows)]
     {

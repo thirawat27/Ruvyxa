@@ -220,7 +220,7 @@ export function collectLayouts(appDir, routeDir) {
 /**
  * `template` files from the app root down to the route, root first.
  *
- * Mirrors `template_chain()` in `crates/ruvyxa_graph/src/lib.rs`.
+ * Mirrors `template_chain()` in `crates/ruvyxa_graph/src/discovery.rs`.
  */
 export function collectTemplates(appDir, routeDir) {
   return collectNested(appDir, routeDir, routeFileNames('template'))
@@ -232,7 +232,7 @@ export function collectTemplates(appDir, routeDir) {
  *
  * One level contributes at most one entry: the names are one module spelled in
  * several extensions, and the first that exists wins. Mirrors `nested_chain()`
- * in `crates/ruvyxa_graph/src/lib.rs`, held level with it by
+ * in `crates/ruvyxa_graph/src/discovery.rs`, held level with it by
  * `tests/fixtures/route-chain-conformance.json`.
  */
 function collectNested(appDir, routeDir, fileNames) {
@@ -267,7 +267,7 @@ function pushFirstExisting(collection, directory, fileNames) {
  * Walks the same directory chain the layout and template chains do, and at each
  * level resolves every `@name` folder against the route's remaining segments: a
  * page inside the slot for that sub-path, else the slot's `default.tsx`, else
- * nothing at all. Mirrors `route_slots()` in `crates/ruvyxa_graph/src/lib.rs`,
+ * nothing at all. Mirrors `route_slots()` in `crates/ruvyxa_graph/src/parallel.rs`,
  * which decides the same thing for the Rust bundler — a slot one host composes
  * and the other does not is a panel that appears under `ruvyxa build` and
  * vanishes under `ruvyxa dev`.
