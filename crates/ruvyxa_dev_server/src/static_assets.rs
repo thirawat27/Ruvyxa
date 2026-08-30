@@ -1274,7 +1274,7 @@ pub const DEFAULT_VIEWPORT_META: &str =
 /// above, and the icon link derived from `public/`. An application that declares
 /// either owns it — a project shipping `public/ruvyxa.png` alongside its own
 /// icon used to get both links in the document, and the framework's won.
-#[must_use]
+///
 /// The lowercased copy is deliberate, and it is the fast answer.
 ///
 /// This runs with the whole document in hand on every buffered SSR response, so
@@ -1290,6 +1290,7 @@ pub const DEFAULT_VIEWPORT_META: &str =
 /// The needles are constants for the same reason: composing six of them with
 /// `format!` allocated six `String`s per rendered page to search for six values
 /// that never change.
+#[must_use]
 pub fn document_head_defaults(document: &str, asset_links: &str) -> String {
     let lower = document.to_ascii_lowercase();
     let mut head = String::with_capacity(asset_links.len() + DEFAULT_VIEWPORT_META.len());

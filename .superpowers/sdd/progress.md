@@ -596,3 +596,36 @@ reported Phase 5 complete without doing it. Checking afterwards:
 The lesson is the claim, not the code: "verify at the end" is not a plan unless something makes the
 end verify it. Two agents dying mid-flight left one task complete and one empty, and nothing in the
 tree distinguished them.
+
+## 2026-08-30 — the two failures `test:full-flow` reported were both in the probe
+
+Neither was a Windows defect. The script only runs under `pwsh`, so Windows is simply where its own
+staleness surfaces.
+
+**`manifest cache: served stale bundle URL after a same-length rewrite`.** The probe rewrote
+`client/route-manifest.json` and then asserted the SSR document had changed. Those are two files
+with two readers: the browser router fetches the lean published table over the network, while the
+document takes its script `src` from `prebuilt_client_assets`, which reads `client-report.json` at
+the build root — the only reader the cache under test sits in front of. The probe perturbed a file
+that code path never opens, so it reported a stale cache on every run and could never have reported
+anything else. What made the mistake easy is that two comments assert `route-manifest.json` is "the
+file every host reads to find a route's scripts", and one of them was in this script. That one is
+corrected; the one in `client_bundle.rs` is about the stylesheet URL and was not verified here.
+
+**`E3: invalid route segment -> RUV1002 not reported`.** `RUV1002` and `RUV1017` answered to the
+same number until SARIF started describing every result of either kind with whichever the report
+happened to list first. `discovery.rs` split them — a catch-all with a child segment is `RUV1017`, a
+malformed bracket segment stayed `RUV1002` — and this probe kept naming the old one. Both docs
+tables already carried `RUV1017`; only the probe had not moved.
+
+## 2026-08-30 — a doc comment split by an attribute now has a gate
+
+`///` lines become `#[doc]` attributes and concatenate in source order, so an attribute standing
+between two halves of one block leaves the _first_ half as the item's rendered summary. That is what
+F-19 was, and `static_assets.rs` held a second live instance of the same shape.
+
+`scripts/check-doc-comment-attachment.mjs` reports it, and is in `release:validate`. It was
+sabotage-verified: reintroducing the F-19 shape turns it red naming the line, removing it turns it
+green. It deliberately does not attempt F-16's shape — a doc block that changes subject halfway —
+because that needs to know what the prose is about. So one of the three past instances remains
+outside any gate, and this is written down rather than implied away.

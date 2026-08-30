@@ -305,12 +305,15 @@ foreach ($name in @("server", "client", "assets", "prerender")) {
     }
 }
 
-# The lean route table the browser router fetches, and the file every host
-# reads to find a route's scripts. It is machine-read on the SSR path, so
-# assert it parses and carries per-route entries rather than only that the file
-# exists. The verbose build report that used to sit beside it as
-# `client/manifest.json` now lives outside the published directory, at the build
-# root as `client-report.json`.
+# The lean route table the browser router fetches over the network to match and
+# load a route without a document load. It is machine-read, so assert it parses
+# and carries per-route entries rather than only that the file exists.
+#
+# It is *not* what the SSR document reads for its script `src`: that comes from
+# the verbose build report, which used to sit beside this file as
+# `client/manifest.json` and now lives outside the published directory at the
+# build root as `client-report.json`. Section 7 below perturbs that one, and
+# said so only after naming this one for a while.
 $ClientManifestPath = Join-Path $ClientDir "route-manifest.json"
 if (Test-Path $ClientManifestPath) {
     $clientManifest = Get-Content $ClientManifestPath -Raw | ConvertFrom-Json
@@ -626,11 +629,19 @@ Write-Section "CLIENT MANIFEST CACHE"
 #     stores whole documents keyed by URL with an effectively infinite TTL, so
 #     re-requesting the same path replays the cached HTML and the manifest is
 #     never re-read -- the check would report a stale bundle no matter what.
+#   * It must perturb `client-report.json`, not `client/route-manifest.json`.
+#     Those are two files with two readers: the browser router fetches the lean
+#     published table, while the SSR document takes its script `src` from the
+#     build report through `prebuilt_client_assets`, which is the only reader
+#     the cache under test sits in front of. Rewriting the published table
+#     changed a file this code path never opens, so the served document kept the
+#     original bundle URL and the probe reported a stale cache on every run.
+$ClientBuildReportPath = Join-Path $OutDir "client-report.json"
 $CacheProbeBefore = "/catchall/manifest-cache-probe-a"
 $CacheProbeAfter  = "/catchall/manifest-cache-probe-b"
 $cacheServer = Start-RuvyxaServer -Mode "start" -Port $Ports.DevCache
 try {
-    $originalManifest = Get-Content -LiteralPath $ClientManifestPath -Raw
+    $originalManifest = Get-Content -LiteralPath $ClientBuildReportPath -Raw
     $before = Invoke-App -Port $Ports.DevCache -Path $CacheProbeBefore
     $beforeSrc = ([regex]::Match($before.Content, 'src="(/__ruvyxa/client/[^"]+)"')).Groups[1].Value
 
@@ -644,7 +655,7 @@ try {
             Write-Warn "manifest cache: bundle URL has no hash suffix to perturb (skipping)"
         } else {
             try {
-                Set-Content -LiteralPath $ClientManifestPath `
+                Set-Content -LiteralPath $ClientBuildReportPath `
                     -Value $originalManifest.Replace($beforeSrc, $rewrittenSrc) -Force -NoNewline
                 $after = Invoke-App -Port $Ports.DevCache -Path $CacheProbeAfter
                 if ($after.Content -match [regex]::Escape($rewrittenSrc)) {
@@ -653,7 +664,7 @@ try {
                     Write-Fail "manifest cache: served stale bundle URL after a same-length rewrite"
                 }
             } finally {
-                Set-Content -LiteralPath $ClientManifestPath -Value $originalManifest -Force -NoNewline
+                Set-Content -LiteralPath $ClientBuildReportPath -Value $originalManifest -Force -NoNewline
             }
         }
     }
@@ -736,10 +747,15 @@ export default function Home() {
 }
 
 # E3: catch-all segment that is not in final position.
+#
+# `RUV1017`, not `RUV1002`. The two answered to the same number until SARIF
+# started describing every result of either kind with whichever the report
+# happened to list first; `discovery.rs` split them, `RUV1002` kept the commoner
+# "malformed segment" meaning, and this probe was left naming the old one.
 Use-TemporaryRoute -Root "app/full-flow-bad-segment" -Files @{
     "[...slug]/extra/page.tsx" = "export default function CatchAll() { return null }"
 } -Body {
-    Test-Diagnostic "E3: invalid route segment" "RUV1002"
+    Test-Diagnostic "E3: catch-all is not the final segment" "RUV1017"
 }
 
 # E4: two dynamic segments that resolve to the same route.
