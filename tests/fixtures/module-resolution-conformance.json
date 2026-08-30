@@ -98,7 +98,15 @@
     "rest onto it, and Windows reads `C:` plus a relative path as drive-",
     "relative — which lands back on the same file whenever the project is on",
     "drive C. `cargo run -p ruvyxa_cli -- build --root examples/demo` is what",
-    "actually fails, immediately and on the first route."
+    "actually fails, immediately and on the first route.",
+    "",
+    "The `imports` section covers Node's `#` specifiers, which neither graph",
+    "implemented. `packageNameAndExportKey` read `#internal/db` as a package named",
+    "`#internal` with the key `./db`, that matched nothing, and the specifier reached",
+    "the \"unknown bare specifier is external\" branch — so a client bundle carried a",
+    "hoisted `import … from \"#dep\"` with no build error at all and the browser failed",
+    "to load the module. Both halves now answer a `#` key through the same subpath",
+    "matcher `exports` uses, and this table is what keeps them saying the same thing."
   ],
   "exports": [
     {
@@ -615,32 +623,51 @@
         {
           "name": "an installed package wins over a project directory of the same name",
           "specifier": "utils",
-          "expect": { "kind": "resolved", "path": "node_modules/utils/index.js" }
+          "expect": {
+            "kind": "resolved",
+            "path": "node_modules/utils/index.js"
+          }
         },
         {
           "name": "an installed package with no project directory beside it resolves",
           "specifier": "installed",
-          "expect": { "kind": "resolved", "path": "node_modules/installed/index.js" }
+          "expect": {
+            "kind": "resolved",
+            "path": "node_modules/installed/index.js"
+          }
         },
         {
           "name": "a tsconfig paths alias wins over both the package and the directory",
           "specifier": "shadowed",
-          "expect": { "kind": "resolved", "path": "src/alias-target.ts" }
+          "expect": {
+            "kind": "resolved",
+            "path": "src/alias-target.ts"
+          }
         },
         {
           "name": "a project directory no package answers is refused, not dropped",
           "specifier": "components/Button",
-          "expect": { "kind": "diagnostic", "code": "RUV1808", "names": "Button.tsx" }
+          "expect": {
+            "kind": "diagnostic",
+            "code": "RUV1808",
+            "names": "Button.tsx"
+          }
         },
         {
           "name": "a project file at the root is refused the same way",
           "specifier": "helpers",
-          "expect": { "kind": "diagnostic", "code": "RUV1808", "names": "helpers.ts" }
+          "expect": {
+            "kind": "diagnostic",
+            "code": "RUV1808",
+            "names": "helpers.ts"
+          }
         },
         {
           "name": "a bare specifier nothing anywhere answers stays external",
           "specifier": "absent-everywhere",
-          "expect": { "kind": "external" }
+          "expect": {
+            "kind": "external"
+          }
         }
       ]
     },
@@ -659,12 +686,18 @@
         {
           "name": "baseUrl answers before node_modules, exactly as tsc resolves it",
           "specifier": "utils",
-          "expect": { "kind": "resolved", "path": "utils/index.ts" }
+          "expect": {
+            "kind": "resolved",
+            "path": "utils/index.ts"
+          }
         },
         {
           "name": "baseUrl reaches a nested project file a bare specifier cannot",
           "specifier": "components/Button",
-          "expect": { "kind": "resolved", "path": "components/Button.tsx" }
+          "expect": {
+            "kind": "resolved",
+            "path": "components/Button.tsx"
+          }
         }
       ]
     },
@@ -680,14 +713,100 @@
           "name": "an absolute path is answered as a path, not as a package",
           "specifier": "app/page.ts",
           "absolute": true,
-          "expect": { "kind": "resolved", "path": "app/page.ts" }
+          "expect": {
+            "kind": "resolved",
+            "path": "app/page.ts"
+          }
         },
         {
           "name": "a bare specifier a project directory shadows is still refused",
           "specifier": "utils",
-          "expect": { "kind": "diagnostic", "code": "RUV1808", "names": "index.ts" }
+          "expect": {
+            "kind": "diagnostic",
+            "code": "RUV1808",
+            "names": "index.ts"
+          }
         }
       ]
+    }
+  ],
+  "imports": [
+    {
+      "name": "an exact key answers the specifier that spells it",
+      "importsJson": "{\"#dep\":\"./src/dep.js\"}",
+      "key": "#dep",
+      "results": {
+        "client": ["./src/dep.js"],
+        "ssr": ["./src/dep.js"],
+        "edge": ["./src/dep.js"],
+        "react-server": ["./src/dep.js"]
+      }
+    },
+    {
+      "name": "conditions inside an imports target read exactly as they do in exports",
+      "importsJson": "{\"#env\":{\"browser\":\"./src/browser.js\",\"default\":\"./src/server.js\"}}",
+      "key": "#env",
+      "results": {
+        "client": ["./src/browser.js"],
+        "ssr": ["./src/server.js"],
+        "edge": ["./src/server.js"],
+        "react-server": ["./src/server.js"]
+      }
+    },
+    {
+      "name": "one `*` substitutes into the target, the same wildcard grammar exports uses",
+      "importsJson": "{\"#w/*\":\"./src/*.js\"}",
+      "key": "#w/thing",
+      "results": {
+        "client": ["./src/thing.js"],
+        "ssr": ["./src/thing.js"],
+        "edge": ["./src/thing.js"],
+        "react-server": ["./src/thing.js"]
+      }
+    },
+    {
+      "name": "the longest matching prefix wins, so `#f/*` never shadows `#f/deep/*`",
+      "importsJson": "{\"#f/*\":\"./shallow/*.js\",\"#f/deep/*\":\"./deep/*.js\"}",
+      "key": "#f/deep/x",
+      "results": {
+        "client": ["./deep/x.js"],
+        "ssr": ["./deep/x.js"],
+        "edge": ["./deep/x.js"],
+        "react-server": ["./deep/x.js"]
+      }
+    },
+    {
+      "name": "a key the map does not declare is unmatched, not guessed at",
+      "importsJson": "{\"#dep\":\"./src/dep.js\"}",
+      "key": "#absent",
+      "results": {
+        "client": "unmatched",
+        "ssr": "unmatched",
+        "edge": "unmatched",
+        "react-server": "unmatched"
+      }
+    },
+    {
+      "name": "null takes the specifier away, exactly as it does in exports",
+      "importsJson": "{\"#dep\":null}",
+      "key": "#dep",
+      "results": {
+        "client": "blocked",
+        "ssr": "blocked",
+        "edge": "blocked",
+        "react-server": "blocked"
+      }
+    },
+    {
+      "name": "a bare target is left unresolved rather than followed into another package",
+      "importsJson": "{\"#dep\":\"some-package\"}",
+      "key": "#dep",
+      "results": {
+        "client": "unmatched",
+        "ssr": "unmatched",
+        "edge": "unmatched",
+        "react-server": "unmatched"
+      }
     }
   ]
 }

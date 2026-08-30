@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### `#` imports and package self-reference resolve, in both module graphs
+
+Neither graph implemented Node's `imports` map. `#internal/db` was read as a package named
+`#internal` with the subpath `./db`, that matched nothing, and the specifier fell through to the
+"unknown bare specifier is external" branch — so a dependency whose shipped code imports `#dep`
+produced a client bundle carrying a hoisted `import … from "#dep"` with no build error at all, and
+the browser failed to load the module. A package importing itself by name had the same gap.
+
+Both are answered now, through the same subpath matcher `exports` already used, in the Rust resolver
+and in `runtime/compiler.mjs` together. `tests/fixtures/module-resolution-conformance.json` gained
+an `imports` section that each language replays, so the two cannot drift apart again. An `imports`
+target that names another package rather than a package-relative path is deliberately left
+unresolved in both halves; it now reaches the unresolved-client-import report instead of the
+browser.
+
 ### A platform config the adapter kept its hands off is now named
 
 Adapters offer `vercel.json`, `netlify.toml` and their siblings with `skipIfExists`, so a file the

@@ -22,6 +22,7 @@ import {
   packageNameAndExportKey,
   PACKAGE_EXPORT_TARGETS,
   resolveExportsEntry,
+  resolveExportsSubpath,
 } from './package-exports.mjs'
 import {
   containsJsx,
@@ -1590,7 +1591,16 @@ export function resolveSpecifierPath(
   if (resolvedTsconfig) return resolvedTsconfig
   const local = resolveLocalSpecifier(baseDir, specifier)
   if (local) return local
+  if (specifier.startsWith('#')) {
+    // Private to the package that declares it, and nothing else: it is not a
+    // package name, so the walk below would look for a package literally named
+    // `#internal`. Answered from the importer's own `package.json`, the way
+    // Node answers it and the way `resolve_package_imports_specifier` does.
+    return resolvePackageImports(baseDir, specifier, bundleTarget, root)
+  }
   if (platform === 'browser' || bundlePackages || bundleDependencies) {
+    const own = resolveSelfReference(baseDir, specifier, bundleTarget, root)
+    if (own) return own
     return resolvePackage(baseDir, specifier, bundleTarget, root)
   }
   return null
@@ -3143,6 +3153,72 @@ function resolvePackage(baseDir, specifier, bundleTarget, projectRoot) {
   }
 
   return null
+}
+
+/**
+ * The nearest `package.json` above `baseDir`, and the directory holding it.
+ *
+ * Stops at the first `node_modules` boundary going up, because a file inside an
+ * installed package belongs to *that* package: walking past it would answer a
+ * dependency's `#dep` out of the application's manifest. Mirrors
+ * `nearest_package_manifest` in `crates/ruvyxa_bundler/src/resolver.rs`.
+ */
+function nearestPackageManifest(baseDir, projectRoot) {
+  let current = path.resolve(baseDir)
+  const stop = path.resolve(projectRoot)
+  for (;;) {
+    const manifest = readPackageManifest(current)
+    if (manifest) return { pkgDir: current, manifest }
+    if (path.basename(current) === 'node_modules') return null
+    if (current === stop) return null
+    const parent = path.dirname(current)
+    if (parent === current) return null
+    current = parent
+  }
+}
+
+/**
+ * Resolve a `#`-prefixed specifier against the importing package's `imports`.
+ *
+ * Neither graph implemented this: `packageNameAndExportKey` read `#internal/db`
+ * as a package named `#internal`, matched nothing, and the specifier was
+ * treated as external. A dependency whose shipped code imports `#dep` therefore
+ * produced a client bundle carrying a hoisted `import … from "#dep"` with no
+ * build error, and the browser failed to load the module.
+ *
+ * A target that is not package-relative — `"#dep": "some-package"`, which Node
+ * permits — is deliberately left unresolved rather than followed, the same way
+ * the Rust half leaves it, so the two graphs answer alike and the unresolved
+ * specifier reaches the report instead of the browser.
+ */
+function resolvePackageImports(baseDir, specifier, bundleTarget, projectRoot) {
+  const found = nearestPackageManifest(baseDir, projectRoot)
+  if (!found) return null
+  const imports = found.manifest.imports
+  if (!imports || typeof imports !== 'object' || Array.isArray(imports)) return null
+  const resolved = resolveExportsSubpath(imports, specifier, bundleTarget)
+  if (resolved.kind !== 'targets') return null
+  return firstMatch(resolved.targets, (target) => resolveExportTarget(found.pkgDir, target))
+}
+
+/**
+ * Resolve a package importing itself by name, through its own `exports`.
+ *
+ * Node requires `exports` for a self-reference: without it the name is not
+ * importable from inside the package either, so there is no legacy fall-back
+ * here. Tried before the `node_modules` walk because that is where Node tries
+ * it, and because an application named after one of its own dependencies would
+ * otherwise take the dependency.
+ */
+function resolveSelfReference(baseDir, specifier, bundleTarget, projectRoot) {
+  const found = nearestPackageManifest(baseDir, projectRoot)
+  const name = found?.manifest?.name
+  if (typeof name !== 'string' || !found.manifest.exports) return null
+  if (specifier !== name && !specifier.startsWith(`${name}/`)) return null
+  const key = specifier === name ? '.' : `.${specifier.slice(name.length)}`
+  const resolved = resolveExportsEntry(found.manifest.exports, key, bundleTarget)
+  if (resolved.kind !== 'targets') return null
+  return firstMatch(resolved.targets, (target) => resolveExportTarget(found.pkgDir, target))
 }
 
 /** Read a package manifest, treating unreadable JSON as no manifest at all. */

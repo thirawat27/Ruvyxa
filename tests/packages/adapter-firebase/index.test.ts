@@ -93,6 +93,31 @@ describe('firebase', () => {
 
     const handler = output.artifacts?.find((artifact) => artifact.kind === 'function')
     const source = String(handler && 'handlerSource' in handler ? handler.handlerSource : '')
+
+    // The ISR cache directory must not be a fixed name under `os.tmpdir()`.
+    //
+    // It was `os.tmpdir()/ruvyxa-isr-cache` — the same directory for every
+    // Ruvyxa deployment on the host and for every previous build of this one,
+    // read *before* the bundled prerender output, so whatever was there won.
+    // A redeploy served the previous build's documents, whose `<script src>`
+    // names client chunks the new build no longer publishes. On Linux the
+    // parent is mode 1777, so a planted file or symlink at a known route path
+    // was served as that page and written through on the next refresh.
+    assert.doesNotMatch(
+      source,
+      /tmpdir\(\),\s*'ruvyxa-isr-cache'\s*\)/,
+      'the cache directory must carry a per-deployment identity, not a fixed name',
+    )
+    assert.match(
+      source,
+      /createHash\('sha256'\)[\s\S]{0,200}import\.meta\.dirname/,
+      'the identity hashes the build id together with the bundle directory',
+    )
+    assert.match(
+      source,
+      /mkdirSync\(isrCacheDir, \{ recursive: true, mode: 0o700 \}\)/,
+      'created owner-only, because the parent is world-writable on Linux',
+    )
     assert.match(source, /firebase-functions\/v2\/https/)
     assert.match(source, /export const webApp = onRequest/)
     assert.match(source, /os\.tmpdir\(\)/)

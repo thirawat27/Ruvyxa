@@ -36,6 +36,7 @@ const {
   legacyEntryCandidates,
   packageNameAndExportKey,
   resolveExportsEntry,
+  resolveExportsSubpath,
 } = await import(`file://${modulePath.replaceAll('\\', '/')}`)
 
 const contract = JSON.parse(
@@ -60,6 +61,23 @@ describe('package exports resolution', () => {
       for (const target of PACKAGE_EXPORT_TARGETS) {
         assert.deepEqual(
           describeOutcome(resolveExportsEntry(exportsField, testCase.key, target)),
+          testCase.results[target],
+          `${testCase.name} disagrees for target ${target}`,
+        )
+      }
+    })
+  }
+
+  // `imports` is the same grammar under a different key shape, so it is
+  // replayed through the same matcher rather than a parallel one — which is the
+  // whole point of the section: a rule taught to one graph's `#` handling and
+  // not the other is the defect this fixture exists to stop.
+  for (const testCase of contract.imports) {
+    it(`imports: ${testCase.name}`, () => {
+      const importsField = JSON.parse(testCase.importsJson)
+      for (const target of PACKAGE_EXPORT_TARGETS) {
+        assert.deepEqual(
+          describeOutcome(resolveExportsSubpath(importsField, testCase.key, target)),
           testCase.results[target],
           `${testCase.name} disagrees for target ${target}`,
         )

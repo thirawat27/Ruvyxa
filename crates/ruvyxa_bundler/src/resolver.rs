@@ -211,6 +211,15 @@ pub struct ResolveCacheStats {
 #[derive(Debug, Default)]
 struct PackageManifest {
     exports: Option<PackageJsonValue>,
+    /// Node's `imports` map, which answers a `#`-prefixed specifier.
+    ///
+    /// Read with the same grammar as `exports` because it *is* the same
+    /// grammar — conditions, arrays, and one `*` wildcard — differing only in
+    /// that its keys are `#name` rather than `./name`, and that it is looked up
+    /// against the importing package rather than an installed one.
+    imports: Option<PackageJsonValue>,
+    /// The package's own name, which is what makes a self-reference resolvable.
+    name: Option<String>,
     browser: Option<String>,
     module: Option<String>,
     main: Option<String>,
@@ -1268,6 +1277,8 @@ fn parse_package_manifest(content: &str) -> Option<PackageManifest> {
     for (field, value) in fields {
         match (field.as_str(), value) {
             ("exports", value) => manifest.exports = Some(value),
+            ("imports", value) => manifest.imports = Some(value),
+            ("name", PackageJsonValue::String(name)) => manifest.name = Some(name),
             // `browser` also has an object form (a per-file substitution map).
             // Only the string form names an entry point; the map form is
             // deliberately ignored rather than half-honoured.
@@ -1340,6 +1351,135 @@ fn resolve_node_modules_specifier(
     }
 
     PackageExportsResolution::Unavailable
+}
+
+/// The nearest `package.json` above `importer_dir`, and the directory holding it.
+///
+/// Stops at the first `node_modules` boundary going up, because a file inside an
+/// installed package belongs to *that* package: walking past it would answer a
+/// dependency's `#dep` out of the application's manifest. The walk also stops
+/// above `project_root`, so a monorepo sibling outside the project cannot supply
+/// one either.
+fn nearest_package_manifest(
+    cache: &ResolveGraphCache,
+    importer_dir: &Path,
+    project_root: &Path,
+) -> Option<(PathBuf, Arc<PackageManifest>)> {
+    let mut current = Some(importer_dir);
+    while let Some(dir) = current {
+        if let Some(manifest) = cache.package_manifest(&dir.join("package.json")) {
+            return Some((dir.to_path_buf(), manifest));
+        }
+        if dir.file_name().is_some_and(|name| name == "node_modules") {
+            return None;
+        }
+        if dir == project_root {
+            return None;
+        }
+        current = dir.parent();
+    }
+    None
+}
+
+/// Resolve a `#`-prefixed specifier against the importing package's `imports`.
+///
+/// Neither graph implemented this, and the gap was silent rather than loud:
+/// `package_name_and_export_key` read `#internal/db` as a package named
+/// `#internal` with the key `./db`, nothing matched, and the specifier reached
+/// the "unknown bare specifier is external" branch. A dependency whose shipped
+/// code imports `#dep` therefore produced a client bundle carrying a hoisted
+/// `import … from "#dep"` with no build error at all, and the browser failed to
+/// load the module.
+///
+/// A target that is not package-relative — `"#dep": "some-package"`, which Node
+/// permits — is deliberately left unresolved rather than followed. Following it
+/// means re-entering the package walk from the declaring package's directory,
+/// which is a second resolution pass this function does not own; leaving it
+/// unmatched now reaches the diagnostic that reports an unresolvable bare
+/// specifier, so it fails loudly at build time instead of in the browser.
+fn resolve_package_imports_specifier(
+    cache: &ResolveGraphCache,
+    importer_dir: &Path,
+    project_root: &Path,
+    specifier: &str,
+    target: BundleTarget,
+) -> PackageExportsResolution {
+    let Some((pkg_dir, manifest)) = nearest_package_manifest(cache, importer_dir, project_root)
+    else {
+        return PackageExportsResolution::Unavailable;
+    };
+    let Some(PackageJsonValue::Object(map)) = manifest.imports.as_ref() else {
+        return PackageExportsResolution::Unavailable;
+    };
+
+    match resolve_exports_subpath(map, specifier, target) {
+        ExportTargets::Blocked => PackageExportsResolution::Blocked,
+        ExportTargets::Unmatched => PackageExportsResolution::Unavailable,
+        ExportTargets::Targets(targets) => targets
+            .into_iter()
+            .find_map(|entry| resolve_export_target(&pkg_dir, &entry))
+            .map(PackageExportsResolution::Resolved)
+            .unwrap_or(PackageExportsResolution::Unavailable),
+    }
+}
+
+/// Whether `specifier` names the package the importer lives in.
+///
+/// Separate from [`resolve_self_reference`] so the resolution chain can ask the
+/// cheap question — "is this even our own name?" — without paying for a lookup
+/// that answers `Unavailable` for every ordinary dependency.
+fn self_reference_applies(
+    cache: &ResolveGraphCache,
+    importer_dir: &Path,
+    project_root: &Path,
+    specifier: &str,
+) -> bool {
+    let Some((_, manifest)) = nearest_package_manifest(cache, importer_dir, project_root) else {
+        return false;
+    };
+    let Some(name) = manifest.name.as_deref() else {
+        return false;
+    };
+    specifier == name
+        || specifier
+            .strip_prefix(name)
+            .is_some_and(|r| r.starts_with('/'))
+}
+
+/// Resolve `specifier` through the importing package's own `exports`.
+///
+/// Node requires `exports` for a self-reference: without it the name is not
+/// importable from inside the package either, and falling back to the legacy
+/// fields here would make a self-reference resolve where Node refuses it.
+fn resolve_self_reference(
+    cache: &ResolveGraphCache,
+    importer_dir: &Path,
+    project_root: &Path,
+    specifier: &str,
+    target: BundleTarget,
+) -> PackageExportsResolution {
+    let Some((pkg_dir, manifest)) = nearest_package_manifest(cache, importer_dir, project_root)
+    else {
+        return PackageExportsResolution::Unavailable;
+    };
+    let (Some(name), Some(exports)) = (manifest.name.as_deref(), manifest.exports.as_ref()) else {
+        return PackageExportsResolution::Unavailable;
+    };
+    let export_key = match specifier.strip_prefix(name) {
+        Some("") => ".".to_string(),
+        Some(rest) => format!(".{rest}"),
+        None => return PackageExportsResolution::Unavailable,
+    };
+
+    match resolve_exports_entry(exports, &export_key, target) {
+        ExportTargets::Blocked => PackageExportsResolution::Blocked,
+        ExportTargets::Unmatched => PackageExportsResolution::Unavailable,
+        ExportTargets::Targets(targets) => targets
+            .into_iter()
+            .find_map(|entry| resolve_export_target(&pkg_dir, &entry))
+            .map(PackageExportsResolution::Resolved)
+            .unwrap_or(PackageExportsResolution::Unavailable),
+    }
 }
 
 #[cfg(test)]
@@ -2137,6 +2277,22 @@ fn collect_deps_uncached(
                 cache.insert_resolution(&base_dir_str, &specifier, result.clone());
                 result
             }
+        } else if specifier.starts_with('#') {
+            // A `#` specifier is private to the package that declares it and can
+            // be nothing else: `tsconfig` `paths` never spell one, and it is not
+            // a package name, so the walk below would treat `#internal` as a
+            // package named `#internal` and find nothing. Node reads it against
+            // the importer's own `package.json` and so does this.
+            match resolve_package_imports_specifier(
+                cache,
+                base_dir,
+                project_root,
+                &specifier,
+                target,
+            ) {
+                PackageExportsResolution::Resolved(path) => Some(path),
+                PackageExportsResolution::Blocked | PackageExportsResolution::Unavailable => None,
+            }
         } else if specifier.starts_with('/') || Path::new(&specifier).is_absolute() {
             // Absolute path — framework-generated imports. The `is_absolute`
             // half is Windows: a generated entry names
@@ -2159,6 +2315,20 @@ fn collect_deps_uncached(
             // `tests/fixtures/module-resolution-conformance.json`.
             match tsconfig.resolve(&specifier) {
                 Some(path) => Some(path),
+                // A package may import itself by name, which Node answers from
+                // the importing package's own `exports` without consulting
+                // `node_modules` at all. Tried before the walk because that is
+                // where Node tries it, and because an application named after
+                // one of its own dependencies would otherwise take the
+                // dependency.
+                None if self_reference_applies(cache, base_dir, project_root, &specifier) => {
+                    match resolve_self_reference(cache, base_dir, project_root, &specifier, target)
+                    {
+                        PackageExportsResolution::Resolved(path) => Some(path),
+                        PackageExportsResolution::Blocked
+                        | PackageExportsResolution::Unavailable => None,
+                    }
+                }
                 None => match resolve_node_modules_specifier(
                     cache,
                     base_dir,
@@ -3624,6 +3794,104 @@ export default function Card() { return <div className={cn("card")} /> }"#,
         );
     }
 
+    /// A `#` specifier resolves against the importing package's own `imports`.
+    ///
+    /// `package_name_and_export_key` read `#internal/db` as a package named
+    /// `#internal`, matched nothing, and the specifier reached the
+    /// "unknown bare specifier is external" branch — so a client bundle carried
+    /// a hoisted `import … from "#dep"` and the browser failed to load it.
+    #[test]
+    fn resolves_a_package_imports_specifier() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let cache = ResolveGraphCache::new();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src").join("dep.js"), "export const x = 1;").unwrap();
+        fs::write(root.join("src").join("wild.js"), "export const y = 2;").unwrap();
+        fs::write(
+            root.join("package.json"),
+            r##"{"name":"app","imports":{"#dep":"./src/dep.js","#w/*":"./src/*.js"}}"##,
+        )
+        .unwrap();
+
+        let resolved = resolve_package_imports_specifier(
+            &cache,
+            &root.join("src"),
+            root,
+            "#dep",
+            BundleTarget::Client,
+        );
+        assert!(
+            matches!(&resolved, PackageExportsResolution::Resolved(path)
+                if path.ends_with("dep.js")),
+            "got {resolved:?}"
+        );
+
+        let wildcard = resolve_package_imports_specifier(
+            &cache,
+            &root.join("src"),
+            root,
+            "#w/wild",
+            BundleTarget::Client,
+        );
+        assert!(
+            matches!(&wildcard, PackageExportsResolution::Resolved(path)
+                if path.ends_with("wild.js")),
+            "one `*` is the same wildcard grammar `exports` uses: {wildcard:?}"
+        );
+
+        assert!(
+            matches!(
+                resolve_package_imports_specifier(
+                    &cache,
+                    &root.join("src"),
+                    root,
+                    "#absent",
+                    BundleTarget::Client
+                ),
+                PackageExportsResolution::Unavailable
+            ),
+            "an undeclared `#` specifier stays unresolved rather than guessing"
+        );
+    }
+
+    /// A package importing itself by name goes through its own `exports`.
+    #[test]
+    fn resolves_a_self_reference() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let cache = ResolveGraphCache::new();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src").join("api.js"), "export const x = 1;").unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"name":"@scope/app","exports":{"./api":"./src/api.js"}}"#,
+        )
+        .unwrap();
+
+        assert!(
+            self_reference_applies(&cache, &root.join("src"), root, "@scope/app/api"),
+            "the specifier opens with this package's own name"
+        );
+        assert!(
+            !self_reference_applies(&cache, &root.join("src"), root, "@scope/apple"),
+            "a longer name that merely starts the same way is a different package"
+        );
+
+        let resolved = resolve_self_reference(
+            &cache,
+            &root.join("src"),
+            root,
+            "@scope/app/api",
+            BundleTarget::Client,
+        );
+        assert!(
+            matches!(&resolved, PackageExportsResolution::Resolved(path)
+                if path.ends_with("api.js")),
+            "got {resolved:?}"
+        );
+    }
+
     #[test]
     fn resolves_package_exports_subpath() {
         let tmp = tempfile::tempdir().unwrap();
@@ -4031,6 +4299,29 @@ export default function Card() { return <div className={cn("card")} /> }"#,
             for (target_name, expected) in case["results"].as_object().unwrap() {
                 let resolved =
                     resolve_exports_entry(&exports, key, conformance_target(target_name));
+                assert_eq!(
+                    &conformance_outcome(&resolved),
+                    expected,
+                    "{name} disagrees with the shared fixture for target {target_name}"
+                );
+            }
+        }
+
+        // `imports` is the same grammar under a different key shape, so it is
+        // replayed through the same matcher rather than a parallel one — which
+        // is the whole point of the section: a rule taught to one graph's `#`
+        // handling and not the other is the defect this fixture exists to stop.
+        for case in fixture["imports"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let PackageJsonValue::Object(map) =
+                serde_json::from_str::<PackageJsonValue>(case["importsJson"].as_str().unwrap())
+                    .unwrap()
+            else {
+                panic!("{name}: importsJson must be an object");
+            };
+            let key = case["key"].as_str().unwrap();
+            for (target_name, expected) in case["results"].as_object().unwrap() {
+                let resolved = resolve_exports_subpath(&map, key, conformance_target(target_name));
                 assert_eq!(
                     &conformance_outcome(&resolved),
                     expected,

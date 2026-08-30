@@ -135,8 +135,16 @@ function resolveExportsValue(value, target, wildcard) {
   return UNMATCHED
 }
 
-/** Match `key` against the subpath patterns of an `exports` map. */
-function resolveExportsSubpath(map, key, target) {
+/**
+ * Match `key` against the subpath patterns of an `exports` or `imports` map.
+ *
+ * Exported because `imports` is the same grammar under a different key shape:
+ * `#name` and `#name/*` where `exports` writes `./name` and `./name/*`, matched
+ * by exact key then by the single-`*` pattern with the longest prefix. The Rust
+ * half calls `resolve_exports_subpath` for a `#` specifier for the same reason,
+ * and `tests/fixtures/module-resolution-conformance.json` holds the two level.
+ */
+export function resolveExportsSubpath(map, key, target) {
   if (Object.hasOwn(map, key)) return resolveExportsValue(map[key], target, undefined)
 
   let best = null

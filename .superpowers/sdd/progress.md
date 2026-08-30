@@ -629,3 +629,41 @@ sabotage-verified: reintroducing the F-19 shape turns it red naming the line, re
 green. It deliberately does not attempt F-16's shape — a doc block that changes subject halfway —
 because that needs to know what the prose is about. So one of the three past instances remains
 outside any gate, and this is written down rather than implied away.
+
+## 2026-08-30 — Phase 4 walked finding by finding, and one of 57 was open
+
+The plan file ticks nothing, so the only way to answer "is Phase 4 done" was to check each of its 57
+finding IDs against the tree. Fifty-six had landed, several of them resolved better than the finding
+prescribed:
+
+- `BUNF-04` was closed by _removing_ the divergent rule rather than teaching it to both graphs, and
+  turning a project-root shadow into a hard error that names the file.
+- `ASSET-03` was measured and kept: the lowercased copy is 13-22x faster than scanning in place, and
+  the doc comment now says so with the numbers.
+- `CLIC-04` is covered by the process-level `SIGPIPE` policy from `F-17`, which reaches
+  `ruvyxa_dev_server` too — a superset of the three call sites the finding named.
+
+`BUNF-07` was open, and only its first half: the second half — a report naming every bare specifier
+a client bundle could not resolve, with `is_marker_package` exempt — had already landed as
+`UNRESOLVED_CLIENT_IMPORTS`, drained by `build.rs`.
+
+The first half is now done in both graphs together. `imports` and `name` were missing from
+`parse_package_manifest`'s field match, which is why the first run of the new Rust tests said
+`Unavailable` — a genuine red before the green. `#` specifiers and self-reference are answered
+through the same subpath matcher `exports` already used, rather than a second grammar, and
+`tests/fixtures/module-resolution-conformance.json` gained an `imports` section replayed by both
+languages. Flipping one expectation in it turns both red on the same case, which is the only thing
+that keeps two implementations of one rule honest.
+
+An `imports` target naming another package is left unresolved in both halves rather than followed:
+following it means re-entering the package walk from the declaring package's directory, which is a
+second resolution pass neither function owns. Left unresolved it reaches the report, so it fails at
+build time instead of in the browser — which is the outcome the finding wanted anyway.
+
+## 2026-08-30 — where the audit programme actually stands
+
+Phases 1, 2, 3, 4 and 6 have now each been walked item by item against the tree, not against the
+plan's checkboxes, which were never ticked and are worth nothing as a record. Two things were found
+open this way that a sampled check had passed: `Task 11`'s first half (`RUV-H6`, a skipped platform
+config nothing read) and `BUNF-07`'s first half. Both are the same failure of method — a task that
+reads as one item is two, and landing one half looks exactly like landing both.
