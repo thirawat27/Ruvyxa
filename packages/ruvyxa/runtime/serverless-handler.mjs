@@ -28,6 +28,7 @@
 import { runAction, validateActionPayload, validateActionRequest } from './action-runtime.mjs'
 import { methodNotAllowed, normalizeResponse, selectRouteHandler } from './api-methods.mjs'
 import {
+  collectRevalidatedTags,
   collectRevalidations,
   requestContext,
   runWithRequestContext,
@@ -414,6 +415,7 @@ export function createHandler(options) {
     security,
     readPrerendered,
     writePrerendered,
+    revalidateTags,
     supportedStrategies = ['ssr', 'ssg', 'csr', 'isr', 'ppr', 'api'],
     middleware,
     i18n,
@@ -830,6 +832,7 @@ export function createHandler(options) {
     })
     const result = await runWithRequestContext(context, () => selected.handler({ request, params }))
     recordRevalidations(collectRevalidations(context))
+    recordRevalidatedTags(collectRevalidatedTags(context))
     const response = normalizeResponse(result, `${method} ${new URL(request.url).pathname}`)
     // A `HEAD` answered by the route's `GET` keeps every header and drops the
     // content. There is no transport under a serverless function to do it: the
@@ -1138,6 +1141,7 @@ export function createHandler(options) {
         module.rscAction({ reference, body }),
       )
       recordRevalidations(collectRevalidations(context))
+      recordRevalidatedTags(collectRevalidatedTags(context))
       return new Response(payload, {
         headers: {
           'content-type': 'text/x-component; charset=utf-8',
@@ -1156,6 +1160,35 @@ export function createHandler(options) {
   }
 
   /** Apply the `revalidatePath()` calls a handler made, with the shared bounds. */
+  /**
+   * Hand the tags this request queued to the project's own store.
+   *
+   * Only the project's store, because only the project knows what a tag labels.
+   * A platform cache is keyed by URL and has nothing to look a tag up by — the
+   * one exception being Netlify's tag purge, which this deliberately does not
+   * reach for: its tags are the ones the adapter derives from a pathname, not
+   * the ones an application writes.
+   *
+   * Awaited nowhere. The response has already been produced by the time this
+   * runs, and a store that is slow or unreachable must not hold it — the same
+   * trade `markForcedRevalidation` makes for a path. A rejection is reported
+   * rather than swallowed, because a tag that silently failed to clear is an
+   * application serving data it believes it invalidated.
+   */
+  function recordRevalidatedTags(tags) {
+    if (tags.length === 0 || typeof revalidateTags !== 'function') return
+    if (tags.length > MAX_REVALIDATIONS_PER_REQUEST) {
+      console.warn(
+        `[ruvyxa] Received more than ${MAX_REVALIDATIONS_PER_REQUEST} tag revalidations from one ` +
+          'request; ignoring them rather than doing unbounded work after the response.',
+      )
+      return
+    }
+    Promise.resolve(revalidateTags(tags)).catch((error) => {
+      console.error('[ruvyxa] cache.handler revalidateTag failed:', error)
+    })
+  }
+
   function recordRevalidations(revalidations) {
     if (revalidations.length > MAX_REVALIDATIONS_PER_REQUEST) {
       failClosedRevalidations(

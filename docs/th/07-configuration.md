@@ -342,5 +342,19 @@ export ทั้งสองตัวไม่บังคับ: ให้แ�
 นี่คือ seam เดียวกับที่ Next.js เปิดไว้ในชื่อ `cacheHandler` ใน `next.config.js`
 และมีอยู่ด้วยเหตุผลเดียวกัน — framework เลือก store ที่แอปใช้ร่วมกันแทนแอปไม่ได้
 
+`revalidateTag()` เคลียร์ `cache()` ของ process นี้ทันทีเหมือนเดิมทุกอย่าง ถ้า handler export
+`revalidateTag` ด้วย tag ที่ request นั้นสั่งไว้จะถูกส่งให้มัน หลังตอบ response —
+ซึ่งคือสิ่งที่ทำให้การ invalidate ไปถึงทุก instance ไม่ใช่แค่ instance ที่รับ mutation นั้น:
+
+```js
+export async function revalidateTag(tags) {
+  await store.dropEverythingLabelled(tags)
+}
+```
+
+ไม่บังคับ และไม่มี fallback ของ platform: tag ติดป้ายอะไรก็ตามที่แอปตัดสินใจติด ส่วน cache ของ
+platform ที่ key ด้วย URL ไม่มีอะไรให้ค้นด้วย tag ได้ โปรเจกต์ที่ไม่ประกาศ handler ทำงานเหมือนเดิม
+คือ `revalidateTag()` เคลียร์ process เดียว
+
 **ก่อนหน้า:** [UI, navigation, metadata และ asset](06-ui-navigation-metadata-and-assets.md) ·
 **ถัดไป:** [Plugin และ middleware](08-plugins-middleware.md)

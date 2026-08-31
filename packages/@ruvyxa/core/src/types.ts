@@ -158,6 +158,11 @@ export interface RuvyxaConfig {
      *   revalidate: number,
      *   forced: boolean,
      * ) {}
+     *
+     * // Optional. Called after the response with every tag `revalidateTag()`
+     * // queued during the request, so an invalidation reaches every instance
+     * // instead of only the one that served the mutation.
+     * export async function revalidateTag(tags: string[]) {}
      * ```
      *
      * The store a deployed build writes ISR documents to is normally the

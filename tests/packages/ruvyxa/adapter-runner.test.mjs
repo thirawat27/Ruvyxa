@@ -454,6 +454,11 @@ export default createHandler({
         /const documentCacheHandler = \{/,
         'the registry must carry the project store, not the null placeholder',
       )
+      assert.match(
+        registry,
+        /revalidateTag: __ruvyxaCacheHandler\.revalidateTag/,
+        'a handler that invalidates by tag must reach the deployed function too',
+      )
 
       assert.equal(
         await renderThroughFunction(functionDir, '/cached'),

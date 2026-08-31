@@ -1568,6 +1568,10 @@ function documentCacheHandlerPrelude() {
     'export const documentCacheHandler = {',
     '  read: __ruvyxaCacheHandler.read,',
     '  write: __ruvyxaCacheHandler.write,',
+    // Optional, and absent from most handlers: a project that caches only
+    // documents has nothing to invalidate by tag. The handler reads it as
+    // `typeof … === 'function'`, so `undefined` is a complete answer.
+    '  revalidateTag: __ruvyxaCacheHandler.revalidateTag,',
     '}',
   ].join('\n')
 }

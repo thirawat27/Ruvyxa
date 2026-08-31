@@ -610,10 +610,58 @@ export function invalidateCache(keyOrPrefix?: string): void {
   cacheStore.invalidate(keyOrPrefix)
 }
 
-/** Invalidate deployment-cache entries carrying one exact tag. */
+/**
+ * Invalidate cache entries carrying one exact tag.
+ *
+ * Two things happen, and the second is the one that matters in production.
+ * This process's own `cache()` store drops the entries immediately — that is
+ * what this function has always done, and it still works at module scope with
+ * no request in flight.
+ *
+ * The tag is *also* queued onto the request, when there is one, so the host can
+ * hand it to the project's cache handler after the response. Without that step
+ * the invalidation is per-instance: an application running several instances
+ * behind one domain clears the one that served the mutation and leaves every
+ * other instance answering from the entry it just invalidated. Queued rather
+ * than called inline for the same reason `revalidatePath()` is — a store write
+ * performed before the response is a write a failed request still made.
+ *
+ * A project that declares no `cache.handler` sees no change: there is nothing
+ * for the host to hand the tag to, and the local invalidation is the whole
+ * behaviour, as before.
+ */
 export function revalidateTag(tag: string): void {
-  cacheStore.invalidateTag(validateCacheTag(tag))
+  const validated = validateCacheTag(tag)
+  cacheStore.invalidateTag(validated)
+
+  // Outside a request this is a no-op rather than an error. `revalidateTag()`
+  // has always been callable from module scope and from a background task, and
+  // making it throw there would break callers to add a queue they have no
+  // response to attach to.
+  const host = (globalThis as Record<string, unknown>)[CONTEXT_KEY] as
+    RequestContextHost | undefined
+  const context = host?.peek?.() ?? host?.current() ?? null
+  if (!context?.revalidateTags) return
+  if (
+    !context.revalidateTags.has(validated) &&
+    context.revalidateTags.size >= MAX_REVALIDATED_TAGS_PER_REQUEST
+  ) {
+    throw new Error(
+      `revalidateTag() accepts at most ${MAX_REVALIDATED_TAGS_PER_REQUEST} distinct tags in one ` +
+        'request. Invalidate a broader tag rather than enumerating narrow ones.',
+    )
+  }
+  context.revalidateTags.add(validated)
 }
+
+/**
+ * Tags one request may queue for the shared store.
+ *
+ * The same bound `revalidatePath()` uses, for the same reason: the list crosses
+ * the worker protocol, and an unbounded one is a request that can make the host
+ * do unbounded work after it has already answered.
+ */
+const MAX_REVALIDATED_TAGS_PER_REQUEST = 64
 
 /**
  * Get current cache statistics for observability.
@@ -734,6 +782,8 @@ export interface RequestContext {
   draft: boolean
   /** URLs {@link revalidatePath} has queued for the host to refresh. */
   revalidate?: Set<string>
+  /** Tags `revalidateTag()` asked the host to drop from the shared store. */
+  revalidateTags?: Set<string>
   /**
    * `Set-Cookie` values a server action or API route has queued.
    *

@@ -155,12 +155,26 @@ export function requestContext({ headerPairs, headers, method = 'GET', url = '/'
     // same path revalidated twice in one handler is one instruction, and the
     // host has to send each one across the worker protocol.
     revalidate: new Set(),
+    // Tags `revalidateTag()` asked the server to drop from the shared store.
+    //
+    // Separate from `revalidate` because the two mean different things: a path
+    // names one document, a tag names whatever the project labelled with it,
+    // and only the project's own store knows what that is. Both travel the same
+    // way — collected after the response, acted on by the host — because a
+    // store write that happens before the response is a write that a failed
+    // request still performed.
+    revalidateTags: new Set(),
   }
 }
 
 /** URLs this request asked to revalidate, for the host to act on. */
 export function collectRevalidations(context) {
   return context?.revalidate ? [...context.revalidate] : []
+}
+
+/** Tags this request asked to revalidate, for the host to act on. */
+export function collectRevalidatedTags(context) {
+  return context?.revalidateTags ? [...context.revalidateTags] : []
 }
 
 /**

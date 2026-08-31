@@ -17,6 +17,7 @@ import { describe, it } from 'node:test'
 import {
   collectRevalidations,
   DRAFT_MODE_COOKIE as RUNTIME_DRAFT_COOKIE,
+  collectRevalidatedTags,
   requestContext,
   runWithRequestContext,
   usedRequestContext,
@@ -28,6 +29,7 @@ import {
   headers,
   parseCookieHeader,
   revalidatePath,
+  revalidateTag,
 } from '../../../packages/@ruvyxa/core/dist/server.js'
 
 const CONTEXT_KEY = '__RUVYXA_REQUEST_CONTEXT__'
@@ -188,6 +190,58 @@ describe('outside a request', () => {
         return true
       })
     }
+  })
+})
+
+describe('revalidateTag', () => {
+  // It used to clear this process's `cache()` store and stop there. For one
+  // container that is the whole job; for an application running several
+  // instances behind one domain it clears the instance that served the mutation
+  // and leaves every other one answering from the entry it just invalidated.
+  // Queuing the tag is what lets the host hand it to a shared store, which is
+  // what `CacheHandler.revalidateTag` is for in Next.js.
+  it('collects tags for the host to hand to the shared store', () => {
+    const store = requestContext({ headerPairs: [] })
+    runWithRequestContext(store, () => {
+      revalidateTag('products')
+      revalidateTag('reviews')
+    })
+    assert.deepEqual(collectRevalidatedTags(store), ['products', 'reviews'])
+  })
+
+  it('collapses a tag revalidated more than once', () => {
+    const store = requestContext({ headerPairs: [] })
+    runWithRequestContext(store, () => {
+      revalidateTag('products')
+      revalidateTag('products')
+    })
+    assert.deepEqual(collectRevalidatedTags(store), ['products'])
+  })
+
+  // The path queue and the tag queue name different things — one document
+  // against whatever the application labelled — and collapsing them would make
+  // a tag drop a page nobody asked to drop.
+  it('does not queue a path, and revalidatePath does not queue a tag', () => {
+    const store = requestContext({ headerPairs: [] })
+    runWithRequestContext(store, () => {
+      revalidateTag('products')
+      revalidatePath('/blog/hello')
+    })
+    assert.deepEqual(collectRevalidatedTags(store), ['products'])
+    assert.deepEqual(collectRevalidations(store), ['/blog/hello'])
+  })
+
+  it('does not make the caller uncacheable', () => {
+    const store = requestContext({ headerPairs: [] })
+    runWithRequestContext(store, () => revalidateTag('products'))
+    assert.equal(usedRequestContext(store), false)
+  })
+
+  // Callable at module scope and from a background task since it existed.
+  // Adding a queue must not turn that into an error — there is no response to
+  // attach one to, and the local invalidation is still the whole behaviour.
+  it('stays a local invalidation outside a request', () => {
+    assert.doesNotThrow(() => revalidateTag('products'))
   })
 })
 

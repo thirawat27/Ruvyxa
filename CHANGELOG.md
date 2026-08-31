@@ -2,6 +2,22 @@
 
 ## v1.1.4 (2026-08-31)
 
+### `revalidateTag()` reaches every instance, not only the one that served the mutation
+
+It cleared this process's own `cache()` entries and stopped there. For a single container that is
+the whole job. For an application running several instances behind one domain it clears the instance
+that handled the mutation and leaves every other one answering from the entry it just invalidated —
+and nothing said so.
+
+Tags a request queues are now handed to `cache.handler`'s optional `revalidateTag` export after the
+response, the same way `revalidatePath()` already reaches the platform's purge. The local
+invalidation is unchanged and still works at module scope with no request in flight, so a project
+that declares no handler sees no difference.
+
+There is deliberately no platform fallback: a tag labels whatever the application decided to label
+with it, and a platform cache keyed by URL has nothing to look one up by. This is the seam Next.js
+exposes as `CacheHandler.revalidateTag`.
+
 ### `cache.handler` — a project can name the store its deployed documents live in
 
 Where a deployed build keeps a revalidated ISR or PPR document has been the platform's answer: a

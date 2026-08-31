@@ -372,7 +372,12 @@ try {
  */
 export function documentCacheOptionsSource(platformRead: string, platformWrite: string): string {
   return `  readPrerendered: documentCacheHandler?.read ?? ${platformRead},
-  writePrerendered: documentCacheHandler?.write ?? ${platformWrite},`
+  writePrerendered: documentCacheHandler?.write ?? ${platformWrite},
+  // No platform fallback, on purpose. A tag labels whatever the application
+  // decided to label with it, and a platform cache keyed by URL has nothing to
+  // look one up by — so a project with no handler keeps the behaviour it has,
+  // which is that \`revalidateTag()\` clears this process and no other.
+  revalidateTags: documentCacheHandler?.revalidateTag,`
 }
 
 export function validateBuildContext(

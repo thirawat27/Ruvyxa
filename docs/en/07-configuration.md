@@ -345,5 +345,20 @@ Declare nothing and every host keeps the behaviour it has.
 This is the seam Next.js exposes as `cacheHandler` in `next.config.js`, and it exists for the same
 reason — the framework cannot pick an application's shared store for it.
 
+`revalidateTag()` clears this process's own `cache()` entries immediately, as it always has. When a
+handler exports `revalidateTag`, the tags a request queued are additionally handed to it after the
+response — which is what makes the invalidation reach every instance rather than only the one that
+served the mutation:
+
+```js
+export async function revalidateTag(tags) {
+  await store.dropEverythingLabelled(tags)
+}
+```
+
+It is optional, and there is no platform fallback: a tag labels whatever the application decided to
+label with it, and a platform cache keyed by URL has nothing to look one up by. A project that
+declares no handler keeps the behaviour it has, which is that `revalidateTag()` clears one process.
+
 **Previous:** [UI, navigation, metadata, and assets](06-ui-navigation-metadata-and-assets.md) ·
 **Next:** [Plugins and middleware](08-plugins-middleware.md)
