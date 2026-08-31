@@ -2,6 +2,7 @@ import type { Adapter, AdapterArtifact, AdapterOutput, BuildContext } from '@ruv
 import {
   CLIENT_BUNDLE_PREFIX,
   clientBuildOutput,
+  documentCacheOptionsSource,
   isrTemporaryCacheSource,
   DEFAULT_SECURITY_HEADERS,
   IMMUTABLE_CACHE_CONTROL,
@@ -216,7 +217,7 @@ function firebaseHandlerSource(
 ): string {
   return `import { onRequest } from 'firebase-functions/v2/https';
 import { createHandler, prerenderRelativePath } from './serverless-handler.mjs';
-import { applyPluginHttp, loadActionModule, loadRouteModule } from './route-modules.mjs';
+import { applyPluginHttp, documentCacheHandler, loadActionModule, loadRouteModule } from './route-modules.mjs';
 import manifest from './manifest.mjs';
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
@@ -236,6 +237,30 @@ const readEntry = (htmlPath, revalidate) => {
   return { html, stale };
 };
 
+// Named rather than passed inline, so a project that declares \`cache.handler\`
+// can stand its own store in front of these. See \`documentCacheOptionsSource\`
+// in \`@ruvyxa/core\`; the registry supplies \`documentCacheHandler\`.
+const platformReadPrerendered = (pathname, revalidate = 60) => {
+  const relative = prerenderRelativePath(pathname);
+  if (relative === null) return null;
+  for (const directory of [isrCacheDir, prerenderDir]) {
+    try {
+      return readEntry(path.join(directory, relative), revalidate);
+    } catch {
+      // try the deploy-time prerender output after the runtime cache
+    }
+  }
+  return null;
+};
+
+const platformWritePrerendered = (pathname, html) => {
+  const relative = prerenderRelativePath(pathname);
+  if (relative === null) return;
+  const htmlPath = path.join(isrCacheDir, relative);
+  mkdirSync(path.dirname(htmlPath), { recursive: true });
+  writeFileSync(htmlPath, html, 'utf8');
+};
+
 const handler = createHandler({
   routes: manifest.routes,
   middleware: runtimePolicy.middleware,
@@ -245,25 +270,7 @@ const handler = createHandler({
   importAction: loadActionModule,
   pluginHttp: applyPluginHttp,
   security: runtimePolicy.security,
-  readPrerendered: (pathname, revalidate = 60) => {
-    const relative = prerenderRelativePath(pathname);
-    if (relative === null) return null;
-    for (const directory of [isrCacheDir, prerenderDir]) {
-      try {
-        return readEntry(path.join(directory, relative), revalidate);
-      } catch {
-        // try the deploy-time prerender output after the runtime cache
-      }
-    }
-    return null;
-  },
-  writePrerendered: (pathname, html) => {
-    const relative = prerenderRelativePath(pathname);
-    if (relative === null) return;
-    const htmlPath = path.join(isrCacheDir, relative);
-    mkdirSync(path.dirname(htmlPath), { recursive: true });
-    writeFileSync(htmlPath, html, 'utf8');
-  },
+${documentCacheOptionsSource('platformReadPrerendered', 'platformWritePrerendered')}
   // The project's own not-found page, pre-rendered by the build and carried
   // inline in the manifest: an unmatched URL is answered with the page the
   // application actually wrote, on every host.

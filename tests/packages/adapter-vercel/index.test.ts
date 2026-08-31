@@ -328,7 +328,8 @@ describe('vercel', () => {
         path.join(root, 'route-modules.mjs'),
         'export async function loadRouteModule() { return null }\n' +
           'export async function loadActionModule() { return null }\n' +
-          'export const applyPluginHttp = undefined\n',
+          'export const applyPluginHttp = undefined\n' +
+          'export const documentCacheHandler = null\n',
       )
       for (const runtimeFile of handlerRuntimeFiles) {
         await copyFile(
@@ -420,6 +421,7 @@ describe('vercel', () => {
         // all three, so a stub that omits them fails at module load.
         export async function loadActionModule() { return null }
         export const applyPluginHttp = undefined
+        export const documentCacheHandler = null
         `,
       )
       // The handler and its siblings travel together: `adapter-runner.mjs`

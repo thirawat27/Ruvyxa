@@ -368,6 +368,158 @@ export default createHandler({ routes, importPage: loadRouteModule, importApi: l
     }
   })
 
+  // `cache.handler` is the seam Next.js exposes as `cacheHandler`, and for the
+  // same reason: where a deployed build keeps a revalidated document is the
+  // platform's answer until an application runs several instances behind one
+  // domain, and then only the application knows the store they must share.
+  //
+  // Checked by running the emitted function rather than by reading the registry
+  // it was compiled from, because "the module is imported" and "the module is
+  // what answers the request" are different claims and only the second matters.
+  it('lets a project stand its own document store in front of the platform', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
+    const outputDir = path.join(root, '.ruvyxa-staging')
+    const functionDir = path.join(outputDir, 'deploy', 'function')
+    try {
+      await installFakeReact(root)
+      await mkdir(path.join(root, 'app', 'cached'), { recursive: true })
+      await mkdir(path.join(outputDir, 'prerender'), { recursive: true })
+      await writeFile(
+        path.join(root, 'app', 'layout.tsx'),
+        `export default function Layout({ children }) { return <body>{children}</body> }`,
+      )
+      await writeFile(
+        path.join(root, 'app', 'cached', 'page.tsx'),
+        `export default function Page() { return <main>rendered</main> }`,
+      )
+      // A store that answers everything from memory and never touches a disk.
+      await writeFile(
+        path.join(root, 'project-cache.mjs'),
+        [
+          'export function read() {',
+          "  return { html: '<!doctype html><main>from the project store</main>', stale: false }",
+          '}',
+          'export function write() {}',
+        ].join('\n'),
+      )
+
+      const manifest = {
+        routes: [
+          {
+            id: 'app/cached/page',
+            kind: 'page',
+            path: '/cached',
+            file: 'app/cached/page.tsx',
+            layoutChain: ['app/layout'],
+            render: { strategy: 'isr', revalidate: 60 },
+          },
+        ],
+      }
+      await writeFile(path.join(outputDir, 'manifest.json'), JSON.stringify(manifest))
+
+      // The platform's own pair answers nothing, so a document coming back can
+      // only have come from the project's.
+      const handlerSource = `import { createHandler } from './serverless-handler.mjs'
+import { documentCacheHandler, loadRouteModule } from './route-modules.mjs'
+const platformRead = () => null
+const platformWrite = () => {}
+const routes = ${JSON.stringify(manifest.routes)}
+export default createHandler({
+  routes,
+  importPage: loadRouteModule,
+  importApi: loadRouteModule,
+  readPrerendered: documentCacheHandler?.read ?? platformRead,
+  writePrerendered: documentCacheHandler?.write ?? platformWrite,
+})
+`
+      await writeFile(
+        path.join(root, 'ruvyxa.config.mjs'),
+        `export default {
+          cache: { handler: './project-cache.mjs' },
+          adapter: { build() { return {
+            artifacts: [{ kind: 'function', path: 'deploy/function', handlerSource: ${JSON.stringify(handlerSource)} }]
+          } } },
+        }`,
+      )
+
+      await runRunner(root, outputDir)
+
+      const registry = await readFile(path.join(functionDir, 'route-modules.mjs'), 'utf8')
+      assert.match(
+        registry,
+        // The linker rewrites ESM line by line and strips the `export`
+        // keyword, re-stating the binding at the end; the declaration is
+        // what this can see, and `renderThroughFunction` below is what
+        // proves the export itself works.
+        /const documentCacheHandler = \{/,
+        'the registry must carry the project store, not the null placeholder',
+      )
+
+      assert.equal(
+        await renderThroughFunction(functionDir, '/cached'),
+        '<!doctype html><main>from the project store</main>',
+        'the request was answered by the platform store, or by a fresh render',
+      )
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  // A project that declares nothing keeps exactly the behaviour it had: the
+  // placeholder is `null`, and `?? platformRead` is what every handler falls
+  // back through.
+  it('emits a null store when no cache handler is configured', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
+    const outputDir = path.join(root, '.ruvyxa-staging')
+    const functionDir = path.join(outputDir, 'deploy', 'function')
+    try {
+      await installFakeReact(root)
+      await mkdir(path.join(root, 'app', 'plain'), { recursive: true })
+      await mkdir(path.join(outputDir, 'prerender'), { recursive: true })
+      await writeFile(
+        path.join(root, 'app', 'layout.tsx'),
+        `export default function Layout({ children }) { return <body>{children}</body> }`,
+      )
+      await writeFile(
+        path.join(root, 'app', 'plain', 'page.tsx'),
+        `export default function Page() { return <main>plain</main> }`,
+      )
+
+      const manifest = {
+        routes: [
+          {
+            id: 'app/plain/page',
+            kind: 'page',
+            path: '/plain',
+            file: 'app/plain/page.tsx',
+            layoutChain: ['app/layout'],
+            render: { strategy: 'ssr' },
+          },
+        ],
+      }
+      await writeFile(path.join(outputDir, 'manifest.json'), JSON.stringify(manifest))
+
+      const handlerSource = `import { createHandler } from './serverless-handler.mjs'
+import { loadRouteModule } from './route-modules.mjs'
+const routes = ${JSON.stringify(manifest.routes)}
+export default createHandler({ routes, importPage: loadRouteModule, importApi: loadRouteModule })
+`
+      await writeFile(
+        path.join(root, 'ruvyxa.config.mjs'),
+        `export default { adapter: { build() { return {
+          artifacts: [{ kind: 'function', path: 'deploy/function', handlerSource: ${JSON.stringify(handlerSource)} }]
+        } } } }`,
+      )
+
+      await runRunner(root, outputDir)
+
+      const registry = await readFile(path.join(functionDir, 'route-modules.mjs'), 'utf8')
+      assert.match(registry, /const documentCacheHandler = null/)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   // The same rule the CLI pre-renderer holds, in the host that composes a
   // deployed build's documents. `loadClientAssets` answered a damaged
   // `client-report.json` with an empty Map, and an empty Map makes the emitted

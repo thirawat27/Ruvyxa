@@ -68,6 +68,7 @@ export {
   DEFAULT_IMAGE_MAX_WIDTH,
   DEFAULT_SECURITY_HEADERS,
   headersFileContents,
+  documentCacheOptionsSource,
   isrTemporaryCacheDirSource,
   isrTemporaryCacheSource,
   IMMUTABLE_CACHE_CONTROL,

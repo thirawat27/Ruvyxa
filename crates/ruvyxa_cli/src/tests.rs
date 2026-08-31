@@ -4338,6 +4338,49 @@ fn the_on_demand_image_report_follows_the_adapter() {
     ));
 }
 
+/// The store a deployment reads documents from is named in the build output.
+///
+/// `cache.handler` changes where a deployed page comes from, and the alternative
+/// to one line here is finding that out from behaviour: after this build a stale
+/// document is the handler's to explain rather than the platform's.
+///
+/// The trimming is not cosmetic. Serde accepts whatever the config file holds,
+/// and a key present but empty is a project that has not configured a handler —
+/// reporting one would name a store no request will ever reach.
+#[test]
+fn a_configured_document_store_is_named() {
+    let read = |value: Option<&str>| {
+        let config: crate::config::ProjectConfig = serde_json::from_value(serde_json::json!({
+            "cache": match value {
+                Some(handler) => serde_json::json!({ "handler": handler }),
+                None => serde_json::json!({}),
+            }
+        }))
+        .expect("the fixture config must deserialize");
+        crate::build::project_document_store(&config).map(str::to_string)
+    };
+
+    assert_eq!(
+        read(Some("./cache-handler.mjs")),
+        Some("./cache-handler.mjs".to_string())
+    );
+    assert_eq!(
+        read(Some("  ./spaced.mjs  ")),
+        Some("./spaced.mjs".to_string()),
+        "the reported name is the one the runner will resolve"
+    );
+    assert_eq!(
+        read(Some("   ")),
+        None,
+        "a blank handler is not a configured store"
+    );
+    assert_eq!(
+        read(None),
+        None,
+        "a project that declares nothing reports nothing"
+    );
+}
+
 /// A platform config the adapter declined to write is named, not swallowed.
 ///
 /// `skipIfExists` defers to the file the project keeps under version control,

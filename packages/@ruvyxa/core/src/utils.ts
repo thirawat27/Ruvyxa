@@ -348,6 +348,33 @@ try {
 }`
 }
 
+/**
+ * Generated JavaScript that prefers the project's own ISR store over the
+ * platform's, when the project declared one.
+ *
+ * `cache.handler` in `ruvyxa.config` names a module, `documentCacheHandler` in
+ * the route registry is that module already imported, and this is the two lines
+ * every handler needs to honour it. Written once because the alternative is
+ * writing it in ten adapter templates, which is exactly how the fixed
+ * `os.tmpdir()/ruvyxa-isr-cache` came to be corrected in one of four places.
+ *
+ * The platform's own reader and writer stay as the fallback rather than being
+ * replaced: a project that declares no handler keeps the behaviour it has, and
+ * a handler that answers `undefined` for one of the two halves keeps the
+ * platform's half for that one. Only what the project actually supplied wins.
+ *
+ * The emitted code needs `documentCacheHandler` imported from
+ * `./route-modules.mjs` and the two fallbacks in scope under the names given.
+ *
+ * @param platformRead identifier of the platform's own reader
+ * @param platformWrite identifier of the platform's own writer
+ * @returns two `createHandler` option lines, ready to interpolate
+ */
+export function documentCacheOptionsSource(platformRead: string, platformWrite: string): string {
+  return `  readPrerendered: documentCacheHandler?.read ?? ${platformRead},
+  writePrerendered: documentCacheHandler?.write ?? ${platformWrite},`
+}
+
 export function validateBuildContext(
   ctx: BuildContext,
   adapterName: string,

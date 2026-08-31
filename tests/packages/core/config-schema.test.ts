@@ -122,7 +122,7 @@ const authored: RuvyxaConfig = {
     trustedProxyIps: ['10.0.0.0/8'],
     headers: true,
   },
-  cache: { routes: true, css: true, dir: '.cache' },
+  cache: { routes: true, css: true, dir: '.cache', handler: './cache-handler.mjs' },
   site: {
     url: 'https://example.com',
     title: 'Example',

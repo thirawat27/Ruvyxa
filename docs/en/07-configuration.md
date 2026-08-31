@@ -21,7 +21,7 @@ nested source types.
 | `build.split`                                                            | `single \| route \| manual`                             | Bundle splitting policy.                                                              |
 | `build.workers`                                                          | number                                                  | Build parallelism. See note below.                                                    |
 | `render.strategy`, `render.revalidate`                                   | strategy, seconds                                       | Default page rendering policy.                                                        |
-| `cache.routes`, `cache.css`, `cache.dir`                                 | booleans/string                                         | Route/CSS/cache-directory settings.                                                   |
+| `cache.routes`, `cache.css`, `cache.dir`, `cache.handler`                | booleans/string                                         | Route/CSS/cache-directory settings.                                                   |
 
 ## Complete option map
 
@@ -304,6 +304,46 @@ client component. Read private values only from server-only code such as a loade
 route. The framework's boundary validation is an additional guard, not a reason to place secrets in
 shared modules. Pair the committed `.env.example` with `requireEnv([...])` for names that must be
 present at release time.
+
+### `cache.handler` — where a deployed build keeps a revalidated document
+
+An ISR or PPR route renders once and is served from a store until its window expires. Which store is
+normally the platform's answer: a Cloudflare Worker gets KV, a serverless function gets the one
+writable directory it has, and `ruvyxa start` gets its own build output.
+
+That directory is per-instance and per-deployment. For a single container it is the right answer.
+For an application running several instances behind one domain, it is not: each instance revalidates
+separately, and a visitor is served whichever copy the load balancer happened to pick. Only the
+application knows what store they should share, so this is where it says so.
+
+```ts
+// ruvyxa.config.ts
+export default {
+  cache: { handler: './cache-handler.mjs' },
+}
+```
+
+```js
+// cache-handler.mjs — Redis, S3, a database, whatever the deployment already runs.
+export async function read(pathname, revalidate) {
+  const entry = await store.get(pathname)
+  if (!entry) return null // not cached
+  return { html: entry.html, stale: Date.now() - entry.storedAt >= revalidate * 1000 }
+}
+
+export async function write(pathname, html, revalidate, forced) {
+  await store.set(pathname, { html, storedAt: Date.now() })
+}
+```
+
+The path is project-relative and the module is compiled into the deployed bundle, so it may import
+anything the application can. It is not loaded at build time.
+
+Both exports are optional: supply `read` alone and the platform still writes where it would have.
+Declare nothing and every host keeps the behaviour it has.
+
+This is the seam Next.js exposes as `cacheHandler` in `next.config.js`, and it exists for the same
+reason — the framework cannot pick an application's shared store for it.
 
 **Previous:** [UI, navigation, metadata, and assets](06-ui-navigation-metadata-and-assets.md) ·
 **Next:** [Plugins and middleware](08-plugins-middleware.md)

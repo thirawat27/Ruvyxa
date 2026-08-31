@@ -422,6 +422,7 @@ fn run_adapter_stage(
     report_native_only_image_optimization(config, reported_adapter);
     report_stale_revalidation(revalidating_routes, reported_adapter);
     report_skipped_platform_config(&artifacts, reported_adapter);
+    report_project_document_store(config);
     Ok(Some(serde_json::to_value(artifacts)?))
 }
 
@@ -593,6 +594,46 @@ fn report_skipped_platform_config(artifacts: &[AdapterArtifactReport], adapter: 
         warn_text("warn"),
         dim(format!(
             "{names} already exists, so this build did not write it. The deployment runs under              the file in your project, which this build has not checked against what it emitted.              Delete it to take the generated one, or re-read it after a framework upgrade."
+        ))
+    );
+}
+
+/// The project module a deployment will read and write ISR documents through.
+///
+/// Worth one line because it changes where a deployed page comes from, and
+/// because the alternative is finding out from behaviour. Every host prefers
+/// `cache.handler` over its own store when one is declared: a stale document
+/// after this build is the handler's to explain, not the platform's, and an
+/// operator reading the build output should not have to know that already.
+///
+/// This is also the only place the Rust half reads the setting. The value is
+/// carried into the deployed bundle by `documentCacheHandlerPrelude` in
+/// `packages/ruvyxa/runtime/adapter-runner.mjs`, which is what compiles the
+/// module into the route registry and what refuses a path that names no file —
+/// stated once, there, rather than validated again here.
+pub(crate) fn project_document_store(config: &ProjectConfig) -> Option<&str> {
+    config
+        .cache
+        .handler
+        .as_deref()
+        .map(str::trim)
+        .filter(|handler| !handler.is_empty())
+}
+
+fn report_project_document_store(config: &ProjectConfig) {
+    let Some(handler) = project_document_store(config) else {
+        return;
+    };
+    info!(
+        handler,
+        "ISR documents are stored through the project's cache handler"
+    );
+    println!(
+        "  {} {}",
+        dim("note"),
+        dim(format!(
+            "revalidated documents are read and written through {handler}, not the platform's own \
+             store"
         ))
     );
 }

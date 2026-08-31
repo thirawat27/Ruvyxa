@@ -241,6 +241,22 @@ pub(crate) struct CacheConfigOptions {
     pub(crate) css: Option<bool>,
     #[serde(rename = "dir")]
     pub(crate) build_dir: Option<String>,
+    /// A project module that answers "what is the cached document for this
+    /// path", replacing whatever store the deploy target would otherwise use.
+    ///
+    /// The store a deployed build writes ISR documents to is a decision the
+    /// platform usually makes: a Worker gets KV, a serverless function gets the
+    /// only writable directory it has, and that directory is per-instance and
+    /// per-deployment. Neither is wrong, and neither is something the framework
+    /// can choose correctly for an application running several instances behind
+    /// one domain — which needs one store all of them read.
+    ///
+    /// Read here only to be carried into the deployed bundle; the CLI does not
+    /// load it. `documentCacheHandlerPrelude` in
+    /// `packages/ruvyxa/runtime/adapter-runner.mjs` imports it into the route
+    /// registry, which is the one module every adapter's handler already
+    /// imports.
+    pub(crate) handler: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]

@@ -97,7 +97,7 @@
       "rustType": "ProjectConfig",
       "rustPath": ["cache"],
       "probe": "serde",
-      "fields": ["css", "dir", "routes"]
+      "fields": ["css", "dir", "handler", "routes"]
     },
     "config.content": {
       "rustType": null,

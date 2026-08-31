@@ -5,6 +5,7 @@ import {
   DEFAULT_IMAGE_MAX_WIDTH,
   DEFAULT_SECURITY_HEADERS,
   clientBuildOutput,
+  documentCacheOptionsSource,
   isrTemporaryCacheSource,
   nonPublishableStrategies,
   runtimeBuildPolicy,
@@ -89,7 +90,7 @@ function vercelHandlerSource(
   buildId: string,
 ): string {
   return `import { createHandler, prerenderRelativePath } from './serverless-handler.mjs';
-import { applyPluginHttp, loadActionModule, loadRouteModule } from './route-modules.mjs';
+import { applyPluginHttp, documentCacheHandler, loadActionModule, loadRouteModule } from './route-modules.mjs';
 // Imported, not read from disk: a platform that re-bundles the function only
 // carries files it can resolve statically (see the netlify adapter, where a
 // readFileSync of a sibling manifest.json crashed the deployed function).
@@ -140,6 +141,35 @@ async function revalidateOnVercel(pathname) {
   }
 }
 
+// Named rather than passed inline, so a project that declares \`cache.handler\`
+// can stand its own store in front of these. See \`documentCacheOptionsSource\`
+// in \`@ruvyxa/core\`; the registry supplies \`documentCacheHandler\`.
+const platformReadPrerendered = (pathname, revalidate = 60) => {
+  // prerenderRelativePath rejects any request path that cannot be mapped to a
+  // location inside the cache directories, so reads can never escape them.
+  const relative = prerenderRelativePath(pathname);
+  if (relative === null) return null;
+  try {
+    return readEntry(path.join(isrCacheDir, relative), revalidate);
+  } catch {
+    // fall through to the bundled prerender output
+  }
+  try {
+    return readEntry(path.join(prerenderDir, relative), revalidate);
+  } catch {
+    return null;
+  }
+};
+
+const platformWritePrerendered = (pathname, html, revalidate, forced) => {
+  const relative = prerenderRelativePath(pathname);
+  if (relative === null) return;
+  const htmlPath = path.join(isrCacheDir, relative);
+  mkdirSync(path.dirname(htmlPath), { recursive: true });
+  writeFileSync(htmlPath, html, 'utf8');
+  if (forced === true) return revalidateOnVercel(pathname);
+};
+
 const readEntry = (htmlPath, revalidate) => {
   const html = readFileSync(htmlPath, 'utf8');
   const stale = Date.now() - statSync(htmlPath).mtimeMs >= revalidate * 1000;
@@ -157,30 +187,7 @@ const handler = createHandler({
   importAction: loadActionModule,
   pluginHttp: applyPluginHttp,
   security: runtimePolicy.security,
-  readPrerendered: (pathname, revalidate = 60) => {
-    // prerenderRelativePath rejects any request path that cannot be mapped to a
-    // location inside the cache directories, so reads can never escape them.
-    const relative = prerenderRelativePath(pathname);
-    if (relative === null) return null;
-    try {
-      return readEntry(path.join(isrCacheDir, relative), revalidate);
-    } catch {
-      // fall through to the bundled prerender output
-    }
-    try {
-      return readEntry(path.join(prerenderDir, relative), revalidate);
-    } catch {
-      return null;
-    }
-  },
-  writePrerendered: (pathname, html, revalidate, forced) => {
-    const relative = prerenderRelativePath(pathname);
-    if (relative === null) return;
-    const htmlPath = path.join(isrCacheDir, relative);
-    mkdirSync(path.dirname(htmlPath), { recursive: true });
-    writeFileSync(htmlPath, html, 'utf8');
-    if (forced === true) return revalidateOnVercel(pathname);
-  },
+${documentCacheOptionsSource('platformReadPrerendered', 'platformWritePrerendered')}
   // The project's own not-found page, pre-rendered by the build and carried
   // inline in the manifest: an unmatched URL is answered with the page the
   // application actually wrote, on every host.

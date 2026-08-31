@@ -90,7 +90,7 @@ export const CONFIG_KEY_SCHEMA = Object.freeze({
     'headers',
   ],
   'config.security.actionRateLimit': ['max', 'window'],
-  'config.cache': ['routes', 'css', 'dir'],
+  'config.cache': ['routes', 'css', 'dir', 'handler'],
   'config.site': ['url', 'title', 'description', 'language', 'sitemap', 'robots'],
   'config.site.sitemap': ['exclude', 'additionalPaths', 'defaults', 'entries'],
   'config.site.sitemap.defaults': ['lastModified', 'changeFrequency', 'priority'],

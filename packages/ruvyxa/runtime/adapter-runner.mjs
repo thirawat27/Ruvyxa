@@ -1322,6 +1322,7 @@ async function materializeRouteModules(manifest, destination, target, buildDir) 
   const buildSource = (pluginPart) => `${[...imports, ...pluginPart.imports].join('\n')}
 
 ${instrumentationPrelude()}
+${documentCacheHandlerPrelude()}
 ${definitions.join('\n\n')}
 
 const routeModules = Object.freeze({
@@ -1522,6 +1523,52 @@ function instrumentationPrelude() {
     '  .catch((error) => {',
     "    console.error('[ruvyxa] instrumentation failed:', error)",
     '  })',
+  ].join('\n')
+}
+
+/**
+ * Source that hands every adapter the project's own ISR document store.
+ *
+ * Where a deployed build keeps a revalidated document is normally the
+ * platform's answer: a Cloudflare Worker gets KV, a serverless function gets
+ * the one writable directory it has. That directory is per-instance and
+ * per-deployment, which is right for a single container and wrong for an
+ * application running several instances behind one domain — those need one
+ * store every instance reads, and only the application knows what it is.
+ * `cache.handler` is where it says so. The same seam Next.js exposes as
+ * `cacheHandler`, for the same reason.
+ *
+ * Emitted into the route registry rather than into each platform's handler
+ * template, exactly as `instrumentationPrelude` is, because the registry is the
+ * one module every adapter wrapper already imports — so a tenth adapter gets
+ * this without being edited.
+ *
+ * Exported as a value rather than awaited here: the compiler wraps the registry
+ * in an IIFE, where top-level `await` is invalid syntax, and each handler
+ * decides for itself whether it has a store to fall back to.
+ */
+function documentCacheHandlerPrelude() {
+  const configured = projectConfig?.cache?.handler
+  if (typeof configured !== 'string' || configured.trim() === '') {
+    return 'export const documentCacheHandler = null'
+  }
+
+  const entry = path.resolve(projectRoot, configured)
+  if (!existsSync(entry)) {
+    throw new Error(
+      `RUV2200 cache.handler names ${configured}, which is not a file under the project root. ` +
+        'Point it at a module that exports `read` and `write`.',
+    )
+  }
+
+  return [
+    `import * as __ruvyxaCacheHandler from ${JSON.stringify(toImportPath(entry))}`,
+    // Named rather than spread, so a module exporting neither is a value this
+    // handler can refuse rather than an object that silently answers nothing.
+    'export const documentCacheHandler = {',
+    '  read: __ruvyxaCacheHandler.read,',
+    '  write: __ruvyxaCacheHandler.write,',
+    '}',
   ].join('\n')
 }
 

@@ -362,9 +362,16 @@ describe('adapter on-demand revalidation', () => {
       assert.match(source, marker, `adapter-${name} no longer purges its platform's cache`)
       // A purge that is never reached is the same as no purge: only a forced
       // write may trigger one, and the handler has to be told which it is.
+      //
+      // The binding is deliberately not pinned. The writer used to be passed to
+      // `createHandler` inline and is now a named `platformWritePrerendered`,
+      // so a project's own `cache.handler` can stand in front of it — a change
+      // to where the function is bound, not to what it is handed. Matching the
+      // parameter list rather than the spelling is what keeps this assertion
+      // about the claim it exists for.
       assert.match(
         source,
-        /writePrerendered: \(pathname, html, revalidate, forced\)/,
+        /[Ww]ritePrerendered\s*[:=]\s*\(pathname, html, revalidate, forced\)/,
         `adapter-${name} must receive the forced flag to know when to purge`,
       )
     }

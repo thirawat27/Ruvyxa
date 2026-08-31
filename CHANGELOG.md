@@ -1,6 +1,23 @@
 # Changelog
 
-## v1.1.3 (2026-08-31)
+## v1.1.4 (2026-08-31)
+
+### `cache.handler` — a project can name the store its deployed documents live in
+
+Where a deployed build keeps a revalidated ISR or PPR document has been the platform's answer: a
+Cloudflare Worker gets KV, a serverless function gets the one writable directory it has,
+`ruvyxa start` gets its own build output. That directory is per-instance and per-deployment, which
+is right for a single container and wrong for an application running several instances behind one
+domain — each revalidates separately, and a visitor is served whichever copy the load balancer
+picked.
+
+`cache.handler` in `ruvyxa.config` names a project module exporting `read` and `write`, and every
+host now prefers it over its own store. The module is compiled into the deployed bundle through the
+route registry, so it may import anything the application can — Redis, S3, a database client — and a
+project that declares nothing keeps exactly the behaviour it had.
+
+This is the seam Next.js exposes as `cacheHandler` in `next.config.js`, and it exists for the same
+reason: the framework cannot pick an application's shared store for it.
 
 ### The ISR temporary-cache directory is derived in one place
 

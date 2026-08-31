@@ -21,7 +21,7 @@ source type ของมัน
 | `build.split`                                                            | `single \| route \| manual`                            | นโยบาย bundle splitting                                                  |
 | `build.workers`                                                          | number                                                 | build parallelism ดูหมายเหตุด้านล่าง                                     |
 | `render.strategy`, `render.revalidate`                                   | strategy, seconds                                      | นโยบาย page rendering ปริยาย                                             |
-| `cache.routes`, `cache.css`, `cache.dir`                                 | boolean/string                                         | setting route/CSS/cache directory                                        |
+| `cache.routes`, `cache.css`, `cache.dir`, `cache.handler`                | boolean/string                                         | setting route/CSS/cache directory                                        |
 
 ## แผนที่ option แบบครบกลุ่ม
 
@@ -301,6 +301,46 @@ export function AppName() {
 ให้อ่านค่า private เฉพาะ server-only code เช่น loader, action หรือ API route การตรวจ boundary ของ
 framework เป็นด่านเสริม ไม่ใช่เหตุผลให้วาง secret ใน shared module จับคู่ `.env.example` ที่ commit
 ด้วย `requireEnv([...])` สำหรับชื่อที่ต้องมีจริงตอน release
+
+### `cache.handler` — deployed build เก็บเอกสารที่ revalidate แล้วไว้ที่ไหน
+
+route แบบ ISR หรือ PPR render ครั้งเดียวแล้วถูกเสิร์ฟจาก store จนหมด window ปกติแล้ว platform
+เป็นคนตอบว่า store คืออะไร: Cloudflare Worker ได้ KV, serverless function
+ได้ไดเรกทอรีเดียวที่เขียนได้, ส่วน `ruvyxa start` ใช้ build output ของตัวเอง
+
+ไดเรกทอรีนั้นแยกต่อ instance และต่อ deployment สำหรับ container เดียวมันถูกแล้ว
+แต่สำหรับแอปที่รันหลาย instance อยู่หลังโดเมนเดียวมันไม่ถูก: แต่ละ instance revalidate แยกกัน
+แล้วผู้ชมได้สำเนาไหนก็แล้วแต่ load balancer เลือก มีแต่ตัวแอปที่รู้ว่าควรใช้ store ตัวไหนร่วมกัน
+ตรงนี้คือที่ที่มันบอก
+
+```ts
+// ruvyxa.config.ts
+export default {
+  cache: { handler: './cache-handler.mjs' },
+}
+```
+
+```js
+// cache-handler.mjs — Redis, S3, ฐานข้อมูล อะไรก็ได้ที่ deployment มีอยู่แล้ว
+export async function read(pathname, revalidate) {
+  const entry = await store.get(pathname)
+  if (!entry) return null // ไม่มีใน cache
+  return { html: entry.html, stale: Date.now() - entry.storedAt >= revalidate * 1000 }
+}
+
+export async function write(pathname, html, revalidate, forced) {
+  await store.set(pathname, { html, storedAt: Date.now() })
+}
+```
+
+path เป็น project-relative และ module ถูก compile เข้าไปใน deployed bundle ดังนั้นมัน import
+อะไรก็ได้ที่แอป import ได้ และมันไม่ถูกโหลดตอน build
+
+export ทั้งสองตัวไม่บังคับ: ให้แค่ `read` ตัวเดียวก็ได้ platform ยังเขียนที่เดิมของมันอยู่
+ถ้าไม่ประกาศอะไรเลย ทุก host ทำงานเหมือนเดิมทุกอย่าง
+
+นี่คือ seam เดียวกับที่ Next.js เปิดไว้ในชื่อ `cacheHandler` ใน `next.config.js`
+และมีอยู่ด้วยเหตุผลเดียวกัน — framework เลือก store ที่แอปใช้ร่วมกันแทนแอปไม่ได้
 
 **ก่อนหน้า:** [UI, navigation, metadata และ asset](06-ui-navigation-metadata-and-assets.md) ·
 **ถัดไป:** [Plugin และ middleware](08-plugins-middleware.md)

@@ -119,6 +119,10 @@ export function echoRouteModules(): string {
 export async function loadRouteModule() { return api }
 export async function loadActionModule() { return null }
 export const applyPluginHttp = undefined
+// The registry the real build emits also exports the project's ISR store, or
+// \`null\` when no \`cache.handler\` is configured. A handler imports it by
+// name, so a stub without it fails to load — which is the point.
+export const documentCacheHandler = null
 `
 }
 

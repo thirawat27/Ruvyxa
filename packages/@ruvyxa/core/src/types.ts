@@ -139,6 +139,39 @@ export interface RuvyxaConfig {
     css?: boolean
     /** Shared compile-cache directory. Relative paths are resolved from the project root. */
     dir?: string
+    /**
+     * A project module that answers "what is the cached document for this
+     * path", replacing whatever store the deploy target would otherwise use.
+     *
+     * Project-relative, and compiled into the deployed bundle rather than read
+     * at build time. The module exports two functions with the same contract
+     * the adapters already implement between them:
+     *
+     * ```ts
+     * export async function read(pathname: string, revalidate: number) {
+     *   // `null` means "not cached"; `stale` asks for a background refresh.
+     *   return { html: '<!doctype html>…', stale: false }
+     * }
+     * export async function write(
+     *   pathname: string,
+     *   html: string,
+     *   revalidate: number,
+     *   forced: boolean,
+     * ) {}
+     * ```
+     *
+     * The store a deployed build writes ISR documents to is normally the
+     * platform's decision: a Cloudflare Worker gets KV, a serverless function
+     * gets the one writable directory it has. That directory is per-instance
+     * and per-deployment, which is correct for a single container and wrong for
+     * an application running several instances behind one domain — those need
+     * one store all of them read. This is how you give them one.
+     *
+     * The same seam Next.js exposes as `cacheHandler` in `next.config.js`, and
+     * for the same reason: the framework cannot choose an application's shared
+     * store for it.
+     */
+    handler?: string
   }
   site?: SiteConfig
   /**
