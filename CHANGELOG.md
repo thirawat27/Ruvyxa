@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.1.3 (2026-08-31)
 
 ### The ISR temporary-cache directory is derived in one place
 
