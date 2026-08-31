@@ -87,6 +87,16 @@ const outputDir = path.resolve(outputDirArg)
 const runtimeDir = path.dirname(fileURLToPath(import.meta.url))
 /** The loaded `ruvyxa.config`, shared with the function materializer. */
 let projectConfig
+/**
+ * This build's own id, shared with the registry prelude.
+ *
+ * Read only to namespace the shared data cache. Two deployments of two
+ * applications pointed at one Redis, or two builds of the same one, otherwise
+ * write `cache('user:1')` to the same place and read each other's answer — the
+ * ISR document store is already namespaced this way and the data store was not,
+ * which made one system disagree with itself.
+ */
+let projectBuildId = ''
 const KNOWN_ADAPTER_NAMES = [
   'node',
   'bun',
@@ -172,6 +182,7 @@ try {
   } else {
     const buildInfo = await loadBuildInfo(outputDir)
     const deployManifest = await loadDeployManifest(outputDir)
+    projectBuildId = typeof deployManifest?.buildId === 'string' ? deployManifest.buildId : ''
     const output = await adapter.build({
       root: projectRoot,
       outDir: outputDir,
@@ -1552,12 +1563,20 @@ function documentCacheHandlerPrelude() {
   // that shrinks or disables the local tier has said something about its own
   // memory, and that is true of a project with no shared store at all.
   const maxEntries = projectConfig?.cache?.maxEntries
-  const boundLine =
-    typeof maxEntries === 'number' ? [`  maxEntries: ${JSON.stringify(maxEntries)},`] : []
+  const maxBytes = projectConfig?.cache?.maxBytes
+  const boundLine = [
+    ...(typeof maxEntries === 'number' ? [`  maxEntries: ${JSON.stringify(maxEntries)},`] : []),
+    ...(typeof maxBytes === 'number' ? [`  maxBytes: ${JSON.stringify(maxBytes)},`] : []),
+    // Every key this deployment writes carries it. Two deployments sharing one
+    // store are the ordinary case for a managed Redis, and `cache('user:1')` is
+    // the ordinary key — without a prefix the second deployment reads the
+    // first's answer. The ISR document directory has been namespaced this way
+    // since `CORE-10`; this is the same decision for the other store.
+    `  keyPrefix: ${JSON.stringify(projectBuildId ? `${projectBuildId}:` : '')},`,
+  ]
 
   const configured = projectConfig?.cache?.handler
   if (typeof configured !== 'string' || configured.trim() === '') {
-    if (boundLine.length === 0) return 'export const documentCacheHandler = null'
     return [
       'globalThis.__RUVYXA_DATA_CACHE__ = {',
       ...boundLine,

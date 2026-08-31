@@ -626,7 +626,22 @@ pub(crate) fn project_document_store(config: &ProjectConfig) -> Option<&str> {
 /// cache, it is no cache: every `cache()` read reaches the shared store, which
 /// is the right trade behind one and a surprise in front of nothing.
 pub(crate) fn local_cache_is_disabled(config: &ProjectConfig) -> bool {
+    // `max_entries` only. `max_bytes: 0` reads the other way round — it turns
+    // the *byte budget* off and leaves the entry bound in sole charge, which is
+    // a larger cache rather than none. Folding the two together here would
+    // print "every read reaches the shared store" over a deployment that had
+    // just removed its memory ceiling.
     config.cache.max_entries == Some(0)
+}
+
+/// The memory ceiling this build puts on the in-memory `cache()` tier.
+///
+/// `None` when the project says nothing, which is the default budget. `Some(0)`
+/// is a deployment that removed the ceiling and left the entry count alone —
+/// worth a line, because the entry count is not a memory bound and a thousand
+/// large values is a large amount of memory.
+pub(crate) fn local_cache_byte_budget(config: &ProjectConfig) -> Option<u64> {
+    config.cache.max_bytes
 }
 
 fn report_project_document_store(config: &ProjectConfig) {
@@ -650,7 +665,16 @@ fn report_project_document_store(config: &ProjectConfig) {
             "  {} {}",
             dim("note"),
             dim(
-                "cache.maxEntries is 0, so every cache() read reaches the shared store rather                  than a per-instance copy"
+                "cache.maxEntries is 0, so every cache() read reaches the shared store rather than a per-instance copy"
+            )
+        );
+    } else if local_cache_byte_budget(config) == Some(0) {
+        info!("the in-memory cache() tier has no memory ceiling");
+        println!(
+            "  {} {}",
+            dim("note"),
+            dim(
+                "cache.maxBytes is 0, so the in-memory cache() tier is bounded by entry count alone, which is not a memory bound"
             )
         );
     }

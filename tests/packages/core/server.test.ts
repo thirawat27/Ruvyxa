@@ -715,3 +715,118 @@ describe('cache.maxEntries', () => {
     }
   })
 })
+
+describe('the shared cache under pressure', () => {
+  const DATA_CACHE_KEY = '__RUVYXA_DATA_CACHE__'
+  const globals = globalThis as Record<string, unknown>
+
+  function install(config: unknown): () => void {
+    const previous = globals[DATA_CACHE_KEY]
+    globals[DATA_CACHE_KEY] = config
+    return () => {
+      globals[DATA_CACHE_KEY] = previous
+    }
+  }
+
+  // The entry bound is not a memory bound. 1024 entries of ten megabytes is ten
+  // gigabytes, and nothing stopped it: this is the bound Next.js has always had
+  // and this store did not.
+  it('evicts on the byte budget, not only on the entry count', async () => {
+    const big = 'x'.repeat(4_000)
+    const restore = install({ maxEntries: 1000, maxBytes: 10_000 })
+    try {
+      for (let index = 0; index < 8; index += 1) {
+        await cache(`bytes-${index}-${Math.random()}`)
+          .ttl('60s')
+          .get(() => big)
+      }
+      const stats = cacheStats()
+      assert.ok(stats.bytes <= 10_000, `held ${stats.bytes} bytes against a 10,000 byte budget`)
+      assert.ok(stats.size < 8, `held ${stats.size} entries the byte budget should have evicted`)
+    } finally {
+      restore()
+    }
+  })
+
+  // A value larger than the whole budget is still stored once. Evicting the key
+  // a write just stored would make a successful write leave nothing behind.
+  it('keeps the value a write just stored, even over budget', async () => {
+    const restore = install({ maxBytes: 10 })
+    try {
+      const key = `over-budget-${Math.random()}`
+      const value = 'y'.repeat(1_000)
+      assert.equal(
+        await cache(key)
+          .ttl('60s')
+          .get(() => value),
+        value,
+      )
+      assert.equal(
+        await cache(key)
+          .ttl('60s')
+          .get(() => 'a different value'),
+        value,
+        'the entry the write stored was evicted by its own write',
+      )
+    } finally {
+      restore()
+    }
+  })
+
+  // An unawaited write is an unowned promise. A store that has gone slow under
+  // load accumulates one per produced value with nothing to stop it, and the
+  // cache that exists to protect the origin becomes what exhausts the process.
+  it('drops shared writes rather than queueing without a bound', async () => {
+    let released: (() => void) | undefined
+    const blocked = new Promise<void>((resolve) => {
+      released = resolve
+    })
+    const before = cacheStats().droppedSharedWrites
+    const restore = install({ readData: () => null, writeData: () => blocked })
+    try {
+      for (let index = 0; index < 400; index += 1) {
+        await cache(`flood-${index}-${Math.random()}`)
+          .ttl('60s')
+          .get(() => index)
+      }
+      const stats = cacheStats()
+      assert.ok(
+        stats.pendingSharedWrites <= 256,
+        `${stats.pendingSharedWrites} writes were in flight against a bound of 256`,
+      )
+      assert.ok(
+        stats.droppedSharedWrites > before,
+        'nothing was dropped, so the queue grew without a bound',
+      )
+    } finally {
+      released?.()
+      restore()
+    }
+  })
+
+  // Two deployments pointed at one managed store otherwise write `cache('x')`
+  // to the same place and read each other's answer. The ISR document directory
+  // has been namespaced by build id since CORE-10; this is the other store.
+  it('namespaces every key the store sees', async () => {
+    const seen: string[] = []
+    const restore = install({
+      keyPrefix: 'build-abc:',
+      readData: (key: string) => {
+        seen.push(key)
+        return null
+      },
+      writeData: (key: string) => {
+        seen.push(key)
+      },
+    })
+    try {
+      await cache('user:1')
+        .ttl('60s')
+        .get(() => 'value')
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      assert.deepEqual(seen, ['build-abc:user:1', 'build-abc:user:1'])
+    } finally {
+      restore()
+    }
+  })
+})

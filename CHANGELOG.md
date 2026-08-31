@@ -2,6 +2,28 @@
 
 ## v1.1.4 (2026-08-31)
 
+### The shared cache no longer trades correctness or memory for latency
+
+Four properties the first version of `cache.handler` did not have, each of which Next.js already
+had:
+
+- **`revalidateTag()` is awaited before the response.** It fired and forgot, on the reasoning that a
+  response must not wait for a store. That is right for populating a cache and wrong for
+  invalidating one: a mutation that answered `200` has said the old value is gone, and a process
+  killed or scaled to zero before an unawaited write left every instance serving what the caller
+  believed it had invalidated, with nothing anywhere reporting it.
+- **`cache.maxBytes` bounds memory.** The entry count never did: a thousand entries of ten megabytes
+  is ten gigabytes. Defaults to fifty megabytes, the same budget Next.js defaults
+  `cacheMaxMemorySize` to, measured by each value's serialized length. `0` leaves `maxEntries` in
+  sole charge.
+- **Unawaited cache writes are bounded at 256 in flight.** Beyond that they are dropped and counted,
+  and the first drop is reported. A store gone slow under load otherwise accumulates one promise per
+  produced value, and the cache that exists to protect the origin becomes what exhausts the process.
+  `cacheStats()` now reports `bytes`, `maxBytes`, `pendingSharedWrites` and `droppedSharedWrites`.
+- **Data-cache keys carry the build id.** The ISR document directory has been namespaced this way
+  since the temporary-cache fix; the data store was not, so two deployments pointed at one managed
+  store both wrote `cache('user:1')` and read each other's answer.
+
 ### `cache.maxEntries` — the in-memory tier is no longer a fixed 1024
 
 It was a constant, so a deployment could supply a shared store and still keep a per-instance copy in

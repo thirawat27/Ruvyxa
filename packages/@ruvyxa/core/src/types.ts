@@ -203,6 +203,21 @@ export interface RuvyxaConfig {
      * would be one nobody could rely on.
      */
     maxEntries?: number
+    /**
+     * Bytes the in-memory `cache()` tier holds before eviction. Defaults to
+     * 52,428,800 — fifty megabytes, the same budget Next.js defaults
+     * `cacheMaxMemorySize` to.
+     *
+     * The entry bound alone is not a memory bound: 1024 entries of ten
+     * megabytes is ten gigabytes, and nothing stopped it. Each value is
+     * measured by its serialized length, which is an approximation and the one
+     * available — every cached value has already been proved serializable, so
+     * it is always measurable this way, and a measurement within a small factor
+     * beats a bound that does not exist.
+     *
+     * `0` disables the byte budget and leaves `maxEntries` in sole charge.
+     */
+    maxBytes?: number
   }
   site?: SiteConfig
   /**

@@ -205,6 +205,22 @@ const CACHE_MAX_ENTRIES = 1024
  * make sense of must not silently become "no cache" or "unbounded", which are
  * the two failure directions that hurt.
  */
+/**
+ * Bytes the in-memory tier holds before eviction, when nothing says otherwise.
+ *
+ * The entry bound alone is not a memory bound: 1024 entries of ten megabytes is
+ * ten gigabytes, and nothing stopped it. Next.js budgets this in bytes for that
+ * reason and defaults to fifty megabytes; this matches the number so a project
+ * moving between them gets the memory profile it had.
+ *
+ * Measured with `JSON.stringify(value).length`, which is an approximation and
+ * is the right one available: every cached value has already been through
+ * `assertCacheSerializable`, so it is always measurable this way, and a
+ * measurement that is within a small factor beats a bound that does not exist.
+ * `0` disables the byte budget and leaves the entry bound in charge.
+ */
+const CACHE_MAX_BYTES = 52_428_800
+
 let reportedBadBound = false
 function maxCacheEntries(): number {
   const configured = dataCacheConfig()?.maxEntries
@@ -220,6 +236,40 @@ function maxCacheEntries(): number {
     return CACHE_MAX_ENTRIES
   }
   return configured
+}
+
+let reportedBadByteBound = false
+function maxCacheBytes(): number {
+  const configured = dataCacheConfig()?.maxBytes
+  if (configured === undefined) return CACHE_MAX_BYTES
+  if (!Number.isInteger(configured) || configured < 0) {
+    if (!reportedBadByteBound) {
+      reportedBadByteBound = true
+      console.error(
+        `[ruvyxa] cache.maxBytes must be a whole number of bytes, got ${JSON.stringify(configured)}; ` +
+          `using ${CACHE_MAX_BYTES}.`,
+      )
+    }
+    return CACHE_MAX_BYTES
+  }
+  return configured
+}
+
+/**
+ * Roughly how much memory one entry's value holds.
+ *
+ * `JSON.stringify` rather than a structural walk: the value has already passed
+ * `assertCacheSerializable`, so this always succeeds, and the cost is paid once
+ * per write rather than once per read. A value that somehow refuses to
+ * stringify is charged nothing rather than crashing a cache write — the entry
+ * bound still covers it.
+ */
+function weigh(value: unknown): number {
+  try {
+    return JSON.stringify(value)?.length ?? 0
+  } catch {
+    return 0
+  }
 }
 
 /**
@@ -245,6 +295,17 @@ class CacheStore {
    * cannot drift from itself.
    */
   readonly #entries = new Map<string, CacheEntry>()
+  /**
+   * Bytes charged to each live key, and their sum.
+   *
+   * A parallel map rather than a field on `CacheEntry`, which is exported and
+   * whose shape callers construct. Every site that adds to or removes from
+   * `#entries` updates both, and `prune()` recomputes the sum from this map
+   * afterwards — incremental accounting drifts, and a byte budget that has
+   * drifted is a budget that either evicts nothing or evicts everything.
+   */
+  readonly #weights = new Map<string, number>()
+  #bytes = 0
   readonly #pendingWrites = new Map<string, PendingCacheWrite>()
   /** `undefined` means "ask the configuration"; a number pins it, for tests. */
   readonly #maxEntries: number | undefined
@@ -280,7 +341,7 @@ class CacheStore {
     // one entry ahead of it is the disagreement it was turning the tier off to
     // avoid.
     if (bound === 0) {
-      this.#entries.delete(key)
+      this.#forget(key)
       return
     }
     // Updating an existing key does not increase the cache size. Evicting before
@@ -295,17 +356,46 @@ class CacheStore {
 
     // Delete first so a rewrite of an existing key is re-inserted at the
     // most-recent end instead of keeping its original position.
-    this.#entries.delete(key)
+    this.#forget(key)
+    const weight = weigh(entry.value)
     this.#entries.set(key, entry)
+    this.#weights.set(key, weight)
+    this.#bytes += weight
+
+    // Then evict until the byte budget holds. Separate from the loop above
+    // because the two bounds answer different questions — how many values, and
+    // how much memory — and a single entry can breach the second on its own.
+    //
+    // `size > 1` is what keeps the value this write just stored. Eviction is
+    // oldest-first and `set` re-inserts at the newest end, so the last entry
+    // standing is always the one being written; stopping at one leaves it
+    // alone. A value larger than the whole budget is therefore stored once and
+    // evicted by the next write, rather than making a write that reported
+    // success leave nothing behind.
+    const byteBound = maxCacheBytes()
+    if (byteBound > 0) {
+      while (this.#bytes > byteBound && this.#entries.size > 1) {
+        if (!this.#evictOldest()) break
+      }
+    }
+  }
+
+  /** Drop one key from both maps, keeping the byte sum with them. */
+  #forget(key: string): boolean {
+    this.#bytes -= this.#weights.get(key) ?? 0
+    this.#weights.delete(key)
+    return this.#entries.delete(key)
   }
 
   delete(key: string): boolean {
     this.#pendingWrites.delete(key)
-    return this.#entries.delete(key)
+    return this.#forget(key)
   }
 
   clear(): void {
     this.#entries.clear()
+    this.#weights.clear()
+    this.#bytes = 0
     this.#pendingWrites.clear()
   }
 
@@ -369,7 +459,25 @@ class CacheStore {
         pruned++
       }
     }
+    // Reconcile rather than trust the running sum. Every add and remove already
+    // adjusts it, but incremental accounting drifts on the one path somebody
+    // adds later without noticing, and a byte budget that has drifted either
+    // evicts nothing or evicts everything. This walk is already happening.
+    let total = 0
+    for (const key of this.#entries.keys()) total += this.#weights.get(key) ?? 0
+    // Deleting the entry a Map iterator is standing on is defined behaviour —
+    // it visits insertion order and skips what is already gone — so no copy of
+    // the key set is needed to walk it while pruning it.
+    for (const key of this.#weights.keys()) {
+      if (!this.#entries.has(key)) this.#weights.delete(key)
+    }
+    this.#bytes = total
     return pruned
+  }
+
+  /** Bytes the tier is holding, by the same measure the budget uses. */
+  get bytes(): number {
+    return this.#bytes
   }
 
   get size(): number {
@@ -759,8 +867,24 @@ const MAX_REVALIDATED_TAGS_PER_REQUEST = 64
 /**
  * Get current cache statistics for observability.
  */
-export function cacheStats(): { size: number; maxEntries: number } {
-  return { size: cacheStore.size, maxEntries: cacheStore.maxEntries }
+export function cacheStats(): {
+  size: number
+  maxEntries: number
+  bytes: number
+  maxBytes: number
+  /** Shared-store writes this process is still waiting on. */
+  pendingSharedWrites: number
+  /** Shared-store writes dropped because the store could not keep up. */
+  droppedSharedWrites: number
+} {
+  return {
+    size: cacheStore.size,
+    maxEntries: cacheStore.maxEntries,
+    bytes: cacheStore.bytes,
+    maxBytes: maxCacheBytes(),
+    pendingSharedWrites,
+    droppedSharedWrites,
+  }
 }
 
 export function redirect(location: string, status = 302): Response {
@@ -954,6 +1078,22 @@ interface SharedDataCache {
   writeData?: (key: string, entry: SharedCacheEntry) => Promise<void> | void
   /** `cache.maxEntries`, carried on the same object the host installs. */
   maxEntries?: number
+  /** `cache.maxBytes`, the memory budget the entry bound cannot express. */
+  maxBytes?: number
+  /**
+   * Prepended to every key this deployment hands the store.
+   *
+   * Derived from the build id by the host, not by the application. Two
+   * deployments pointed at one managed store otherwise write `cache('user:1')`
+   * to the same place and read each other's answer.
+   */
+  keyPrefix?: string
+}
+
+/** The key as the shared store sees it: this deployment's, not just this app's. */
+function sharedKey(key: string): string {
+  const prefix = dataCacheConfig()?.keyPrefix
+  return typeof prefix === 'string' && prefix !== '' ? prefix + key : key
 }
 
 function dataCacheConfig(): SharedDataCache | null {
@@ -978,7 +1118,7 @@ function readShared(key: string): Promise<SharedCacheEntry | null> | null {
   if (typeof store?.readData !== 'function') return null
   return (async () => {
     try {
-      const entry = await store.readData!(key)
+      const entry = await store.readData!(sharedKey(key))
       if (!entry || typeof entry !== 'object') return null
       if (typeof entry.populatedAt !== 'number' || !Number.isFinite(entry.populatedAt)) return null
       return entry
@@ -996,14 +1136,51 @@ function readShared(key: string): Promise<SharedCacheEntry | null> | null {
  * and already returned; making a request wait on a remote write would make the
  * shared cache slower than no cache at all.
  */
+const MAX_PENDING_SHARED_WRITES = 256
+let pendingSharedWrites = 0
+let droppedSharedWrites = 0
+let reportedDroppedWrites = false
+
 function writeShared(key: string, entry: SharedCacheEntry): void {
   const store = dataCacheConfig()
   if (typeof store?.writeData !== 'function') return
+
+  // Not awaited, and therefore bounded. Populating a cache must not hold a
+  // response — unlike invalidating one, which the host does await. But an
+  // unawaited write is also an unowned promise, and a store that has gone slow
+  // under load accumulates one per produced value with nothing to stop it:
+  // the cache that exists to protect the origin becomes the thing that
+  // exhausts the process.
+  //
+  // Dropping the write is the right failure. The value is already in this
+  // process's own tier and already returned; what is lost is that another
+  // instance has to produce it too, which is the behaviour of having no shared
+  // store at all — where a queue that outgrows memory is the behaviour of
+  // having no process at all.
+  if (pendingSharedWrites >= MAX_PENDING_SHARED_WRITES) {
+    droppedSharedWrites += 1
+    if (!reportedDroppedWrites) {
+      reportedDroppedWrites = true
+      console.error(
+        `[ruvyxa] cache.handler writeData is not keeping up; more than ${MAX_PENDING_SHARED_WRITES} ` +
+          'writes were in flight, so this one and any others are being dropped. Reads still ' +
+          'answer from the local tier. This is reported once; see cacheStats().droppedSharedWrites.',
+      )
+    }
+    return
+  }
+
+  pendingSharedWrites += 1
+  const settle = () => {
+    pendingSharedWrites -= 1
+  }
   try {
-    Promise.resolve(store.writeData(key, entry)).catch((error) => {
+    Promise.resolve(store.writeData(sharedKey(key), entry)).then(settle, (error) => {
+      settle()
       console.error('[ruvyxa] cache.handler writeData failed:', error)
     })
   } catch (error) {
+    settle()
     console.error('[ruvyxa] cache.handler writeData failed:', error)
   }
 }

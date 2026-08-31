@@ -128,6 +128,7 @@ const authored: RuvyxaConfig = {
     dir: '.cache',
     handler: './cache-handler.mjs',
     maxEntries: 1024,
+    maxBytes: 52_428_800,
   },
   site: {
     url: 'https://example.com',

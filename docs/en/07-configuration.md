@@ -11,17 +11,17 @@ nested source types.
 
 ## Primary options
 
-| Key                                                                           | Type / default                                          | Effect                                                                                |
-| ----------------------------------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `appDir`, `outDir`                                                            | strings                                                 | App source and generated output locations.                                            |
-| `runtime`                                                                     | `node \| bun \| deno \| edge \| static`, default `node` | Runtime/target policy.                                                                |
-| `typedRoutes`                                                                 | boolean, default `false`                                | Generate `.ruvyxa/types/routes.d.ts` so `<Link href>` is checked against real routes. |
-| `server.host`, `server.port`                                                  | string, number                                          | Listening address. See [Listening address](#listening-address).                       |
-| `build.minify`, `map`, `treeShake`, `manifest`, `warm`, `prerenderCache`      | booleans; cache defaults true                           | Compiler/build artifact behavior.                                                     |
-| `build.split`                                                                 | `single \| route \| manual`                             | Bundle splitting policy.                                                              |
-| `build.workers`                                                               | number                                                  | Build parallelism. See note below.                                                    |
-| `render.strategy`, `render.revalidate`                                        | strategy, seconds                                       | Default page rendering policy.                                                        |
-| `cache.routes`, `cache.css`, `cache.dir`, `cache.handler`, `cache.maxEntries` | booleans/string                                         | Route/CSS/cache-directory settings.                                                   |
+| Key                                                                                             | Type / default                                          | Effect                                                                                |
+| ----------------------------------------------------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `appDir`, `outDir`                                                                              | strings                                                 | App source and generated output locations.                                            |
+| `runtime`                                                                                       | `node \| bun \| deno \| edge \| static`, default `node` | Runtime/target policy.                                                                |
+| `typedRoutes`                                                                                   | boolean, default `false`                                | Generate `.ruvyxa/types/routes.d.ts` so `<Link href>` is checked against real routes. |
+| `server.host`, `server.port`                                                                    | string, number                                          | Listening address. See [Listening address](#listening-address).                       |
+| `build.minify`, `map`, `treeShake`, `manifest`, `warm`, `prerenderCache`                        | booleans; cache defaults true                           | Compiler/build artifact behavior.                                                     |
+| `build.split`                                                                                   | `single \| route \| manual`                             | Bundle splitting policy.                                                              |
+| `build.workers`                                                                                 | number                                                  | Build parallelism. See note below.                                                    |
+| `render.strategy`, `render.revalidate`                                                          | strategy, seconds                                       | Default page rendering policy.                                                        |
+| `cache.routes`, `cache.css`, `cache.dir`, `cache.handler`, `cache.maxEntries`, `cache.maxBytes` | booleans/string                                         | Route/CSS/cache-directory settings.                                                   |
 
 ## Complete option map
 
@@ -406,6 +406,43 @@ budget that estimated would be one nobody could rely on.
 A value that is not a whole number of entries is reported and ignored: an unusable bound must not
 quietly become "no cache" or "unbounded", which are the two directions that hurt and both look like
 working code.
+
+### `cache.maxBytes` — the memory bound the entry count cannot express
+
+```ts
+export default {
+  cache: { maxEntries: 1024, maxBytes: 52_428_800 },
+}
+```
+
+`maxEntries` bounds how many values are held; it says nothing about how large they are. A thousand
+entries of ten megabytes is ten gigabytes. `maxBytes` defaults to fifty megabytes — the same budget
+Next.js defaults `cacheMaxMemorySize` to — and evicts least-recently-used until the total fits.
+
+Each value is measured by its serialized length. That is an approximation, and it is the one
+available: every cached value has already been proved serializable, so it is always measurable this
+way, and a measurement within a small factor beats a bound that does not exist. `0` disables the
+byte budget and leaves `maxEntries` in sole charge.
+
+A value larger than the whole budget is still stored once and evicted by the next write. A write
+that reported success must not leave nothing behind.
+
+### What the shared store is not asked to guarantee
+
+Three things are worth knowing before pointing `cache.handler` at a network store, because each is a
+deliberate trade rather than an oversight:
+
+- **Invalidation waits; population does not.** `revalidateTag()` is awaited before the response,
+  because a mutation that answered `200` has told the caller the old value is gone — losing that
+  write is a correctness failure. Cache _writes_ are not awaited, because holding a response to
+  populate a cache is the opposite of what the cache is for.
+- **Unawaited writes are bounded.** At most 256 are in flight; beyond that they are dropped and
+  counted, and the first drop is reported. A store that has gone slow under load would otherwise
+  accumulate one promise per produced value, and the cache that exists to protect the origin becomes
+  what exhausts the process. `cacheStats()` reports `pendingSharedWrites` and `droppedSharedWrites`.
+- **Keys carry this deployment's build id.** Two deployments pointed at one managed store would
+  otherwise both write `cache('user:1')` and read each other's answer. Your handler receives the
+  prefixed key.
 
 **Previous:** [UI, navigation, metadata, and assets](06-ui-navigation-metadata-and-assets.md) ·
 **Next:** [Plugins and middleware](08-plugins-middleware.md)

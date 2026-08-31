@@ -264,6 +264,13 @@ pub(crate) struct CacheConfigOptions {
     /// a shared one is the thing that makes two instances disagree. Read into
     /// the deployed bundle by `documentCacheHandlerPrelude`, never by the CLI.
     pub(crate) max_entries: Option<u32>,
+    /// Bytes the in-memory `cache()` tier holds before eviction.
+    ///
+    /// The entry bound is not a memory bound: 1024 entries of ten megabytes is
+    /// ten gigabytes. Measured by the serialized length of each value, which is
+    /// an approximation and the one available — every cached value has already
+    /// been proved serializable. `0` leaves the entry bound in sole charge.
+    pub(crate) max_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]

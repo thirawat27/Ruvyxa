@@ -4397,6 +4397,10 @@ fn a_disabled_local_cache_is_reported() {
 
     assert!(read(serde_json::json!({ "maxEntries": 0 })));
     assert!(
+        !read(serde_json::json!({ "maxBytes": 0 })),
+        "maxBytes: 0 removes the memory ceiling and leaves the entry bound in charge,          which is a larger cache rather than none"
+    );
+    assert!(
         !read(serde_json::json!({ "maxEntries": 1 })),
         "a bound of one is a very small cache, not a disabled one"
     );
