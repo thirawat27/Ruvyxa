@@ -319,3 +319,45 @@ describe('generated standalone server', () => {
     )
   })
 })
+
+/**
+ * The ISR temporary-cache directory is derived in one place.
+ *
+ * Four hosts write to it — the three serverless adapters and this server — and
+ * each used to spell the derivation itself. That is how `CORE-10` was fixed in
+ * exactly one of the four: the finding named `isrCache: 'tmp'`, that copy was
+ * corrected, and Vercel, Netlify and Firebase went on joining a fixed
+ * `ruvyxa-isr-cache` onto `os.tmpdir()` — the same directory for every Ruvyxa
+ * deployment on the host and for every previous build of this one, read
+ * *before* the bundled prerender output. Correcting them meant writing the same
+ * derivation a third and fourth time, which is the state a rule is in just
+ * before it drifts again.
+ *
+ * A source scan rather than a behavioural assertion, because the failure is a
+ * *second declaration site* and no output can show one exists.
+ */
+describe('the ISR temporary cache has one derivation', () => {
+  it('is spelled in exactly one source file', () => {
+    const tracked = execFileSync(
+      'git',
+      ['ls-files', '--cached', '--others', '--exclude-standard', '--', '*.ts', '*.mjs'],
+      { cwd: repoPath('.'), encoding: 'utf8' },
+    )
+      .split('\n')
+      .map((file) => file.trim())
+      .filter((file) => file && !file.includes('node_modules/') && !file.startsWith('tests/'))
+
+    const declarations = tracked.filter((file) => {
+      const source = readFileSync(repoPath(file), 'utf8')
+      // The join itself, however it is broken across lines: the literal name
+      // appearing near `tmpdir()` is what a second derivation looks like.
+      return /tmpdir\(\)[\s\S]{0,40}'ruvyxa-isr-cache'/.test(source)
+    })
+
+    assert.deepEqual(
+      declarations,
+      ['packages/@ruvyxa/core/src/utils.ts'],
+      'every host must reach the directory through isrTemporaryCacheDirSource',
+    )
+  })
+})

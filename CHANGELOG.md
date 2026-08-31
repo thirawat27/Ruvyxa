@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### The ISR temporary-cache directory is derived in one place
+
+Four hosts write to one — the Vercel, Netlify and Firebase function bundles, and the standalone
+server — and each spelled the derivation itself. That is how the fixed
+`os.tmpdir()/ruvyxa-isr-cache` came to be corrected in exactly one of the four, and why correcting
+the other three meant writing the same thirty lines a third and fourth time. They now all reach it
+through one generator, and a test asserts that only one source file spells the join, so a fifth copy
+cannot appear quietly.
+
+No behaviour changes: the emitted directory is the same expression each host was already producing.
+
 ### The ISR temporary cache carries a per-deployment identity on every adapter
 
 `os.tmpdir()/ruvyxa-isr-cache` was a fixed name: the same directory for every Ruvyxa deployment on a

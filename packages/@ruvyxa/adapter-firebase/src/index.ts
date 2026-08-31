@@ -2,6 +2,7 @@ import type { Adapter, AdapterArtifact, AdapterOutput, BuildContext } from '@ruv
 import {
   CLIENT_BUNDLE_PREFIX,
   clientBuildOutput,
+  isrTemporaryCacheSource,
   DEFAULT_SECURITY_HEADERS,
   IMMUTABLE_CACHE_CONTROL,
   nonPublishableStrategies,
@@ -227,43 +228,7 @@ import { pipeline } from 'node:stream/promises';
 const runtimePolicy = ${JSON.stringify(runtimePolicy ?? {})};
 
 const prerenderDir = path.join(import.meta.dirname, 'prerender');
-// A name nothing else on the host answers to.
-//
-// \`os.tmpdir()\` is shared with every other program on the machine, and the
-// fixed \`ruvyxa-isr-cache\` under it was shared with every other Ruvyxa
-// deployment and with every previous build of this one — read *before* the
-// bundled prerender output, so whatever was already there won. A redeploy
-// served the previous build's documents, whose \`<script src>\` names client
-// chunks the new build no longer publishes, until each page's revalidate
-// window expired.
-//
-// Both halves of the identity are hashed rather than either alone: the build
-// id is what changes on a redeploy to the same path, and the bundle directory
-// is what differs between two deployments on one host — which the build id
-// does not, for two deployments of the same application. Hashed rather than
-// joined, because a caller-supplied string is not a path segment until
-// something says it is. Same decision, and the same reason, as
-// \`sharedServerSource\` in \`@ruvyxa/core\`.
-const isrCacheDir = path.join(
-  os.tmpdir(),
-  'ruvyxa-isr-cache',
-  createHash('sha256')
-    .update(${JSON.stringify(buildId)} + ':' + import.meta.dirname)
-    .digest('hex')
-    .slice(0, 32),
-);
-// Created up front and owner-only, because the parent is mode 1777 on Linux:
-// anything may create a name there first, and a file or a symlink planted at a
-// route's cache path would be served as that page and written through on the
-// next refresh. Fail-soft on purpose — a host whose temporary directory cannot
-// be written to still serves every page, because an ordinary ISR write that
-// fails is caught downstream. Making this fatal would turn a degraded cache
-// into a deployment that does not boot.
-try {
-  mkdirSync(isrCacheDir, { recursive: true, mode: 0o700 });
-} catch {
-  // Left to the per-write failure path, which already tolerates it.
-}
+${isrTemporaryCacheSource(buildId)}
 
 const readEntry = (htmlPath, revalidate) => {
   const html = readFileSync(htmlPath, 'utf8');

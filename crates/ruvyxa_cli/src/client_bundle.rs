@@ -1513,9 +1513,19 @@ pub(crate) fn emit_shared_route_chunk(
 /// chunk, so a byte-identical rebuild produces the same URL and a changed
 /// stylesheet can never be served from a cache under the old one.
 ///
-/// The URL is also recorded in `route-manifest.json`, which is the file every
-/// host already reads to find a route's scripts: the Rust server, the generated
-/// standalone server, and each adapter's function bundle.
+/// The URL is also recorded in `route-manifest.json`, under `styles`, which is
+/// where both document renderers read it from: `built_style_asset` in
+/// `ruvyxa_dev_server` and `styleHeadTag` in `runtime/adapter-runner.mjs`.
+///
+/// Not "the file every host reads to find a route's scripts", which this comment
+/// used to say and which is a different file. A route's *scripts* come from
+/// `client-report.json` at the build root, through `prebuilt_client_assets`;
+/// `route-manifest.json` is the lean table the browser router fetches over the
+/// network, and the stylesheet travels in it because that is the copy a
+/// deployed function bundle can reach. Believing the one sentence sent
+/// `test-full-flow.ps1`'s manifest-cache probe at the wrong file, where it
+/// perturbed something the code path under test never opens and reported a
+/// stale cache on every run.
 pub(crate) fn write_style_asset(client_dir: &Path, css: &str) -> std::io::Result<Option<String>> {
     if css.trim().is_empty() {
         return Ok(None);

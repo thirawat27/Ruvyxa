@@ -68,6 +68,8 @@ export {
   DEFAULT_IMAGE_MAX_WIDTH,
   DEFAULT_SECURITY_HEADERS,
   headersFileContents,
+  isrTemporaryCacheDirSource,
+  isrTemporaryCacheSource,
   IMMUTABLE_CACHE_CONTROL,
   assertSafeOutDirForCommand,
   projectRelativeOutDir,

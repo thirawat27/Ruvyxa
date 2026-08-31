@@ -277,6 +277,77 @@ export function projectRelativeOutDir(ctx: BuildContext): string {
   return outDir
 }
 
+/**
+ * The directory a temporary ISR cache writes to, as generated JavaScript.
+ *
+ * One expression for all four hosts that have one. That is not tidiness: the
+ * three serverless adapters and `standaloneServerSource` each declared this
+ * themselves, and it is how `CORE-10` came to be fixed in exactly one of them.
+ * The finding named `isrCache: 'tmp'`, that copy was corrected, and Vercel,
+ * Netlify and Firebase went on writing to a fixed
+ * `os.tmpdir()/ruvyxa-isr-cache` — the same directory for every Ruvyxa
+ * deployment on the host and for every previous build of this one, read
+ * *before* the bundled prerender output, so whatever was there won.
+ *
+ * Both halves of the identity are hashed rather than either alone: the build id
+ * is what changes on a redeploy to the same path, and the bundle's own location
+ * is what differs between two deployments on one host — which the build id does
+ * not, for two deployments of the same application. Hashed rather than joined,
+ * because a caller-supplied string is not a path segment until something says
+ * it is.
+ *
+ * The emitted expression needs `os`, `path` and `createHash` in scope.
+ *
+ * @param buildId the build's own id, from `ctx.deployManifest?.buildId`
+ * @param dirname a generated expression for the bundle's own directory
+ * @returns a JavaScript expression, ready to interpolate
+ */
+export function isrTemporaryCacheDirSource(buildId: string, dirname: string): string {
+  return `path.join(
+  os.tmpdir(),
+  'ruvyxa-isr-cache',
+  createHash('sha256')
+    .update(${JSON.stringify(buildId)} + ':' + ${dirname})
+    .digest('hex')
+    .slice(0, 32),
+)`
+}
+
+/**
+ * The whole ISR temporary-cache preamble a function-bundle adapter emits.
+ *
+ * The declaration from [[isrTemporaryCacheDirSource]] plus the directory
+ * creation. Creation is separate because it is the half that legitimately
+ * differs: `standaloneServerSource` reports a failure through the structured
+ * logger it generates, and a serverless handler has none, so it leaves the
+ * failure to the per-write path that already tolerates it. Only the identity
+ * has one right answer, and only the identity is shared here.
+ *
+ * The emitted code needs `createHash` from `node:crypto`, `mkdirSync` from
+ * `node:fs`, and `os` and `path` in scope. It declares `isrCacheDir`.
+ *
+ * @param buildId the build's own id, from `ctx.deployManifest?.buildId`
+ * @returns generated JavaScript, ready to interpolate into a handler template
+ */
+export function isrTemporaryCacheSource(buildId: string): string {
+  return `// A name nothing else on the host answers to. See
+// \`isrTemporaryCacheDirSource\` in \`@ruvyxa/core\` for why both halves of the
+// identity are hashed, and for the deployment this went wrong on.
+const isrCacheDir = ${isrTemporaryCacheDirSource(buildId, 'import.meta.dirname')};
+// Created up front and owner-only, because the parent is mode 1777 on Linux:
+// anything may create a name there first, and a file or a symlink planted at a
+// route's cache path would be served as that page and written through on the
+// next refresh. Fail-soft on purpose — a host whose temporary directory cannot
+// be written to still serves every page, because an ordinary ISR write that
+// fails is caught downstream. Making this fatal would turn a degraded cache
+// into a deployment that does not boot.
+try {
+  mkdirSync(isrCacheDir, { recursive: true, mode: 0o700 });
+} catch {
+  // Left to the per-write failure path, which already tolerates it.
+}`
+}
+
 export function validateBuildContext(
   ctx: BuildContext,
   adapterName: string,

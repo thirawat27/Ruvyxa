@@ -6,6 +6,7 @@ import {
   PUBLIC_ASSET_CACHE_CONTROL,
   STATIC_ASSET_EXTENSIONS,
   STATIC_CONTENT_TYPES,
+  isrTemporaryCacheDirSource,
 } from './utils.js'
 
 /**
@@ -90,29 +91,13 @@ function sharedServerSource(
 
   // A name nothing else on the host answers to.
   //
-  // `os.tmpdir()` is shared with every other program on the machine, and the
-  // fixed `ruvyxa-isr-cache` under it was shared with every other Ruvyxa
-  // deployment and with every previous build of this one — read *before* the
-  // bundled prerender output, so whatever was already there won. A redeploy of
-  // an Amplify compute bundle served the previous build's documents, whose
-  // `<script src>` names client chunks the new build no longer publishes, until
-  // each page's revalidate window expired.
-  //
-  // Both halves of the identity are hashed rather than either alone: the build
-  // id is what changes on a redeploy to the same path, and `here` is what
-  // differs between two deployments on one host — which the build id does not,
-  // for two deployments of the same application. Hashed rather than joined,
-  // because a caller-supplied string is not a path segment until something says
-  // it is.
+  // The reasoning, and the deployment it went wrong on, are on
+  // [[isrTemporaryCacheDirSource]] rather than here: the three serverless
+  // adapters emit the same expression, and this used to be the only one of the
+  // four that was right. `here` is this host's spelling of the bundle's own
+  // location, which is the half of the identity the build id does not supply.
   const isrCacheDirectory = temporaryIsrCache
-    ? `path.join(
-  os.tmpdir(),
-  'ruvyxa-isr-cache',
-  createHash('sha256')
-    .update(${JSON.stringify(options.buildId ?? '')} + ':' + here)
-    .digest('hex')
-    .slice(0, 32),
-)`
+    ? isrTemporaryCacheDirSource(options.buildId ?? '', 'here')
     : 'prerenderDir'
 
   // Created up front and owner-only, because the parent is mode 1777 on Linux:

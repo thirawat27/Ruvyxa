@@ -4,6 +4,20 @@
 > (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use
 > checkbox (`- [ ]`) syntax for tracking.
 
+> **Status, 2026-08-30: this plan is complete, and its checkboxes are not the record.**
+>
+> Not one of the 159 boxes was ever ticked, so reading them says "nothing was done" about work that
+> is finished and committed. They are left as written rather than back-filled: ticking a box now
+> would assert a step-level verification nobody performed at the time, which is the same
+> unearned-confidence failure this programme kept finding in the code.
+>
+> The record is `.superpowers/sdd/progress.md`, and the tree itself. Every phase was afterwards
+> walked finding by finding against the source rather than against this file, which is how three
+> tasks were caught half-landed — `Task 11` (`RUV-H6`), `BUNF-07`, and `CORE-10`. All three failed
+> the same way: the finding names one defect, the code holds several copies of it, and fixing the
+> copy the finding points at looks exactly like fixing the defect. A plan whose unit is a finding
+> cannot see that; only the source can.
+
 **Goal:** Fix all 141 findings in [`SYSTEM_AUDIT_REPORT.md`](../../../SYSTEM_AUDIT_REPORT.md),
 highest-harm first, in small isolated batches that each end verified.
 

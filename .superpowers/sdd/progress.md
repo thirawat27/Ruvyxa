@@ -691,3 +691,39 @@ Two things worth keeping from doing it:
 
 Phases 1 through 6 have now each been walked item by item. Three tasks were found half-landed this
 way, all three by the same mechanism, and none of them by sampling.
+
+## 2026-08-30 — the duplication that caused the miss, measured and closed
+
+Three tasks landed half-finished this session, all by one mechanism: a rule with N copies, fixed in
+the copy the finding pointed at. Rather than guess where else that sits, it was measured.
+
+Across the eleven adapters, string-literal duplication is thin — fourteen literals appear in three
+or more, and twelve of those are artefacts of the scan. Only `'ruvyxa-isr-cache'` and
+`'./route-modules.mjs'` are real, and the second is a legitimate import path. So a gate against
+repeated literals would have found roughly one true thing and a great deal of noise, and was not
+written.
+
+The generated handler sources are the opposite. Vercel emits 212 lines, Netlify 181, Firebase 133,
+and 64 substantive lines are identical across all three — thirty of which were the comment block
+explaining the ISR cache identity, which had to be typed three times to fix `CORE-10`. That is the
+seam, and one region of it is cohesive and contiguous in all four hosts: the directory derivation.
+
+`isrTemporaryCacheDirSource` in `@ruvyxa/core` is now the only place it is spelled. The split is at
+the seam `standalone-server.ts` had already found: the _identity_ has one right answer and is
+shared, while _creating_ the directory legitimately differs — the standalone server reports a
+failure through the structured logger it generates, and a serverless handler has none, so it leaves
+the failure to the per-write path that already tolerates it.
+
+Two verifications, because a pure move needs both:
+
+- Breaking the shared generator turns all three adapter suites red, so each really reaches it. The
+  standalone server's own suites — 11 and 115 — stay green, so the move changed nothing it emits.
+- A new test scans every tracked source for the join and asserts exactly one file spells it.
+  Reintroducing the fixed name in the Netlify adapter turns it red naming the rule. It is a source
+  scan rather than a behavioural assertion on purpose: the failure mode is _a second declaration
+  site_, and no output can show one exists.
+
+What was deliberately not consolidated: the rest of the shared 64 lines — `readEntry`, the
+`createHandler` option block, `writePrerendered` — interleave with per-host code differently in each
+adapter, so extracting them is a refactor with real risk rather than a move. It stays open, and this
+is the record of it rather than an implication that the duplication is gone.
