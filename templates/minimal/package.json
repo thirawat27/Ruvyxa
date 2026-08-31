@@ -22,6 +22,9 @@
     "test:parity": "ruvyxa test:parity",
     "plugin": "ruvyxa plugin"
   },
+  "allowScripts": {
+    "@parcel/watcher": false
+  },
   "dependencies": {
     "@ruvyxa/react": "^1.1.4",
     "ruvyxa": "^1.1.4",
