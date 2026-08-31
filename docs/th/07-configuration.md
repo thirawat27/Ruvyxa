@@ -11,17 +11,17 @@ source type ของมัน
 
 ## Option หลัก
 
-| Key                                                                      | Type / ค่าเริ่มต้น                                     | ผลกระทบ                                                                  |
-| ------------------------------------------------------------------------ | ------------------------------------------------------ | ------------------------------------------------------------------------ |
-| `appDir`, `outDir`                                                       | string                                                 | ตำแหน่ง app source และ generated output                                  |
-| `runtime`                                                                | `node \| bun \| deno \| edge \| static`, ปริยาย `node` | นโยบาย runtime/target                                                    |
-| `typedRoutes`                                                            | boolean, ปริยาย `false`                                | สร้าง `.ruvyxa/types/routes.d.ts` เพื่อตรวจ `<Link href>` กับ route จริง |
-| `server.host`, `server.port`                                             | string, number                                         | address ที่ฟัง ดู [Listening address](#listening-address)                |
-| `build.minify`, `map`, `treeShake`, `manifest`, `warm`, `prerenderCache` | boolean; cache ปริยาย true                             | พฤติกรรม compiler/build artifact                                         |
-| `build.split`                                                            | `single \| route \| manual`                            | นโยบาย bundle splitting                                                  |
-| `build.workers`                                                          | number                                                 | build parallelism ดูหมายเหตุด้านล่าง                                     |
-| `render.strategy`, `render.revalidate`                                   | strategy, seconds                                      | นโยบาย page rendering ปริยาย                                             |
-| `cache.routes`, `cache.css`, `cache.dir`, `cache.handler`                | boolean/string                                         | setting route/CSS/cache directory                                        |
+| Key                                                                           | Type / ค่าเริ่มต้น                                     | ผลกระทบ                                                                  |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------ |
+| `appDir`, `outDir`                                                            | string                                                 | ตำแหน่ง app source และ generated output                                  |
+| `runtime`                                                                     | `node \| bun \| deno \| edge \| static`, ปริยาย `node` | นโยบาย runtime/target                                                    |
+| `typedRoutes`                                                                 | boolean, ปริยาย `false`                                | สร้าง `.ruvyxa/types/routes.d.ts` เพื่อตรวจ `<Link href>` กับ route จริง |
+| `server.host`, `server.port`                                                  | string, number                                         | address ที่ฟัง ดู [Listening address](#listening-address)                |
+| `build.minify`, `map`, `treeShake`, `manifest`, `warm`, `prerenderCache`      | boolean; cache ปริยาย true                             | พฤติกรรม compiler/build artifact                                         |
+| `build.split`                                                                 | `single \| route \| manual`                            | นโยบาย bundle splitting                                                  |
+| `build.workers`                                                               | number                                                 | build parallelism ดูหมายเหตุด้านล่าง                                     |
+| `render.strategy`, `render.revalidate`                                        | strategy, seconds                                      | นโยบาย page rendering ปริยาย                                             |
+| `cache.routes`, `cache.css`, `cache.dir`, `cache.handler`, `cache.maxEntries` | boolean/string                                         | setting route/CSS/cache directory                                        |
 
 ## แผนที่ option แบบครบกลุ่ม
 
@@ -355,6 +355,52 @@ export async function revalidateTag(tags) {
 ไม่บังคับ และไม่มี fallback ของ platform: tag ติดป้ายอะไรก็ตามที่แอปตัดสินใจติด ส่วน cache ของ
 platform ที่ key ด้วย URL ไม่มีอะไรให้ค้นด้วย tag ได้ โปรเจกต์ที่ไม่ประกาศ handler ทำงานเหมือนเดิม
 คือ `revalidateTag()` เคลียร์ process เดียว
+
+module เดียวกันนี้รองรับ `cache()` ได้ด้วย ซึ่งเป็นอีกครึ่งของสิ่งที่ Next.js วางไว้หลัง
+`cacheHandler`:
+
+```js
+export async function readData(key) {
+  const row = await store.get(key)
+  // `populatedAt` คือเวลาที่ค่านั้นถูกผลิต ส่วนช่วงความสดถูกคำนวณใหม่จาก `ttl`
+  // ที่โค้ดฝั่งเรียกขอมา entry ที่ instance อื่นเขียนไว้ด้วย ttl ยาวกว่า
+  // จึงยืดอายุที่นี่ไม่ได้
+  return row ? { value: row.value, populatedAt: row.populatedAt } : null
+}
+
+export async function writeData(key, entry) {
+  await store.set(key, entry)
+}
+```
+
+store ใน memory ของ process ยังตอบก่อนเสมอ — มันคือชั้นที่เร็ว และเป็นที่เดียวกับที่
+`cacheMaxMemorySize` ของ Next.js อยู่ เฉพาะตอน miss ในเครื่องเท่านั้นที่ไปถาม shared store และเฉพาะ
+miss ทั้งสองชั้นเท่านั้นที่ producer จะทำงาน ส่วนการเขียนถูกส่งออกไปโดย request ไม่ต้องรอ
+
+store ที่ throw คือ cache ที่ช้าลง ไม่ใช่ request ที่ล้มเหลว: error ถูกรายงาน แล้ว producer ทำงานต่อ
+ถ้าไม่ประกาศเลยไม่มีต้นทุนใดๆ — เส้นทางที่ไม่มี handler ไม่แม้แต่จะสร้าง promise
+
+### `cache.maxEntries` — เก็บ `cache()` ไว้ใน process นี้เท่าไหร่
+
+```ts
+export default {
+  cache: { handler: './cache-handler.mjs', maxEntries: 0 },
+}
+```
+
+ชั้น in-memory เก็บ 1024 entry เป็นค่าเริ่มต้น เกินจากนั้นจะ evict ตัวที่ใช้ล่าสุดนานที่สุด ใส่ `0`
+เพื่อปิดทิ้งทั้งชั้น ทุกการอ่านจะไปถึง shared store
+
+นี่คือค่าที่ควรใช้เมื่อ deployment รันหลาย instance หลัง shared store เดียวกัน: สำเนาต่อ instance
+ที่วางอยู่หน้า store ที่แชร์ คือสิ่งที่ทำให้สอง instance ตอบ key เดียวกันไม่เหมือนกัน
+การปิดมันคือการแลก round trip หนึ่งครั้งกับคำตอบเดียว
+
+Next.js เรียกการตัดสินใจเดียวกันนี้ว่า `cacheMaxMemorySize` และ `0` มีความหมายเดียวกัน
+หน่วยต่างกันโดยตั้งใจ — store นี้นับเป็น entry และไม่มีการนับขนาดที่จะตอบ budget แบบไบต์ได้
+ถ้าไปประมาณเอาก็จะได้ budget ที่ไม่มีใครเชื่อถือได้
+
+ค่าที่ไม่ใช่จำนวนเต็มของ entry จะถูกรายงานแล้วเมิน: bound ที่ใช้ไม่ได้ต้องไม่กลายเป็น "ไม่มี cache"
+หรือ "ไม่จำกัด" อย่างเงียบๆ ซึ่งเป็นสองทิศทางที่เจ็บ และหน้าตาเหมือน โค้ดที่ทำงานได้ทั้งคู่
 
 **ก่อนหน้า:** [UI, navigation, metadata และ asset](06-ui-navigation-metadata-and-assets.md) ·
 **ถัดไป:** [Plugin และ middleware](08-plugins-middleware.md)

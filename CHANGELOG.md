@@ -2,6 +2,38 @@
 
 ## v1.1.4 (2026-08-31)
 
+### `cache.maxEntries` — the in-memory tier is no longer a fixed 1024
+
+It was a constant, so a deployment could supply a shared store and still keep a per-instance copy in
+front of it — which is the thing that makes two instances answer the same key differently. The bound
+is now configuration, and `0` turns the local tier off so every read reaches the shared store.
+
+`0` genuinely means off. It used to store the first entry and thrash from there, because the
+eviction loop cannot evict from an empty map: a cache that was neither on nor off. The bound is also
+read per write rather than captured when the store is constructed, because this module is evaluated
+before the route registry installs anything — a captured value would have been the default in
+exactly the deployments that set it.
+
+Next.js spells the same decision `cacheMaxMemorySize`. The unit differs on purpose: this store
+counts entries and has no size accounting to answer a byte budget with.
+
+### `cache()` can read and write through the project's own store
+
+The in-memory store behind `cache()` was per-process, so every instance of a deployment produced the
+same value independently and none of them could see another's. `cache.handler` now accepts optional
+`readData` and `writeData` exports, and a local miss consults the shared store before running the
+producer.
+
+The process's own store still answers first, because it is the fast tier — the same place Next.js
+puts `cacheMaxMemorySize`. The freshness window is recomputed from the `ttl` the calling code asked
+for rather than read from the stored entry, so an entry another instance wrote with a longer window
+cannot extend it here, and a clock that runs fast on the writer cannot extend it on every reader.
+
+Writes are published without the request waiting on them, and a store that throws is reported and
+then ignored — a slower cache, not a failed request. A project that declares no handler pays
+nothing: that path does not even allocate a promise, which is checked by the existing single-flight
+test that asserts a cold producer starts on the very next microtask.
+
 ### `revalidateTag()` reaches every instance, not only the one that served the mutation
 
 It cleared this process's own `cache()` entries and stopped there. For a single container that is

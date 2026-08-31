@@ -163,6 +163,18 @@ export interface RuvyxaConfig {
      * // queued during the request, so an invalidation reaches every instance
      * // instead of only the one that served the mutation.
      * export async function revalidateTag(tags: string[]) {}
+     *
+     * // Optional. The `cache()` data store, shared the same way. `populatedAt`
+     * // is when the value was produced; the freshness window is recomputed
+     * // from the caller's own `ttl`, so a stored entry cannot outlive it.
+     * export async function readData(key: string) {
+     *   return { value: …, populatedAt: 1735689600000 } // or null
+     * }
+     * export async function writeData(key: string, entry: {
+     *   value: unknown
+     *   populatedAt: number
+     *   tags?: readonly string[]
+     * }) {}
      * ```
      *
      * The store a deployed build writes ISR documents to is normally the
@@ -177,6 +189,20 @@ export interface RuvyxaConfig {
      * store for it.
      */
     handler?: string
+    /**
+     * Entries the in-memory `cache()` tier holds before LRU eviction.
+     *
+     * Defaults to 1024. `0` turns the tier off entirely, which is what a
+     * deployment running several instances behind one shared store wants: a
+     * per-instance copy in front of a shared one is the thing that makes two
+     * instances disagree about the same key.
+     *
+     * Next.js spells this decision `cacheMaxMemorySize`, and `0` means the same
+     * there. The unit differs on purpose: this store counts entries and has no
+     * size accounting to answer a byte budget with, and a budget that estimated
+     * would be one nobody could rely on.
+     */
+    maxEntries?: number
   }
   site?: SiteConfig
   /**

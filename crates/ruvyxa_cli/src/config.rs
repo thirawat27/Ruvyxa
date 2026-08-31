@@ -257,6 +257,13 @@ pub(crate) struct CacheConfigOptions {
     /// registry, which is the one module every adapter's handler already
     /// imports.
     pub(crate) handler: Option<String>,
+    /// Entries the in-memory `cache()` tier holds before LRU eviction.
+    ///
+    /// `0` turns the tier off, which is what a deployment running several
+    /// instances behind one shared store wants: a per-instance copy in front of
+    /// a shared one is the thing that makes two instances disagree. Read into
+    /// the deployed bundle by `documentCacheHandlerPrelude`, never by the CLI.
+    pub(crate) max_entries: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]

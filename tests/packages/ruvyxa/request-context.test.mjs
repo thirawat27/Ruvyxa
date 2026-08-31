@@ -33,6 +33,7 @@ import {
 } from '../../../packages/@ruvyxa/core/dist/server.js'
 
 const CONTEXT_KEY = '__RUVYXA_REQUEST_CONTEXT__'
+const DATA_CACHE_KEY = '__RUVYXA_DATA_CACHE__'
 const REVALIDATION_CONFORMANCE = JSON.parse(
   sourceOf('../../fixtures/revalidation-conformance.json'),
 )
@@ -57,6 +58,21 @@ describe('the two halves agree', () => {
       assert.ok(sourceOf(file).includes(CONTEXT_KEY), `${file} must reference ${CONTEXT_KEY}`)
     }
     assert.equal(typeof globalThis[CONTEXT_KEY]?.current, 'function')
+  })
+
+  // The second handshake, and the same problem. `cache()` reads a project's
+  // shared data store off `globalThis` because `server.ts` is bundled for edge
+  // targets and cannot import from `runtime/`; the registry prelude in
+  // `adapter-runner.mjs` is what puts it there. A rename in one file and not
+  // the other produces a deployment whose `cache.handler` is never consulted
+  // and whose build reports nothing — every instance quietly caching alone.
+  it('uses the same shared-data-cache key on both sides', () => {
+    for (const file of [
+      '../../../packages/@ruvyxa/core/src/server.ts',
+      '../../../packages/ruvyxa/runtime/adapter-runner.mjs',
+    ]) {
+      assert.ok(sourceOf(file).includes(DATA_CACHE_KEY), `${file} must reference ${DATA_CACHE_KEY}`)
+    }
   })
 })
 

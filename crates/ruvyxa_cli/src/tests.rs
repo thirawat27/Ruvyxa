@@ -4381,6 +4381,31 @@ fn a_configured_document_store_is_named() {
     );
 }
 
+/// Turning the in-memory tier off is reported, because it is not a small cache.
+///
+/// `0` means every `cache()` read reaches the shared store. Behind one that is
+/// the right trade; in front of nothing it is a deployment that made every read
+/// a miss and has no message saying so.
+#[test]
+fn a_disabled_local_cache_is_reported() {
+    let read = |value: serde_json::Value| {
+        let config: crate::config::ProjectConfig =
+            serde_json::from_value(serde_json::json!({ "cache": value }))
+                .expect("the fixture config must deserialize");
+        crate::build::local_cache_is_disabled(&config)
+    };
+
+    assert!(read(serde_json::json!({ "maxEntries": 0 })));
+    assert!(
+        !read(serde_json::json!({ "maxEntries": 1 })),
+        "a bound of one is a very small cache, not a disabled one"
+    );
+    assert!(
+        !read(serde_json::json!({})),
+        "a project that declares nothing keeps the default tier"
+    );
+}
+
 /// A platform config the adapter declined to write is named, not swallowed.
 ///
 /// `skipIfExists` defers to the file the project keeps under version control,

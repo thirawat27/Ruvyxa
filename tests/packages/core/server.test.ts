@@ -503,3 +503,215 @@ describe('cache', () => {
     )
   })
 })
+
+describe('cache() through a project shared store', () => {
+  const DATA_CACHE_KEY = '__RUVYXA_DATA_CACHE__'
+  const globals = globalThis as Record<string, unknown>
+
+  function install(store: unknown): () => void {
+    const previous = globals[DATA_CACHE_KEY]
+    globals[DATA_CACHE_KEY] = store
+    return () => {
+      globals[DATA_CACHE_KEY] = previous
+    }
+  }
+
+  // The whole point: an instance that never ran the producer still answers,
+  // because another one already did and wrote it where both can see. Without
+  // this every instance caches alone, which is per-instance caching wearing the
+  // word "cache".
+  it('answers from the shared store without running the producer', async () => {
+    let produced = 0
+    const restore = install({
+      readData: () => ({ value: 'from the shared store', populatedAt: Date.now() }),
+      writeData: () => {},
+    })
+    try {
+      const value = await cache(`shared-hit-${Math.random()}`)
+        .ttl('60s')
+        .get(() => {
+          produced += 1
+          return 'produced locally'
+        })
+      assert.equal(value, 'from the shared store')
+      assert.equal(produced, 0, 'the producer ran even though the shared store answered')
+    } finally {
+      restore()
+    }
+  })
+
+  // The freshness window belongs to the caller, not to the entry. A store that
+  // hands back something produced an hour ago must not satisfy a one-minute
+  // `ttl`, however the writer labelled it.
+  it('recomputes the window from this caller ttl, not from the entry', async () => {
+    let produced = 0
+    const restore = install({
+      readData: () => ({ value: 'stale', populatedAt: Date.now() - 3_600_000 }),
+      writeData: () => {},
+    })
+    try {
+      const value = await cache(`shared-expired-${Math.random()}`)
+        .ttl('60s')
+        .get(() => {
+          produced += 1
+          return 'produced locally'
+        })
+      assert.equal(value, 'produced locally')
+      assert.equal(produced, 1)
+    } finally {
+      restore()
+    }
+  })
+
+  it('publishes a produced value to the shared store', async () => {
+    const written: Array<{ key: string; value: unknown }> = []
+    const key = `shared-write-${Math.random()}`
+    const restore = install({
+      readData: () => null,
+      writeData: (writtenKey: string, entry: { value: unknown; populatedAt: number }) => {
+        written.push({ key: writtenKey, value: entry.value })
+        assert.equal(typeof entry.populatedAt, 'number')
+      },
+    })
+    try {
+      await cache(key)
+        .ttl('60s')
+        .get(() => 'produced locally')
+      // Not awaited by the caller — a request must not wait on a remote write —
+      // so the publish lands on a later tick.
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      assert.deepEqual(written, [{ key, value: 'produced locally' }])
+    } finally {
+      restore()
+    }
+  })
+
+  // A store this process cannot reach is a slower cache, not a failed request.
+  it('produces normally when the shared store throws', async () => {
+    const restore = install({
+      readData: () => {
+        throw new Error('store unreachable')
+      },
+      writeData: () => {
+        throw new Error('store unreachable')
+      },
+    })
+    try {
+      const value = await cache(`shared-throws-${Math.random()}`)
+        .ttl('60s')
+        .get(() => 'produced locally')
+      assert.equal(value, 'produced locally')
+    } finally {
+      restore()
+    }
+  })
+
+  // A project that declares no handler must behave exactly as it did.
+  it('is untouched when no shared store is installed', async () => {
+    const restore = install(undefined)
+    try {
+      const key = `no-store-${Math.random()}`
+      const first = await cache(key)
+        .ttl('60s')
+        .get(() => 'produced once')
+      const second = await cache(key)
+        .ttl('60s')
+        .get(() => 'produced twice')
+      assert.equal(first, 'produced once')
+      assert.equal(second, 'produced once', 'the local store must still answer the second read')
+    } finally {
+      restore()
+    }
+  })
+})
+
+describe('cache.maxEntries', () => {
+  const DATA_CACHE_KEY = '__RUVYXA_DATA_CACHE__'
+  const globals = globalThis as Record<string, unknown>
+
+  function install(config: unknown): () => void {
+    const previous = globals[DATA_CACHE_KEY]
+    globals[DATA_CACHE_KEY] = config
+    return () => {
+      globals[DATA_CACHE_KEY] = previous
+    }
+  }
+
+  it('defaults to 1024 when nothing is configured', () => {
+    const restore = install(undefined)
+    try {
+      assert.equal(cacheStats().maxEntries, 1024)
+    } finally {
+      restore()
+    }
+  })
+
+  it('reports the configured bound', () => {
+    const restore = install({ maxEntries: 8 })
+    try {
+      assert.equal(cacheStats().maxEntries, 8)
+    } finally {
+      restore()
+    }
+  })
+
+  // Zero is off, not "hold one". The eviction loop cannot evict from an empty
+  // map, so a bound of zero used to store the first entry and thrash from
+  // there — a cache that is neither on nor off. A deployment that turns the
+  // local tier off is asking for every read to reach the shared store.
+  it('stores nothing at all when the bound is zero', async () => {
+    const restore = install({ maxEntries: 0 })
+    try {
+      let produced = 0
+      const key = `bound-zero-${Math.random()}`
+      const read = () =>
+        cache(key)
+          .ttl('60s')
+          .get(() => {
+            produced += 1
+            return produced
+          })
+      // A delta, not an absolute: the store is module-level and every test in
+      // this file shares it, so its size here is whatever the file has already
+      // put in it.
+      const before = cacheStats().size
+      assert.equal(await read(), 1)
+      assert.equal(await read(), 2, 'the second read was answered from a tier that is turned off')
+      assert.equal(cacheStats().size, before, 'a tier that is off still grew')
+    } finally {
+      restore()
+    }
+  })
+
+  // The bound is read per write, not captured when the store was constructed:
+  // this module is evaluated before the route registry installs anything, so a
+  // captured value would always be the default and the setting would do
+  // nothing in exactly the deployments that set it.
+  it('takes effect after the store already exists', async () => {
+    const restore = install({ maxEntries: 1 })
+    try {
+      await cache(`bound-late-a-${Math.random()}`)
+        .ttl('60s')
+        .get(() => 'a')
+      await cache(`bound-late-b-${Math.random()}`)
+        .ttl('60s')
+        .get(() => 'b')
+      assert.ok(cacheStats().size <= 1, `a bound of 1 held ${cacheStats().size} entries`)
+    } finally {
+      restore()
+    }
+  })
+
+  // An unusable bound must not silently become "no cache" or "unbounded" —
+  // those are the two directions that hurt, and both look like working code.
+  it('falls back to the default for a bound it cannot use', () => {
+    for (const bad of [-1, 1.5, Number.NaN]) {
+      const restore = install({ maxEntries: bad })
+      try {
+        assert.equal(cacheStats().maxEntries, 1024, `${bad} should not change the bound`)
+      } finally {
+        restore()
+      }
+    }
+  })
+})

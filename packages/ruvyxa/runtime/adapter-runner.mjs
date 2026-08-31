@@ -1548,9 +1548,22 @@ function instrumentationPrelude() {
  * decides for itself whether it has a store to fall back to.
  */
 function documentCacheHandlerPrelude() {
+  // The in-memory bound travels whether or not a handler does. A deployment
+  // that shrinks or disables the local tier has said something about its own
+  // memory, and that is true of a project with no shared store at all.
+  const maxEntries = projectConfig?.cache?.maxEntries
+  const boundLine =
+    typeof maxEntries === 'number' ? [`  maxEntries: ${JSON.stringify(maxEntries)},`] : []
+
   const configured = projectConfig?.cache?.handler
   if (typeof configured !== 'string' || configured.trim() === '') {
-    return 'export const documentCacheHandler = null'
+    if (boundLine.length === 0) return 'export const documentCacheHandler = null'
+    return [
+      'globalThis.__RUVYXA_DATA_CACHE__ = {',
+      ...boundLine,
+      '}',
+      'export const documentCacheHandler = null',
+    ].join('\n')
   }
 
   const entry = path.resolve(projectRoot, configured)
@@ -1565,6 +1578,15 @@ function documentCacheHandlerPrelude() {
     `import * as __ruvyxaCacheHandler from ${JSON.stringify(toImportPath(entry))}`,
     // Named rather than spread, so a module exporting neither is a value this
     // handler can refuse rather than an object that silently answers nothing.
+    // Installed on `globalThis` rather than exported, because the reader is
+    // `cache()` in `@ruvyxa/core/src/server.ts` — bundled for edge targets, so
+    // it cannot import from this directory. The same handshake the request
+    // context already uses, and the same key spelled in both files.
+    'globalThis.__RUVYXA_DATA_CACHE__ = {',
+    ...boundLine,
+    '  readData: __ruvyxaCacheHandler.readData,',
+    '  writeData: __ruvyxaCacheHandler.writeData,',
+    '}',
     'export const documentCacheHandler = {',
     '  read: __ruvyxaCacheHandler.read,',
     '  write: __ruvyxaCacheHandler.write,',

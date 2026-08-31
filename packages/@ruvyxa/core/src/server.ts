@@ -177,8 +177,50 @@ interface PendingCacheWrite {
   promise: Promise<unknown>
 }
 
-/** Maximum cache entries before LRU eviction kicks in. */
+/**
+ * Entries the in-memory tier holds before LRU eviction, when nothing says
+ * otherwise.
+ *
+ * A default rather than a constant. `cache.maxEntries` overrides it, and `0`
+ * turns the tier off entirely — which is what a deployment running several
+ * instances behind a shared store wants, because a per-instance copy in front
+ * of a shared one is the thing that makes two instances disagree. Next.js
+ * spells the same decision `cacheMaxMemorySize`, and `0` means the same there.
+ *
+ * The unit is entries, not bytes, because this store counts entries: it has no
+ * size accounting to answer a byte budget with, and inventing one that
+ * estimated would be a budget nobody could rely on.
+ */
 const CACHE_MAX_ENTRIES = 1024
+
+/**
+ * The entry bound in force right now.
+ *
+ * Read per write rather than captured at construction. `cacheStore` is created
+ * when this module is evaluated, and the route registry installs the
+ * configuration afterwards — a captured value would always be the default. One
+ * property read on a path that is already doing a `Map` write.
+ *
+ * An unusable value is the default, reported once: a bound this process cannot
+ * make sense of must not silently become "no cache" or "unbounded", which are
+ * the two failure directions that hurt.
+ */
+let reportedBadBound = false
+function maxCacheEntries(): number {
+  const configured = dataCacheConfig()?.maxEntries
+  if (configured === undefined) return CACHE_MAX_ENTRIES
+  if (!Number.isInteger(configured) || configured < 0) {
+    if (!reportedBadBound) {
+      reportedBadBound = true
+      console.error(
+        `[ruvyxa] cache.maxEntries must be a whole number of entries, got ${JSON.stringify(configured)}; ` +
+          `using ${CACHE_MAX_ENTRIES}.`,
+      )
+    }
+    return CACHE_MAX_ENTRIES
+  }
+  return configured
+}
 
 /**
  * Production in-memory TTL cache with LRU eviction and stale-while-revalidate.
@@ -204,10 +246,15 @@ class CacheStore {
    */
   readonly #entries = new Map<string, CacheEntry>()
   readonly #pendingWrites = new Map<string, PendingCacheWrite>()
-  readonly #maxEntries: number
+  /** `undefined` means "ask the configuration"; a number pins it, for tests. */
+  readonly #maxEntries: number | undefined
 
-  constructor(maxEntries = CACHE_MAX_ENTRIES) {
+  constructor(maxEntries?: number) {
     this.#maxEntries = maxEntries
+  }
+
+  get maxEntries(): number {
+    return this.#maxEntries ?? maxCacheEntries()
   }
 
   get(key: string): CacheEntry | undefined {
@@ -225,9 +272,20 @@ class CacheStore {
   }
 
   set(key: string, entry: CacheEntry): void {
+    const bound = this.maxEntries
+    // Zero is off, not "hold one". The loop below cannot evict from an empty
+    // map, so a bound of zero used to store the first entry and then thrash —
+    // a cache that is neither on nor off. A deployment that turns the local
+    // tier off is asking for every read to reach the shared store, and getting
+    // one entry ahead of it is the disagreement it was turning the tier off to
+    // avoid.
+    if (bound === 0) {
+      this.#entries.delete(key)
+      return
+    }
     // Updating an existing key does not increase the cache size. Evicting before
     // that check would discard an unrelated LRU entry on every refresh at capacity.
-    while (!this.#entries.has(key) && this.#entries.size >= this.#maxEntries) {
+    while (!this.#entries.has(key) && this.#entries.size >= bound) {
       // Only an empty map frees nothing, and the loop condition cannot hold
       // once it is empty for any `maxEntries >= 1`. The guard covers a store
       // constructed with a capacity of zero rather than a desynchronized
@@ -558,6 +616,7 @@ export function cache(key: string): CacheBuilder {
               // clearing its flag the entry claims a refresh is still running
               // and no later reader ever starts another one, so it serves
               // stale until it falls out of the window entirely.
+              if (committed) writeShared(key, { value, populatedAt, tags })
               if (!committed && cacheStore.peek(key) === cached) cached.refreshing = false
             } catch {
               // Producer failed during background refresh — keep serving stale
@@ -572,8 +631,41 @@ export function cache(key: string): CacheBuilder {
         return cached.value as T
       }
 
-      // Miss or fully expired: produce fresh value with error isolation
+      // Miss or fully expired: ask the project's shared store before producing.
+      //
+      // Between the two tiers on purpose. The local store answers first because
+      // it is the fast one and because Next.js's in-memory tier sits in the same
+      // place; the shared store answers next because a value another instance
+      // already produced is a value this one should not produce again. Only a
+      // miss in both reaches the producer.
+      //
+      // Inside the single flight, so concurrent readers of one cold key make one
+      // store read rather than one each — the same reason the producer is in
+      // here.
       const pending = cacheStore.runSingleFlight<T>(key, async (writeToken) => {
+        const pendingShared = readShared(key)
+        const shared = pendingShared === null ? null : await pendingShared
+        if (shared) {
+          // The window is recomputed from this caller's `ttl`/`swr` rather than
+          // read from the entry: the store knows when the value was produced,
+          // and the code knows how long that is good for.
+          const expiresAt = shared.populatedAt + ttlMs
+          if (expiresAt > Date.now()) {
+            cacheStore.commitWrite(
+              key,
+              writeToken,
+              {
+                value: shared.value,
+                expiresAt,
+                staleUntil: expiresAt + swrMs,
+                refreshing: false,
+                tags,
+              },
+              cached,
+            )
+            return shared.value as T
+          }
+        }
         try {
           const value = await producer()
           assertSharedCachePrivacy()
@@ -586,6 +678,7 @@ export function cache(key: string): CacheBuilder {
             refreshing: false,
             tags,
           })
+          writeShared(key, { value, populatedAt, tags })
           return value
         } catch (error) {
           // If we have stale data, return it rather than propagating the error
@@ -667,7 +760,7 @@ const MAX_REVALIDATED_TAGS_PER_REQUEST = 64
  * Get current cache statistics for observability.
  */
 export function cacheStats(): { size: number; maxEntries: number } {
-  return { size: cacheStore.size, maxEntries: CACHE_MAX_ENTRIES }
+  return { size: cacheStore.size, maxEntries: cacheStore.maxEntries }
 }
 
 export function redirect(location: string, status = 302): Response {
@@ -828,6 +921,91 @@ const CONTEXT_KEY = '__RUVYXA_REQUEST_CONTEXT__'
 
 function host(): RequestContextHost | null {
   return (globalThis as Record<string, unknown>)[CONTEXT_KEY] as RequestContextHost | null
+}
+
+/**
+ * The project's shared data store, installed by the runtime host.
+ *
+ * A `globalThis` key for the same reason `CONTEXT_KEY` is one: this module is
+ * bundled for edge targets and cannot import from `packages/ruvyxa/runtime/`,
+ * while the module that knows what `cache.handler` resolved to is emitted into
+ * the route registry. They agree on a name and nothing else.
+ */
+const DATA_CACHE_KEY = '__RUVYXA_DATA_CACHE__'
+
+/**
+ * What a shared data store hands back for one key.
+ *
+ * `populatedAt` rather than an expiry, on purpose. The freshness window belongs
+ * to the caller — `cache(key).ttl(...)` — and lives in this process; the store
+ * only knows when the value was produced. Recomputing the window locally means
+ * one deployment cannot serve a longer TTL than the code asked for because
+ * another instance wrote the entry with a different one, and it keeps a clock
+ * that runs fast on the writer from extending the window on every reader.
+ */
+interface SharedCacheEntry {
+  value: unknown
+  populatedAt: number
+  tags?: readonly string[]
+}
+
+interface SharedDataCache {
+  readData?: (key: string) => Promise<SharedCacheEntry | null> | SharedCacheEntry | null
+  writeData?: (key: string, entry: SharedCacheEntry) => Promise<void> | void
+  /** `cache.maxEntries`, carried on the same object the host installs. */
+  maxEntries?: number
+}
+
+function dataCacheConfig(): SharedDataCache | null {
+  return ((globalThis as Record<string, unknown>)[DATA_CACHE_KEY] as SharedDataCache | null) ?? null
+}
+
+/**
+ * Read one key from the project's shared store, or `null` for anything else.
+ *
+ * A store that throws is a store this process cannot use for this read, not a
+ * request that fails: the producer below still runs and still answers. Reported
+ * rather than swallowed, because a store that is quietly unreachable is a
+ * deployment paying for one and getting per-instance caching.
+ */
+function readShared(key: string): Promise<SharedCacheEntry | null> | null {
+  const store = dataCacheConfig()
+  // `null`, not `Promise<null>`, and not an `async` function that returns early.
+  // An `async` function yields a microtask even when its first statement
+  // returns, and the caller awaits the result — so declaring no handler would
+  // have moved every cold producer one tick later than it starts today. The
+  // overwhelming majority of deployments are that case; they pay nothing.
+  if (typeof store?.readData !== 'function') return null
+  return (async () => {
+    try {
+      const entry = await store.readData!(key)
+      if (!entry || typeof entry !== 'object') return null
+      if (typeof entry.populatedAt !== 'number' || !Number.isFinite(entry.populatedAt)) return null
+      return entry
+    } catch (error) {
+      console.error('[ruvyxa] cache.handler readData failed:', error)
+      return null
+    }
+  })()
+}
+
+/**
+ * Publish one produced value to the project's shared store.
+ *
+ * Not awaited by the caller. The value is already in this process's own store
+ * and already returned; making a request wait on a remote write would make the
+ * shared cache slower than no cache at all.
+ */
+function writeShared(key: string, entry: SharedCacheEntry): void {
+  const store = dataCacheConfig()
+  if (typeof store?.writeData !== 'function') return
+  try {
+    Promise.resolve(store.writeData(key, entry)).catch((error) => {
+      console.error('[ruvyxa] cache.handler writeData failed:', error)
+    })
+  } catch (error) {
+    console.error('[ruvyxa] cache.handler writeData failed:', error)
+  }
 }
 
 /**

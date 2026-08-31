@@ -620,22 +620,40 @@ pub(crate) fn project_document_store(config: &ProjectConfig) -> Option<&str> {
         .filter(|handler| !handler.is_empty())
 }
 
+/// Whether this build turns the in-memory `cache()` tier off entirely.
+///
+/// Worth its own answer rather than a number in a message. `0` is not a small
+/// cache, it is no cache: every `cache()` read reaches the shared store, which
+/// is the right trade behind one and a surprise in front of nothing.
+pub(crate) fn local_cache_is_disabled(config: &ProjectConfig) -> bool {
+    config.cache.max_entries == Some(0)
+}
+
 fn report_project_document_store(config: &ProjectConfig) {
-    let Some(handler) = project_document_store(config) else {
-        return;
-    };
-    info!(
-        handler,
-        "ISR documents are stored through the project's cache handler"
-    );
-    println!(
-        "  {} {}",
-        dim("note"),
-        dim(format!(
-            "revalidated documents are read and written through {handler}, not the platform's own \
-             store"
-        ))
-    );
+    if let Some(handler) = project_document_store(config) {
+        info!(
+            handler,
+            "ISR documents are stored through the project's cache handler"
+        );
+        println!(
+            "  {} {}",
+            dim("note"),
+            dim(format!(
+                "revalidated documents are read and written through {handler}, not the platform's                  own store"
+            ))
+        );
+    }
+
+    if local_cache_is_disabled(config) {
+        info!("the in-memory cache() tier is disabled by cache.maxEntries");
+        println!(
+            "  {} {}",
+            dim("note"),
+            dim(
+                "cache.maxEntries is 0, so every cache() read reaches the shared store rather                  than a per-instance copy"
+            )
+        );
+    }
 }
 
 fn report_native_only_image_optimization(config: &ProjectConfig, adapter: Option<&str>) {
