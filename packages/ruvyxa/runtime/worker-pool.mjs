@@ -150,6 +150,62 @@ const memoryPressure = new CachePressureController({
 const API_STREAM_CHUNK_BYTES = 64 * 1024
 
 /**
+ * Hand `@ruvyxa/core`'s `cache()` store the bounds this project configured.
+ *
+ * `globalThis.__RUVYXA_DATA_CACHE__` is how that store learns anything: it is
+ * bundled for edge targets and cannot import from this directory, so the
+ * handshake is a global spelled in both files. A deployed build writes it from
+ * the route registry `documentCacheHandlerPrelude()` emits — and that was the
+ * *only* writer, so `cache.maxEntries` and `cache.maxBytes` reached every
+ * platform except the two hosts this worker serves. `ruvyxa dev` and
+ * `ruvyxa start` run a long-lived pool, which is the one place an unbounded
+ * in-memory tier has time to grow, so the bound was missing exactly where it
+ * was load-bearing and the build reported nothing.
+ *
+ * `RUVYXA_DATA_CACHE_MAX_*` are written by `runtime_env` in
+ * `crates/ruvyxa_dev_server/src/render_pipeline.rs`, and only when the project
+ * configured a value — an absent variable leaves the store on its own default
+ * rather than restating it here, because a default written down twice is a
+ * default that drifts.
+ *
+ * Zero is a configured value, not an absent one: `maxEntries: 0` turns the tier
+ * off and `maxBytes: 0` removes the memory ceiling, so a reader that rejected
+ * it would answer the two questions this feature exists to answer with the
+ * default. `positiveIntegerEnv` is therefore the wrong reader here.
+ */
+function wholeNumberEnv(name) {
+  const rawValue = (process.env[name] ?? '').trim()
+  if (!/^\+?\d+$/.test(rawValue)) return undefined
+  const value = Number(rawValue)
+  return Number.isSafeInteger(value) && value >= 0 ? value : undefined
+}
+
+function installDataCacheBounds() {
+  const maxEntries = wholeNumberEnv('RUVYXA_DATA_CACHE_MAX_ENTRIES')
+  const maxBytes = wholeNumberEnv('RUVYXA_DATA_CACHE_MAX_BYTES')
+  if (maxEntries === undefined && maxBytes === undefined) return
+  // Merged onto whatever is already installed rather than assigned over it. No
+  // deployed build runs this module, so nothing writes both today; assigning
+  // would still make this the file that silently dropped a `readData` the day
+  // one did.
+  const installed = globalThis.__RUVYXA_DATA_CACHE__
+  globalThis.__RUVYXA_DATA_CACHE__ = {
+    ...(installed && typeof installed === 'object' ? installed : {}),
+    ...(maxEntries === undefined ? {} : { maxEntries }),
+    ...(maxBytes === undefined ? {} : { maxBytes }),
+  }
+}
+
+installDataCacheBounds()
+
+/** What `cache()` will read, for the `ping` report. `null` when nothing installed one. */
+function dataCacheBounds() {
+  const installed = globalThis.__RUVYXA_DATA_CACHE__
+  if (!installed || typeof installed !== 'object') return null
+  return { maxEntries: installed.maxEntries ?? null, maxBytes: installed.maxBytes ?? null }
+}
+
+/**
  * Requests this worker will execute at once.
  *
  * `activeRequests` was counted but never used to gate admission, so a burst on
@@ -508,6 +564,11 @@ async function dispatchRequest(request, signal) {
         memoryPressureThresholdMb: MEMORY_PRESSURE_THRESHOLD_MB,
         cacheBudget: memoryPressure.snapshot(process.memoryUsage().heapUsed),
         compilerCache: compilerCacheStats(),
+        // The bounds `cache()` is actually running under, read back off the
+        // global rather than off the environment: the question a caller has is
+        // whether the handshake happened, and re-parsing the variable here
+        // would answer it with this line's own arithmetic instead.
+        dataCache: dataCacheBounds(),
       }
     case 'invalidate':
       return { ok: true, traceId: request.traceId, ...invalidateBundleCache(request.paths) }

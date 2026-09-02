@@ -2727,6 +2727,21 @@ pub(crate) fn runtime_env(config: &ServerConfig) -> Result<BTreeMap<String, Stri
         "RUVYXA_RUNTIME".to_string(),
         config.runtime.command().to_string(),
     );
+    // The two `cache()` bounds, on the same channel and for the same reason as
+    // `RUVYXA_ES_TARGET`: the number is decided by `ruvyxa.config.ts` and spent
+    // by `@ruvyxa/core`'s store inside the worker, which has no other way to
+    // learn it. Only inserted when the project configured one, so the absent
+    // case stays the store's own default rather than a value this crate
+    // restates — the second copy of a default is the one that drifts.
+    if let Some(entries) = config.data_cache_max_entries {
+        env.insert(
+            "RUVYXA_DATA_CACHE_MAX_ENTRIES".to_string(),
+            entries.to_string(),
+        );
+    }
+    if let Some(bytes) = config.data_cache_max_bytes {
+        env.insert("RUVYXA_DATA_CACHE_MAX_BYTES".to_string(), bytes.to_string());
+    }
     apply_production_node_env(&mut env, !config.watch);
     Ok(env)
 }

@@ -107,6 +107,8 @@ pub(crate) fn dev_server_config(
     server.prerender_dir = out_dir.join("prerender");
     server.cache_route_manifest = config.cache.route_manifest.unwrap_or(true);
     server.cache_css = config.cache.css.unwrap_or(true);
+    server.data_cache_max_entries = config.cache.max_entries;
+    server.data_cache_max_bytes = config.cache.max_bytes;
     server.style_entries = config.style_entries(&args.root);
     server.prebundle_dependencies = config.build.prebundle_dependencies.unwrap_or(true);
     server.runtime = config.javascript_runtime();
@@ -357,6 +359,8 @@ pub(crate) fn production_server_config(
     server.prerender_dir = out_dir.join("prerender");
     server.cache_route_manifest = config.cache.route_manifest.unwrap_or(true);
     server.cache_css = config.cache.css.unwrap_or(true);
+    server.data_cache_max_entries = config.cache.max_entries;
+    server.data_cache_max_bytes = config.cache.max_bytes;
     server.style_entries = config.style_entries(&out_dir.join("server"));
     server.runtime = config.javascript_runtime();
     server.jsx_runtime = parse_jsx_runtime(config.build.jsx_runtime.as_deref())?;

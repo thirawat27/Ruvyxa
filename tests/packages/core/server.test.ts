@@ -118,6 +118,74 @@ describe('cache', () => {
     )
   })
 
+  /**
+   * A `revalidateTag()` that lands while a cold read is still producing must
+   * not be overwritten by that read's answer.
+   *
+   * `invalidate()` has always dropped matching in-flight writes as well as
+   * stored entries, because a producer that started before the invalidation
+   * holds pre-invalidation data. `invalidateTag()` walked stored entries only,
+   * and a cold key has no stored entry yet — so the ordinary shape of a
+   * mutation (write to the database, then `revalidateTag`) racing a first
+   * reader committed the pre-mutation value under a full TTL, and pushed it to
+   * the shared store where every other instance read it too.
+   */
+  it('drops an in-flight write whose tag was revalidated while it ran', async () => {
+    const shared: Array<{ key: string; value: unknown }> = []
+    const globalRecord = globalThis as typeof globalThis & {
+      __RUVYXA_DATA_CACHE__?: unknown
+    }
+    const previous = globalRecord.__RUVYXA_DATA_CACHE__
+    globalRecord.__RUVYXA_DATA_CACHE__ = {
+      writeData: (key: string, entry: { value: unknown }) => {
+        shared.push({ key, value: entry.value })
+      },
+    }
+    try {
+      let calls = 0
+      let releaseProducer: (() => void) | undefined
+      const started = new Promise<void>((resolve) => {
+        releaseProducer = resolve
+      })
+      let admitProducer: (() => void) | undefined
+      const held = new Promise<void>((resolve) => {
+        admitProducer = resolve
+      })
+
+      const read = (producer: () => unknown | Promise<unknown>) =>
+        cache('race').ttl('5m').tags('posts').get(producer)
+
+      const inFlight = read(async () => {
+        calls += 1
+        releaseProducer?.()
+        await held
+        return { generation: 'before the mutation' }
+      })
+
+      await started
+      revalidateTag('posts')
+      admitProducer?.()
+
+      // The caller still receives what its own producer computed; only the
+      // decision to *keep* it is withdrawn.
+      assert.deepEqual(await inFlight, { generation: 'before the mutation' })
+      assert.equal(calls, 1)
+
+      // The next read must reach a producer rather than the invalidated value.
+      assert.deepEqual(await read(() => ({ generation: 'after the mutation' })), {
+        generation: 'after the mutation',
+      })
+      assert.equal(
+        shared.some((write) => JSON.stringify(write.value).includes('before the mutation')),
+        false,
+        'an invalidated value must not reach the shared store either',
+      )
+    } finally {
+      globalRecord.__RUVYXA_DATA_CACHE__ = previous
+      invalidateCache()
+    }
+  })
+
   it('fails shared writes after request state reads and isolates request scope', async () => {
     const globalRecord = globalThis as typeof globalThis & {
       __RUVYXA_REQUEST_CONTEXT__?: {

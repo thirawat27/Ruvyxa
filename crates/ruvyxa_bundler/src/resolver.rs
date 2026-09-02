@@ -2278,20 +2278,33 @@ fn collect_deps_uncached(
                 result
             }
         } else if specifier.starts_with('#') {
-            // A `#` specifier is private to the package that declares it and can
-            // be nothing else: `tsconfig` `paths` never spell one, and it is not
-            // a package name, so the walk below would treat `#internal` as a
-            // package named `#internal` and find nothing. Node reads it against
-            // the importer's own `package.json` and so does this.
-            match resolve_package_imports_specifier(
-                cache,
-                base_dir,
-                project_root,
-                &specifier,
-                target,
-            ) {
-                PackageExportsResolution::Resolved(path) => Some(path),
-                PackageExportsResolution::Blocked | PackageExportsResolution::Unavailable => None,
+            // A `#` specifier is private to the package that declares it and is
+            // not a package name, so the `node_modules` walk below would treat
+            // `#internal` as a package named `#internal` and find nothing. Node
+            // reads it against the importer's own `package.json` and so does
+            // this — but only after `tsconfig` `paths`, because an alias wins
+            // over what a specifier would otherwise name, which is the rule the
+            // `resolutionOrder` section of
+            // `tests/fixtures/module-resolution-conformance.json` states for
+            // every other non-relative form. This comment used to assert that
+            // `paths` never spells a `#` key; it may, `tsc` honours it, and
+            // `compiler.mjs` resolves `paths` ahead of every specifier shape —
+            // so a project that aliased one had its dev server and prerender
+            // workers take the alias while this half answered nothing.
+            match tsconfig.resolve(&specifier) {
+                Some(path) => Some(path),
+                None => match resolve_package_imports_specifier(
+                    cache,
+                    base_dir,
+                    project_root,
+                    &specifier,
+                    target,
+                ) {
+                    PackageExportsResolution::Resolved(path) => Some(path),
+                    PackageExportsResolution::Blocked | PackageExportsResolution::Unavailable => {
+                        None
+                    }
+                },
             }
         } else if specifier.starts_with('/') || Path::new(&specifier).is_absolute() {
             // Absolute path — framework-generated imports. The `is_absolute`

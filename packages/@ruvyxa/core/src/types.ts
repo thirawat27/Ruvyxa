@@ -989,6 +989,15 @@ export interface AdapterOutput {
    * a closed union left it with nothing honest to write here. `ruvyxa build
    * --adapter <package>` has always resolved an arbitrary adapter package, so
    * the type is what was closed, not the mechanism.
+   *
+   * `(string & {})` is what keeps both halves of that. A plain `| string`
+   * absorbs the union — TypeScript collapses it to `string` and the editor
+   * stops offering `vercel` at all — so the sentence above would still read
+   * true while being false. Static analysers report the intersection as an
+   * empty type worth deleting; it is the same deliberate idiom as `purpose` in
+   * `packages/ruvyxa/src/plugins/pwa.ts`, and nothing but this comment can
+   * hold it, because the two spellings are structurally identical and no test
+   * can tell them apart.
    */
   platform?: AdapterPlatform | (string & {})
   /** Runtime expected by the deployment entrypoint. */

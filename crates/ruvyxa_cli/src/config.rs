@@ -261,8 +261,16 @@ pub(crate) struct CacheConfigOptions {
     ///
     /// `0` turns the tier off, which is what a deployment running several
     /// instances behind one shared store wants: a per-instance copy in front of
-    /// a shared one is the thing that makes two instances disagree. Read into
-    /// the deployed bundle by `documentCacheHandlerPrelude`, never by the CLI.
+    /// a shared one is the thing that makes two instances disagree.
+    ///
+    /// Read by two consumers, because the tier exists in two hosts.
+    /// `documentCacheHandlerPrelude` in
+    /// `packages/ruvyxa/runtime/adapter-runner.mjs` carries it into a deployed
+    /// build's route registry; `runtime_config.rs` carries it onto
+    /// `ServerConfig`, from where `runtime_env` hands it to the render workers
+    /// `ruvyxa dev` and `ruvyxa start` run. It used to reach only the first, so
+    /// the bound was honoured on every platform except the long-lived pool that
+    /// most needs one.
     pub(crate) max_entries: Option<u32>,
     /// Bytes the in-memory `cache()` tier holds before eviction.
     ///

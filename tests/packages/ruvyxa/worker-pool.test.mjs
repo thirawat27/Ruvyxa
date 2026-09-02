@@ -145,6 +145,74 @@ test('uses safe worker defaults when numeric environment values are invalid', as
   assert.equal(response.maxQueuedRequests, response.maxConcurrentRequests * 4)
 })
 
+/**
+ * The other half of `runtime_env_carries_the_configured_data_cache_bounds` in
+ * `crates/ruvyxa_dev_server/src/lib.rs`.
+ *
+ * `@ruvyxa/core`'s `cache()` store learns its bounds from
+ * `globalThis.__RUVYXA_DATA_CACHE__` and from nothing else. Only a deployed
+ * build's route registry ever wrote that global, so `cache.maxEntries` and
+ * `cache.maxBytes` were honoured everywhere except the long-lived worker pool
+ * `ruvyxa dev` and `ruvyxa start` run — the one host where an unbounded
+ * in-memory tier has time to grow.
+ *
+ * Zero is the case that matters: `maxEntries: 0` turns the tier off and
+ * `maxBytes: 0` removes the memory ceiling, so a reader built on
+ * `positiveIntegerEnv` would answer both with the store's default while looking
+ * wired.
+ */
+test('installs the configured cache() bounds for @ruvyxa/core to read', async (t) => {
+  const ping = async (env) => {
+    const worker = spawn(process.execPath, [workerScript], {
+      cwd: repoRoot,
+      env: { ...process.env, ...env },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    const lines = createInterface({ input: worker.stdout })
+    t.after(async () => {
+      lines.close()
+      worker.stdin.end()
+      await Promise.race([
+        new Promise((resolve) => worker.once('exit', resolve)),
+        new Promise((resolve) => setTimeout(resolve, 2_000)),
+      ])
+      if (worker.exitCode === null) worker.kill()
+    })
+    return await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('worker ping timed out')), 10_000)
+      lines.once('line', (line) => {
+        clearTimeout(timer)
+        resolve(JSON.parse(line))
+      })
+      worker.stdin.write(`${JSON.stringify({ id: 'data-cache', type: 'ping' })}\n`)
+    })
+  }
+
+  const unset = await ping({
+    RUVYXA_DATA_CACHE_MAX_ENTRIES: '',
+    RUVYXA_DATA_CACHE_MAX_BYTES: '',
+  })
+  assert.equal(unset.dataCache, null, 'an unconfigured project leaves the store on its default')
+
+  const off = await ping({
+    RUVYXA_DATA_CACHE_MAX_ENTRIES: '0',
+    RUVYXA_DATA_CACHE_MAX_BYTES: '0',
+  })
+  assert.deepEqual(off.dataCache, { maxEntries: 0, maxBytes: 0 })
+
+  const bounded = await ping({
+    RUVYXA_DATA_CACHE_MAX_ENTRIES: '64',
+    RUVYXA_DATA_CACHE_MAX_BYTES: '1048576',
+  })
+  assert.deepEqual(bounded.dataCache, { maxEntries: 64, maxBytes: 1_048_576 })
+
+  const nonsense = await ping({
+    RUVYXA_DATA_CACHE_MAX_ENTRIES: '64entries',
+    RUVYXA_DATA_CACHE_MAX_BYTES: '-1',
+  })
+  assert.equal(nonsense.dataCache, null, 'an unreadable bound is not a bound')
+})
+
 test('rejects numeric environment values with trailing units', async (t) => {
   const worker = spawn(process.execPath, [workerScript], {
     cwd: repoRoot,

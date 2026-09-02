@@ -728,6 +728,35 @@
           }
         }
       ]
+    },
+    {
+      "name": "a tsconfig alias answers before the package's own imports",
+      "importer": "app",
+      "files": {
+        "tsconfig.json": "{\"compilerOptions\":{\"paths\":{\"#aliased\":[\"./src/aliased.ts\"]}}}",
+        "package.json": "{\"name\":\"probe-app\",\"version\":\"1.0.0\",\"imports\":{\"#owned\":\"./src/owned.js\"}}",
+        "app/page.ts": "export default function Page() {}\n",
+        "src/aliased.ts": "export const source = 'alias'\n",
+        "src/owned.js": "export const source = 'imports'\n"
+      },
+      "cases": [
+        {
+          "name": "a `#` specifier the manifest declares resolves against `imports`",
+          "specifier": "#owned",
+          "expect": {
+            "kind": "resolved",
+            "path": "src/owned.js"
+          }
+        },
+        {
+          "name": "a `#` specifier a tsconfig alias spells takes the alias",
+          "specifier": "#aliased",
+          "expect": {
+            "kind": "resolved",
+            "path": "src/aliased.ts"
+          }
+        }
+      ]
     }
   ],
   "imports": [

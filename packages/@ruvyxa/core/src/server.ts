@@ -175,6 +175,15 @@ export interface CacheEntry {
 interface PendingCacheWrite {
   token: symbol
   promise: Promise<unknown>
+  /**
+   * The tags the value being produced will carry.
+   *
+   * Recorded when the flight starts rather than read off the entry, because a
+   * cold key has no entry yet — which is exactly the window in which a
+   * `revalidateTag()` has nothing to match and the producer that started before
+   * it still commits.
+   */
+  tags: readonly string[]
 }
 
 /**
@@ -413,15 +422,33 @@ class CacheStore {
     }
   }
 
+  /**
+   * Drop every stored entry carrying `tag`, and every write still producing one.
+   *
+   * The second half is what `invalidate()` has always done by unioning the two
+   * key sets, and for the same reason: a producer that started before the
+   * invalidation is holding data from before it. Walking `#entries` alone made
+   * the miss the unsafe case — a cold key has no entry to match, so the
+   * ordinary mutate-then-`revalidateTag` sequence racing a first reader
+   * committed the pre-mutation value under a full TTL.
+   *
+   * Deleting the pending write is the whole mechanism: `commitWrite` requires
+   * its token to still be the registered one, so the producer's own commit
+   * becomes a no-op and its caller still receives the value it computed.
+   */
   invalidateTag(tag: string): void {
     for (const [key, entry] of this.#entries) {
       if (entry.tags.includes(tag)) this.delete(key)
+    }
+    for (const [key, pending] of this.#pendingWrites) {
+      if (pending.tags.includes(tag)) this.delete(key)
     }
   }
 
   runSingleFlight<T>(
     key: string,
     producer: (token: symbol) => T | Promise<T>,
+    tags: readonly string[] = [],
   ): { promise: Promise<T>; started: boolean } {
     const pending = this.#pendingWrites.get(key)
     if (pending) {
@@ -432,7 +459,7 @@ class CacheStore {
     const promise = Promise.resolve()
       .then(() => producer(token))
       .finally(() => this.finishWrite(key, token))
-    this.#pendingWrites.set(key, { token, promise })
+    this.#pendingWrites.set(key, { token, promise, tags })
     return { promise, started: true }
   }
 
@@ -702,35 +729,39 @@ export function cache(key: string): CacheBuilder {
         if (!cached.refreshing) {
           // Fire-and-forget background refresh. All concurrent stale readers
           // receive the stale value; only the first reader starts the refresh.
-          const refresh = cacheStore.runSingleFlight(key, async (writeToken) => {
-            try {
-              const value = await producer()
-              assertSharedCachePrivacy()
-              assertCacheSerializable(value)
-              const populatedAt = Date.now()
-              const committed = cacheStore.commitWrite(
-                key,
-                writeToken,
-                {
-                  value,
-                  expiresAt: populatedAt + ttlMs,
-                  staleUntil: populatedAt + ttlMs + swrMs,
-                  refreshing: false,
-                  tags,
-                },
-                cached,
-              )
-              // A rejected commit leaves the old entry in place. Without
-              // clearing its flag the entry claims a refresh is still running
-              // and no later reader ever starts another one, so it serves
-              // stale until it falls out of the window entirely.
-              if (committed) writeShared(key, { value, populatedAt, tags })
-              if (!committed && cacheStore.peek(key) === cached) cached.refreshing = false
-            } catch {
-              // Producer failed during background refresh — keep serving stale
-              if (cacheStore.peek(key) === cached) cached.refreshing = false
-            }
-          })
+          const refresh = cacheStore.runSingleFlight(
+            key,
+            async (writeToken) => {
+              try {
+                const value = await producer()
+                assertSharedCachePrivacy()
+                assertCacheSerializable(value)
+                const populatedAt = Date.now()
+                const committed = cacheStore.commitWrite(
+                  key,
+                  writeToken,
+                  {
+                    value,
+                    expiresAt: populatedAt + ttlMs,
+                    staleUntil: populatedAt + ttlMs + swrMs,
+                    refreshing: false,
+                    tags,
+                  },
+                  cached,
+                )
+                // A rejected commit leaves the old entry in place. Without
+                // clearing its flag the entry claims a refresh is still running
+                // and no later reader ever starts another one, so it serves
+                // stale until it falls out of the window entirely.
+                if (committed) writeShared(key, { value, populatedAt, tags })
+                if (!committed && cacheStore.peek(key) === cached) cached.refreshing = false
+              } catch {
+                // Producer failed during background refresh — keep serving stale
+                if (cacheStore.peek(key) === cached) cached.refreshing = false
+              }
+            },
+            tags,
+          )
           if (refresh.started) cached.refreshing = true
           // The task catches producer failures itself so this is only a guard
           // against a future bookkeeping regression becoming unhandled work.
@@ -750,52 +781,62 @@ export function cache(key: string): CacheBuilder {
       // Inside the single flight, so concurrent readers of one cold key make one
       // store read rather than one each — the same reason the producer is in
       // here.
-      const pending = cacheStore.runSingleFlight<T>(key, async (writeToken) => {
-        const pendingShared = readShared(key)
-        const shared = pendingShared === null ? null : await pendingShared
-        if (shared) {
-          // The window is recomputed from this caller's `ttl`/`swr` rather than
-          // read from the entry: the store knows when the value was produced,
-          // and the code knows how long that is good for.
-          const expiresAt = shared.populatedAt + ttlMs
-          if (expiresAt > Date.now()) {
-            cacheStore.commitWrite(
-              key,
-              writeToken,
-              {
-                value: shared.value,
-                expiresAt,
-                staleUntil: expiresAt + swrMs,
-                refreshing: false,
-                tags,
-              },
-              cached,
-            )
-            return shared.value as T
+      const pending = cacheStore.runSingleFlight<T>(
+        key,
+        async (writeToken) => {
+          const pendingShared = readShared(key)
+          const shared = pendingShared === null ? null : await pendingShared
+          if (shared) {
+            // The window is recomputed from this caller's `ttl`/`swr` rather than
+            // read from the entry: the store knows when the value was produced,
+            // and the code knows how long that is good for.
+            const expiresAt = shared.populatedAt + ttlMs
+            if (expiresAt > Date.now()) {
+              cacheStore.commitWrite(
+                key,
+                writeToken,
+                {
+                  value: shared.value,
+                  expiresAt,
+                  staleUntil: expiresAt + swrMs,
+                  refreshing: false,
+                  tags,
+                },
+                cached,
+              )
+              return shared.value as T
+            }
           }
-        }
-        try {
-          const value = await producer()
-          assertSharedCachePrivacy()
-          assertCacheSerializable(value)
-          const populatedAt = Date.now()
-          cacheStore.commitWrite(key, writeToken, {
-            value,
-            expiresAt: populatedAt + ttlMs,
-            staleUntil: populatedAt + ttlMs + swrMs,
-            refreshing: false,
-            tags,
-          })
-          writeShared(key, { value, populatedAt, tags })
-          return value
-        } catch (error) {
-          // If we have stale data, return it rather than propagating the error
-          if (cached && cacheStore.peek(key) === cached) {
-            return cached.value as T
+          try {
+            const value = await producer()
+            assertSharedCachePrivacy()
+            assertCacheSerializable(value)
+            const populatedAt = Date.now()
+            // Gated on the commit for the same reason the background refresh
+            // above is: a rejected commit means this value was invalidated while
+            // it was being produced, and publishing it to the shared store would
+            // hand every other instance the answer this one just refused to keep.
+            // The caller still receives it — it is what its own producer
+            // computed — but nothing outlives the request.
+            const committed = cacheStore.commitWrite(key, writeToken, {
+              value,
+              expiresAt: populatedAt + ttlMs,
+              staleUntil: populatedAt + ttlMs + swrMs,
+              refreshing: false,
+              tags,
+            })
+            if (committed) writeShared(key, { value, populatedAt, tags })
+            return value
+          } catch (error) {
+            // If we have stale data, return it rather than propagating the error
+            if (cached && cacheStore.peek(key) === cached) {
+              return cached.value as T
+            }
+            throw error
           }
-          throw error
-        }
-      })
+        },
+        tags,
+      )
       return pending.promise
     },
   }

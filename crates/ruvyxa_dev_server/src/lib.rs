@@ -483,6 +483,20 @@ pub struct ServerConfig {
     pub watch: bool,
     pub cache_route_manifest: bool,
     pub cache_css: bool,
+    /// `cache.maxEntries` — entries the in-memory `cache()` tier may hold.
+    ///
+    /// Carried here for the same reason `es_target` is: the value is spent
+    /// inside a JavaScript worker and decided by `ruvyxa.config.ts`, so the
+    /// only way it reaches the worker is through the environment
+    /// [`crate::render_pipeline::runtime_env`] builds. Until it did, the two
+    /// bounds were read by `documentCacheHandlerPrelude` alone — the deployed
+    /// build's registry — so a project that shrank or disabled the tier got the
+    /// bound it asked for on every platform except the two hosts this crate
+    /// serves, `ruvyxa dev` and `ruvyxa start`, whose worker pool is
+    /// long-lived and is exactly where an unbounded tier grows.
+    pub data_cache_max_entries: Option<u32>,
+    /// `cache.maxBytes` — the memory ceiling the entry count cannot express.
+    pub data_cache_max_bytes: Option<u64>,
     /// Additional project-relative global stylesheet files or directories.
     pub style_entries: Vec<PathBuf>,
     /// Precompile route modules and load their dependencies in dev workers.
@@ -595,6 +609,8 @@ impl ServerConfig {
             watch: true,
             cache_route_manifest: true,
             cache_css: true,
+            data_cache_max_entries: None,
+            data_cache_max_bytes: None,
             style_entries: Vec::new(),
             prebundle_dependencies: true,
             runtime: JavaScriptRuntime::detect(),
@@ -637,6 +653,8 @@ impl ServerConfig {
             watch: false,
             cache_route_manifest: true,
             cache_css: true,
+            data_cache_max_entries: None,
+            data_cache_max_bytes: None,
             style_entries: Vec::new(),
             prebundle_dependencies: false,
             runtime: JavaScriptRuntime::detect(),
@@ -3893,6 +3911,57 @@ Host: localhost
         config.action_rate_limit_window =
             Duration::from_secs(MAX_ACTION_RATE_LIMIT_WINDOW_SECS + 1);
         assert!(config.validate_limits().is_err());
+    }
+
+    /// `cache.maxEntries` and `cache.maxBytes` have to reach the render worker,
+    /// because `@ruvyxa/core`'s `cache()` store lives inside it and this is the
+    /// only channel it has. Both were read by the deployed build's registry
+    /// alone, so the long-lived pool `ruvyxa dev` and `ruvyxa start` run — the
+    /// one host where an unbounded in-memory tier has time to grow — silently
+    /// used the store's defaults instead of the configured bound.
+    ///
+    /// Zero is asserted separately from "some number" because it is the value
+    /// that carries the decision: `maxEntries: 0` turns the tier off and
+    /// `maxBytes: 0` removes the memory ceiling, and a carrier that dropped it
+    /// would answer both with the default while looking wired.
+    /// `installDataCacheBounds` in `packages/ruvyxa/runtime/worker-pool.mjs` is
+    /// the half that reads these.
+    #[test]
+    fn runtime_env_carries_the_configured_data_cache_bounds() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = ServerConfig::production(temp.path(), "localhost", 3000);
+
+        let unset = runtime_env(&config).unwrap();
+        assert_eq!(unset.get("RUVYXA_DATA_CACHE_MAX_ENTRIES"), None);
+        assert_eq!(unset.get("RUVYXA_DATA_CACHE_MAX_BYTES"), None);
+
+        config.data_cache_max_entries = Some(0);
+        config.data_cache_max_bytes = Some(0);
+        let off = runtime_env(&config).unwrap();
+        assert_eq!(
+            off.get("RUVYXA_DATA_CACHE_MAX_ENTRIES").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            off.get("RUVYXA_DATA_CACHE_MAX_BYTES").map(String::as_str),
+            Some("0")
+        );
+
+        config.data_cache_max_entries = Some(64);
+        config.data_cache_max_bytes = Some(1_048_576);
+        let bounded = runtime_env(&config).unwrap();
+        assert_eq!(
+            bounded
+                .get("RUVYXA_DATA_CACHE_MAX_ENTRIES")
+                .map(String::as_str),
+            Some("64")
+        );
+        assert_eq!(
+            bounded
+                .get("RUVYXA_DATA_CACHE_MAX_BYTES")
+                .map(String::as_str),
+            Some("1048576")
+        );
     }
 
     #[test]
