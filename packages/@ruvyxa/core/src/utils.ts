@@ -377,7 +377,12 @@ export function documentCacheOptionsSource(platformRead: string, platformWrite: 
   // decided to label with it, and a platform cache keyed by URL has nothing to
   // look one up by — so a project with no handler keeps the behaviour it has,
   // which is that \`revalidateTag()\` clears this process and no other.
-  revalidateTags: documentCacheHandler?.revalidateTag,`
+  revalidateTags: documentCacheHandler?.revalidateTag,
+  // The same seam for \`invalidateCache()\`, and no platform fallback for the
+  // same reason. Without it that call is undone by its own next read: the key
+  // is gone from this process and still in the shared store, so the following
+  // miss reads it back and re-commits it under a full TTL.
+  deleteData: documentCacheHandler?.deleteData,`
 }
 
 export function validateBuildContext(

@@ -601,10 +601,19 @@ fn report_skipped_platform_config(artifacts: &[AdapterArtifactReport], adapter: 
 /// The project module a deployment will read and write ISR documents through.
 ///
 /// Worth one line because it changes where a deployed page comes from, and
-/// because the alternative is finding out from behaviour. Every host prefers
-/// `cache.handler` over its own store when one is declared: a stale document
-/// after this build is the handler's to explain, not the platform's, and an
-/// operator reading the build output should not have to know that already.
+/// because the alternative is finding out from behaviour. Every **deployed**
+/// host prefers `cache.handler` over its own store when one is declared: a
+/// stale document after this build is the handler's to explain, not the
+/// platform's, and an operator reading the build output should not have to know
+/// that already.
+///
+/// "Deployed" is the whole boundary, and this comment used to say "every host".
+/// The handler is compiled into the route registry, which is what every adapter
+/// wrapper imports — and `ruvyxa dev`, `start`, and `preview` do not go through
+/// a wrapper. They serve documents from `.ruvyxa/prerender` and give `cache()`
+/// nothing but the numeric bounds in `runtime_env`, so a project that declared
+/// a handler and ran `ruvyxa start` behind a load balancer got none of it.
+/// `report_inert_cache_handler` says so rather than leaving it to behaviour.
 ///
 /// This is also the only place the Rust half reads the setting. The value is
 /// carried into the deployed bundle by `documentCacheHandlerPrelude` in
@@ -618,6 +627,41 @@ pub(crate) fn project_document_store(config: &ProjectConfig) -> Option<&str> {
         .as_deref()
         .map(str::trim)
         .filter(|handler| !handler.is_empty())
+}
+
+/// Say that `ruvyxa dev` alone does not apply `cache.handler`.
+///
+/// A convention this framework does not implement on a given host must fail
+/// loudly or work, never silently do nothing. `ruvyxa start` and `ruvyxa
+/// preview` now do the second thing — `resolve_data_cache_handler` in
+/// `crates/ruvyxa_cli/src/runtime_config.rs` loads the module into their render
+/// workers — and `dev` deliberately still does neither, so it says so.
+///
+/// `dev` is excluded on purpose rather than for want of plumbing. Every key a
+/// shared store holds is namespaced by the build id, and a development server
+/// has no build: it would either write unprefixed keys into whatever store the
+/// project configured — production's, most of the time, since that is what the
+/// environment file names — or invent an identity that means nothing to the
+/// deployment. Reading and writing production cache entries from a working
+/// copy is not a smaller version of the feature.
+///
+/// Warned rather than refused, because the configuration is correct for what
+/// this project deploys and `dev` has to keep running.
+pub(crate) fn report_inert_cache_handler(config: &ProjectConfig) {
+    let Some(handler) = project_document_store(config) else {
+        return;
+    };
+    warn!(
+        handler,
+        "cache.handler is not applied by ruvyxa dev; it takes effect in ruvyxa start and in a deployed build"
+    );
+    println!(
+        "  {} {}",
+        dim("note"),
+        dim(format!(
+            "{handler} is skipped here because a development server has no build id to namespace its keys with. cache() and revalidateTag() stay per-process under dev."
+        ))
+    );
 }
 
 /// Whether this build turns the in-memory `cache()` tier off entirely.

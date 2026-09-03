@@ -64,11 +64,23 @@ test('cache pressure eviction skips entries pinned by active work', () => {
 after(() => rm(fixtureWorkspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
 
 /// Spawns one worker with a request/response helper and registers cleanup on `t`.
-function startWorker(t, cleanupDirs = []) {
+function startWorker(t, cleanupDirs = [], env = {}) {
   const worker = spawn(process.execPath, [workerScript], {
     cwd: repoRoot,
+    env: { ...process.env, ...env },
     stdio: ['pipe', 'pipe', 'pipe'],
   })
+  // Drained, not ignored. `stdio: 'pipe'` gives stderr a fixed OS buffer, and a
+  // worker whose buffer fills blocks on the write — so a fixture that compiles
+  // a larger graph than the others here, and therefore logs more, hangs with no
+  // error rather than failing. Nothing reads these lines; they only have to go
+  // somewhere.
+  // Drained, not ignored. `stdio: 'pipe'` gives stderr a fixed OS buffer, and a
+  // worker whose buffer fills blocks on the write — so a fixture that compiles
+  // a larger graph than the others here, and therefore logs more, would hang
+  // with no error rather than fail. Nothing reads these lines; they only have
+  // to go somewhere.
+  worker.stderr.resume()
   const lines = createInterface({ input: worker.stdout })
   const pending = new Map()
   lines.on('line', (line) => {
@@ -198,13 +210,15 @@ test('installs the configured cache() bounds for @ruvyxa/core to read', async (t
     RUVYXA_DATA_CACHE_MAX_ENTRIES: '0',
     RUVYXA_DATA_CACHE_MAX_BYTES: '0',
   })
-  assert.deepEqual(off.dataCache, { maxEntries: 0, maxBytes: 0 })
+  assert.equal(off.dataCache.maxEntries, 0)
+  assert.equal(off.dataCache.maxBytes, 0)
 
   const bounded = await ping({
     RUVYXA_DATA_CACHE_MAX_ENTRIES: '64',
     RUVYXA_DATA_CACHE_MAX_BYTES: '1048576',
   })
-  assert.deepEqual(bounded.dataCache, { maxEntries: 64, maxBytes: 1_048_576 })
+  assert.equal(bounded.dataCache.maxEntries, 64)
+  assert.equal(bounded.dataCache.maxBytes, 1_048_576)
 
   const nonsense = await ping({
     RUVYXA_DATA_CACHE_MAX_ENTRIES: '64entries',
@@ -1497,4 +1511,236 @@ test('an idle worker exits as soon as its stdin closes', async (t) => {
     new Promise((resolve) => setTimeout(() => resolve('still running'), 10_000)),
   ])
   assert.equal(exited, 'exited')
+})
+
+/**
+ * `cache.handler` reaches the worker pool, which is the host `ruvyxa start`
+ * runs.
+ *
+ * The bounds arrived first and carried only numbers. The handler itself — the
+ * store several instances share — was compiled into a deployed build's route
+ * registry and nowhere else, so an application running several `ruvyxa start`
+ * instances behind one load balancer declared a shared store, was told by the
+ * build output that it had one, and cached per instance. `ping` reports the
+ * handshake rather than the environment, so this asks the question a caller
+ * actually has: is this worker in front of the project's store.
+ */
+test('installs the project cache.handler for @ruvyxa/core to read', async (t) => {
+  const projectRoot = await mkdtemp(path.join(fixtureWorkspace, 'data-cache-handler-'))
+  const handlerFile = path.join(projectRoot, 'cache-handler.mjs')
+  await writeFile(
+    handlerFile,
+    `export async function readData() { return null }
+export async function writeData() {}
+export async function revalidateTag() {}
+export async function deleteData() {}
+`,
+  )
+
+  const { request } = startWorker(t, [projectRoot], {
+    RUVYXA_DATA_CACHE_HANDLER: handlerFile,
+    RUVYXA_DATA_CACHE_KEY_PREFIX: 'build-id:',
+  })
+  const pong = await request({ type: 'ping' })
+
+  assert.equal(pong.ok, true)
+  assert.deepEqual(pong.dataCache.handler, {
+    readData: true,
+    writeData: true,
+    revalidateTag: true,
+    deleteData: true,
+  })
+  // Without it two deployments pointed at one managed store both write
+  // `cache('user:1')` and read each other's answer. The Rust half refuses to
+  // start rather than send a bare key.
+  assert.equal(pong.dataCache.keyPrefix, 'build-id:')
+})
+
+test('leaves the store alone when the project declares no handler', async (t) => {
+  const { request } = startWorker(t, [], { RUVYXA_DATA_CACHE_MAX_ENTRIES: '8' })
+  const pong = await request({ type: 'ping' })
+
+  assert.equal(pong.dataCache.handler.readData, false)
+  assert.equal(pong.dataCache.handler.writeData, false)
+  assert.equal(pong.dataCache.keyPrefix, null)
+})
+
+/**
+ * A mutation's invalidations reach the shared store before the worker answers.
+ *
+ * The half that is not a handshake. `revalidateTag()` and `invalidateCache()`
+ * queue onto the request and something has to hand the queue to the project's
+ * store; in a deployed build that is `serverless-handler.mjs`, and here it is
+ * this worker. Awaited before the response for the reason both hosts await it:
+ * a mutation that answered `200` has told the caller the old value is gone, and
+ * a worker recycled between the response and an unawaited write never performs
+ * it.
+ */
+test('hands a mutation invalidations to cache.handler before answering', async (t) => {
+  const projectRoot = await mkdtemp(path.join(fixtureWorkspace, 'data-cache-drain-'))
+  const appDir = path.join(projectRoot, 'app')
+  await mkdir(appDir, { recursive: true })
+  const recordFile = path.join(projectRoot, 'calls.json')
+  const handlerFile = path.join(projectRoot, 'cache-handler.mjs')
+  await writeFile(
+    handlerFile,
+    // One line per call, and the separator is built rather than written as an
+    // escape: this string is a template literal producing a file that is itself
+    // JavaScript, so a `\n` here reaches the generated module as a real newline
+    // inside a quoted string and it does not parse.
+    `import { appendFile } from 'node:fs/promises'
+const record = ${JSON.stringify(recordFile)}
+const line = String.fromCharCode(10)
+export async function readData() { return null }
+export async function writeData() {}
+export async function revalidateTag(tags) {
+  await appendFile(record, JSON.stringify({ revalidateTag: tags }) + line)
+}
+export async function deleteData(keys) {
+  await appendFile(record, JSON.stringify({ deleteData: keys }) + line)
+}
+`,
+  )
+  const routeFile = path.join(appDir, 'route.ts')
+  await writeFile(
+    routeFile,
+    `import { invalidateCache, revalidateTag } from 'ruvyxa/server'
+
+export const POST = () => {
+  revalidateTag('products')
+  invalidateCache('products')
+  return new Response('ok')
+}
+`,
+  )
+
+  const { request } = startWorker(t, [projectRoot], {
+    RUVYXA_DATA_CACHE_HANDLER: handlerFile,
+    RUVYXA_DATA_CACHE_KEY_PREFIX: 'build-id:',
+  })
+  const response = await request({
+    type: 'api',
+    projectRoot,
+    appDir,
+    routeFile,
+    requestPath: '/',
+    requestTarget: '/',
+    routePath: '/',
+    method: 'POST',
+    params: {},
+    headerPairs: [],
+  })
+
+  assert.equal(response.ok, true, response.message)
+  // Read after the response, not after a delay: if the drain were not awaited
+  // this file would still be empty here, which is the failure the test is for.
+  const recorded = (await readFile(recordFile, 'utf8'))
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+  assert.deepEqual(recorded, [
+    { revalidateTag: ['products'] },
+    // Prefixed by `invalidateCache()` itself, which is the one place that knows
+    // this deployment's namespace.
+    { deleteData: [{ key: 'build-id:products', prefix: 'build-id:products:' }] },
+  ])
+})
+
+/**
+ * The document half of `cache.handler`, which has to cross the worker protocol.
+ *
+ * `ruvyxa start` serves stored documents from the build's own `prerender`
+ * directory — per instance, which is right for one container and wrong for the
+ * several this setting exists to serve. The store is a module the project
+ * wrote, so only a worker can call it, and these two request types are how the
+ * Rust host asks. `a_document_request_serializes_the_fields_the_worker_reads`
+ * in `crates/ruvyxa_dev_server/src/render_pipeline.rs` holds the field names
+ * from the other side.
+ */
+test('reads and writes stored documents through cache.handler', async (t) => {
+  const projectRoot = await mkdtemp(path.join(fixtureWorkspace, 'document-store-'))
+  const writeLog = path.join(projectRoot, 'writes.json')
+  const handlerFile = path.join(projectRoot, 'cache-handler.mjs')
+  await writeFile(
+    handlerFile,
+    `import { appendFile } from 'node:fs/promises'
+const log = ${JSON.stringify(writeLog)}
+const line = String.fromCharCode(10)
+export async function read(pathname, revalidate) {
+  if (pathname === '/fresh') return { html: '<p>fresh</p>', stale: false }
+  if (pathname === '/stale') return { html: '<p>stale</p>', stale: true }
+  if (pathname === '/plain') return '<p>plain</p>'
+  if (pathname === '/window') return { html: 'window=' + revalidate, stale: false }
+  if (pathname === '/broken') throw new Error('store unreachable')
+  return null
+}
+export async function write(pathname, html, revalidate, forced) {
+  await appendFile(log, JSON.stringify({ pathname, html, revalidate, forced }) + line)
+}
+`,
+  )
+
+  const { request } = startWorker(t, [projectRoot], {
+    RUVYXA_DATA_CACHE_HANDLER: handlerFile,
+    RUVYXA_DATA_CACHE_KEY_PREFIX: 'build-id:',
+  })
+
+  const fresh = await request({ type: 'documentRead', pathname: '/fresh' })
+  assert.equal(fresh.ok, true)
+  assert.equal(fresh.html, '<p>fresh</p>')
+  assert.equal(fresh.stale, false)
+
+  // The host treats a stale answer as a miss and renders instead, so what
+  // matters here is that the flag survives rather than being dropped — a
+  // dropped flag serves what the project's own store called expired.
+  const stale = await request({ type: 'documentRead', pathname: '/stale' })
+  assert.equal(stale.stale, true)
+
+  // A bare string is the other shape every deployed host already normalizes.
+  const plain = await request({ type: 'documentRead', pathname: '/plain' })
+  assert.equal(plain.html, '<p>plain</p>')
+  assert.equal(plain.stale, false)
+
+  // The route's window reaches the handler, which is what lets it answer
+  // `stale` for itself rather than guessing.
+  const windowed = await request({
+    type: 'documentRead',
+    pathname: '/window',
+    revalidate: 30,
+  })
+  assert.equal(windowed.html, 'window=30')
+
+  const miss = await request({ type: 'documentRead', pathname: '/absent' })
+  assert.equal(miss.ok, true)
+  assert.equal(miss.html, null, 'a miss is not an error; the host falls back to its own build')
+
+  // A store this process cannot reach is reported, not swallowed: a quietly
+  // unreachable store is a deployment paying for one and caching per instance.
+  const broken = await request({ type: 'documentRead', pathname: '/broken' })
+  assert.equal(broken.ok, false)
+  assert.match(broken.message, /cache\.handler read failed/)
+
+  const written = await request({
+    type: 'documentWrite',
+    pathname: '/blog/hello',
+    html: '<p>written</p>',
+    revalidate: 60,
+    forced: true,
+  })
+  assert.equal(written.ok, true)
+  assert.deepEqual(JSON.parse(await readFile(writeLog, 'utf8')), {
+    pathname: '/blog/hello',
+    html: '<p>written</p>',
+    revalidate: 60,
+    forced: true,
+  })
+})
+
+test('answers a document read with nothing when no handler is configured', async (t) => {
+  const { request } = startWorker(t)
+  const response = await request({ type: 'documentRead', pathname: '/' })
+
+  assert.equal(response.ok, true)
+  assert.equal(response.html, null, 'no handler is a miss, not a failure')
+  assert.equal((await request({ type: 'documentWrite', pathname: '/', html: 'x' })).ok, true)
 })

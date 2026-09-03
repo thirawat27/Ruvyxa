@@ -313,6 +313,24 @@ route แบบ ISR หรือ PPR render ครั้งเดียวแล
 แล้วผู้ชมได้สำเนาไหนก็แล้วแต่ load balancer เลือก มีแต่ตัวแอปที่รู้ว่าควรใช้ store ตัวไหนร่วมกัน
 ตรงนี้คือที่ที่มันบอก
 
+**`ruvyxa start` และ `ruvyxa preview` ใช้มัน ส่วน `ruvyxa dev` ไม่ใช้** deployed build จะ compile
+handler เข้าไปใน route registry ที่ wrapper ของทุก adapter import ส่วน `start` และ `preview`
+โหลดโมดูลเดียวกันนั้นเข้าไปใน render worker ของตัวเองแทน ดังนั้น `cache()`, `revalidateTag()`,
+`invalidateCache()` และเอกสาร ISR ที่เก็บไว้ ก็ไปถึง handler บนสองคำสั่งนี้ด้วย
+
+`ruvyxa dev` ถูกกันออกโดยตั้งใจ ทุก key ที่ shared store เก็บถูก namespace ด้วย build id แต่
+development server ไม่มี build — มันจะเขียน key แบบไม่มี prefix ลง store ที่โปรเจกต์ตั้งไว้
+ซึ่งส่วนใหญ่คือของ production หรือไม่ก็ต้องกุ identity ที่ไม่มีความหมายกับ deployment
+การอ่านและเขียน cache ของ production จาก working copy ไม่ใช่ feature เวอร์ชันย่อ ดังนั้น `dev`
+จะแจ้งตอนเริ่มทำงานว่ากำลังข้าม handler และใช้ cache ระดับ process ต่อไป
+
+มีข้อต่างจาก deployed build อยู่หนึ่งข้อที่ควรรู้ ในนั้น handler แทนที่ document store ของ platform
+ไปเลย แต่ที่นี่มันถูกถาม*ก่อน* และไดเรกทอรี `prerender` ของ build เองเป็น fallback
+เพราะบนโฮสต์นี้สองอย่างนี้ไม่ใช่สิ่งเดียวกัน: path ที่ store ของคุณไม่เคยเก็บ ยังตอบด้วยเอกสารที่
+build นี้สร้างไว้ แทนที่จะ re-render หนึ่งครั้งต่อ instance กับ store ที่ยังว่าง ส่วนเอกสารที่ store
+บอกว่า `stale` จะถือเป็น miss — เซิร์ฟเวอร์ render ใหม่แล้วเขียนกลับ แทนที่จะเสิร์ฟสิ่งที่ store
+ของคุณเองบอกว่าหมดอายุแล้ว
+
 ```ts
 // ruvyxa.config.ts
 export default {
@@ -355,6 +373,26 @@ export async function revalidateTag(tags) {
 ไม่บังคับ และไม่มี fallback ของ platform: tag ติดป้ายอะไรก็ตามที่แอปตัดสินใจติด ส่วน cache ของ
 platform ที่ key ด้วย URL ไม่มีอะไรให้ค้นด้วย tag ได้ โปรเจกต์ที่ไม่ประกาศ handler ทำงานเหมือนเดิม
 คือ `revalidateTag()` เคลียร์ process เดียว
+
+`invalidateCache()` มี seam เดียวกันนี้ และจำเป็นกว่าด้วย ถ้าไม่มี
+มันจะถูกยกเลิกโดยการอ่านครั้งถัดไป ของตัวเอง: key หายไปจาก process นี้ แต่ shared store ยังเก็บไว้
+การ miss ครั้งถัดไปจึงอ่านมันกลับมา แล้ว commit ใหม่ด้วย TTL เต็ม — เป็นการ invalidate
+ที่ดูเหมือนได้ผล
+
+```js
+export async function deleteData(keys) {
+  for (const { key, prefix } of keys) {
+    if (key !== undefined) await store.delete(key)
+    await store.deleteByPrefix(prefix)
+  }
+}
+```
+
+แต่ละ entry มีทั้ง key ตรงตัวและ prefix เพราะสองค่านี้อนุมานจากกันไม่ได้:
+`invalidateCache('products')` ล้าง `products` และทุกอย่างใต้ `products:` แต่ไม่ล้าง `productsXYZ`
+ส่วน `key` จะไม่มีเมื่อเรียก `invalidateCache()` แบบไม่ส่ง argument ซึ่งไม่ได้ระบุ key ใด —
+การเรียกแบบนั้นล้าง namespace ทั้งหมดของ deployment ซึ่ง prefix อย่างเดียวบอกได้ ทั้งสองค่ามี build
+id ของ deployment นี้ติดมาแล้ว ใช้ได้ตามที่มาเลย
 
 module เดียวกันนี้รองรับ `cache()` ได้ด้วย ซึ่งเป็นอีกครึ่งของสิ่งที่ Next.js วางไว้หลัง
 `cacheHandler`:

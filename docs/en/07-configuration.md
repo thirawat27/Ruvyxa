@@ -316,6 +316,25 @@ For an application running several instances behind one domain, it is not: each 
 separately, and a visitor is served whichever copy the load balancer happened to pick. Only the
 application knows what store they should share, so this is where it says so.
 
+**`ruvyxa start` and `ruvyxa preview` honour it, and `ruvyxa dev` does not.** A deployed build
+compiles the handler into the route registry every adapter's wrapper imports; `start` and `preview`
+load the same module into their render workers instead, so `cache()`, `revalidateTag()`,
+`invalidateCache()`, and stored ISR documents all reach it there too.
+
+`ruvyxa dev` is excluded deliberately. Every key a shared store holds is namespaced by the build id,
+and a development server has no build — it would either write unprefixed keys into whatever store
+the project configured, which is usually production's, or invent an identity meaning nothing to the
+deployment. Reading and writing production cache entries from a working copy is not a smaller
+version of this feature, so `dev` says on startup that it is skipping the handler and keeps its
+per-process cache.
+
+One difference from a deployed build is worth knowing. There, the handler replaces the platform's
+document store outright. Here it is consulted _first_ and the build's own `prerender` directory is
+the fallback, because on this host those are two different things: a path your store has never held
+is still answered by the document this build produced, rather than re-rendered once per instance
+against a cold store. A document the store reports as `stale` is treated as a miss — the server
+re-renders and writes back rather than serving what your own store called expired.
+
 ```ts
 // ruvyxa.config.ts
 export default {
@@ -359,6 +378,25 @@ export async function revalidateTag(tags) {
 It is optional, and there is no platform fallback: a tag labels whatever the application decided to
 label with it, and a platform cache keyed by URL has nothing to look one up by. A project that
 declares no handler keeps the behaviour it has, which is that `revalidateTag()` clears one process.
+
+`invalidateCache()` has the same seam, and needs it more. Without one it is undone by its own next
+read: the key is gone from this process, the shared store still holds it, and the following miss
+reads it back and re-commits it under a full TTL — an invalidation that looks like it worked.
+
+```js
+export async function deleteData(keys) {
+  for (const { key, prefix } of keys) {
+    if (key !== undefined) await store.delete(key)
+    await store.deleteByPrefix(prefix)
+  }
+}
+```
+
+Each entry carries an exact key and a prefix because they are not derivable from one another:
+`invalidateCache('products')` clears `products` and everything under `products:`, and not
+`productsXYZ`. `key` is absent for `invalidateCache()` with no argument, which names none — that
+call clears the deployment's whole namespace, which the prefix alone says. Both values already carry
+this deployment's build id, so apply them as they arrive.
 
 The same module can back `cache()` itself, which is the other half of what Next.js puts behind
 `cacheHandler`:

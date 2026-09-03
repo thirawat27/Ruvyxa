@@ -40,6 +40,7 @@ npm run test:parity
 | `RUV1019`                                     | page export ทั้ง `ppr` และ `serverComponents` ซึ่งเรนเดอร์ผ่านคนละ entry                      | เอา export ตัวใดตัวหนึ่งออกจาก page                                                                |
 | `RUV1020`                                     | route ที่ใช้ `serverComponents` มี interception ซึ่ง registry ฝั่งไคลเอนต์ไม่ถูกประกาศไว้     | เอา `serverComponents` ออก หรือย้าย interception ไป route ที่ไม่ได้ใช้มัน                          |
 | `RUV1021`                                     | อ่านไดเรกทอรีใต้ app directory ไม่ได้ จึงมองไม่เห็น route ที่อยู่ข้างใต้                      | ให้สิทธิ์อ่านแก่ build หรือย้ายไดเรกทอรีนั้นออกจาก `app/`; โฟลเดอร์ที่ขึ้นต้นด้วย `_` จะไม่ถูกเดิน |
+| `RUV2208`                                     | ตั้ง `cache.handler` ไว้ แต่ build output ไม่มี build id สำหรับ namespace คีย์                | รัน `ruvyxa build` ใหม่; คีย์ที่ไม่มี prefix จะถูกอ่านโดย deployment อื่นที่ใช้ store เดียวกัน     |
 
 **หน้าแสดงด้วย browser default ทั้งที่ class name ถูกต้อง** global stylesheet ถึง browser
 โดยยังไม่ถูก transform ให้ตรวจว่ามี `@import "tailwindcss"` เหลืออยู่ใน CSS ที่เสิร์ฟหรือไม่

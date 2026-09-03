@@ -497,6 +497,32 @@ pub struct ServerConfig {
     pub data_cache_max_entries: Option<u32>,
     /// `cache.maxBytes` — the memory ceiling the entry count cannot express.
     pub data_cache_max_bytes: Option<u64>,
+    /// `cache.handler` — the project module this host reads and writes shared
+    /// cache state through, already resolved to an absolute path.
+    ///
+    /// Absolute because the worker resolves it as a module URL from a working
+    /// directory this crate does not choose, and validated by the caller before
+    /// it lands here: a handler that names no file is a configuration error the
+    /// operator should see once at startup rather than once per render worker.
+    ///
+    /// The other half of the same setting. `data_cache_max_entries` above
+    /// arrived first and carried only the numbers, so the handler itself
+    /// reached every deployed platform and neither of the two hosts this crate
+    /// serves — an application running several `ruvyxa start` instances behind
+    /// one load balancer declared a shared store, was told by the build that it
+    /// had one, and got per-instance caching.
+    pub data_cache_handler: Option<PathBuf>,
+    /// Prepended to every key this server hands the shared store.
+    ///
+    /// `<build id>:`, the same shape `documentCacheHandlerPrelude` writes into a
+    /// deployed build's registry, so one project deployed two ways addresses one
+    /// store the same way. Two deployments pointed at one managed Redis
+    /// otherwise both write `cache('user:1')` and read each other's answer.
+    ///
+    /// Only meaningful beside `data_cache_handler`, and required whenever that
+    /// is set: an unprefixed key in a shared store is the collision this exists
+    /// to prevent, so the caller fails rather than sending one.
+    pub data_cache_key_prefix: Option<String>,
     /// Additional project-relative global stylesheet files or directories.
     pub style_entries: Vec<PathBuf>,
     /// Precompile route modules and load their dependencies in dev workers.
@@ -611,6 +637,8 @@ impl ServerConfig {
             cache_css: true,
             data_cache_max_entries: None,
             data_cache_max_bytes: None,
+            data_cache_handler: None,
+            data_cache_key_prefix: None,
             style_entries: Vec::new(),
             prebundle_dependencies: true,
             runtime: JavaScriptRuntime::detect(),
@@ -655,6 +683,8 @@ impl ServerConfig {
             cache_css: true,
             data_cache_max_entries: None,
             data_cache_max_bytes: None,
+            data_cache_handler: None,
+            data_cache_key_prefix: None,
             style_entries: Vec::new(),
             prebundle_dependencies: false,
             runtime: JavaScriptRuntime::detect(),
@@ -3961,6 +3991,44 @@ Host: localhost
                 .get("RUVYXA_DATA_CACHE_MAX_BYTES")
                 .map(String::as_str),
             Some("1048576")
+        );
+    }
+
+    /// The other half of the same setting, and the half that decides whether
+    /// two instances agree at all.
+    ///
+    /// The bounds above bound one worker's own tier. This names the store every
+    /// worker in every instance shares, and until it travelled here it reached
+    /// every deployed platform and neither host this crate serves — so several
+    /// `ruvyxa start` instances behind one load balancer declared a shared
+    /// store and cached per instance. `loadDataCacheHandler` in
+    /// `packages/ruvyxa/runtime/worker-pool.mjs` is the half that reads it.
+    ///
+    /// The prefix travels beside it because a key without one is the collision
+    /// the prefix exists to prevent: two deployments pointed at one managed
+    /// store would both write `cache('user:1')` and read each other's answer.
+    #[test]
+    fn runtime_env_carries_the_configured_data_cache_handler() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = ServerConfig::production(temp.path(), "localhost", 3000);
+
+        let unset = runtime_env(&config).unwrap();
+        assert_eq!(unset.get("RUVYXA_DATA_CACHE_HANDLER"), None);
+        assert_eq!(unset.get("RUVYXA_DATA_CACHE_KEY_PREFIX"), None);
+
+        let handler = temp.path().join("cache-handler.mjs");
+        config.data_cache_handler = Some(handler.clone());
+        config.data_cache_key_prefix = Some("build-id:".to_string());
+        let wired = runtime_env(&config).unwrap();
+        assert_eq!(
+            wired.get("RUVYXA_DATA_CACHE_HANDLER").map(String::as_str),
+            Some(handler.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            wired
+                .get("RUVYXA_DATA_CACHE_KEY_PREFIX")
+                .map(String::as_str),
+            Some("build-id:")
         );
     }
 

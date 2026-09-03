@@ -49,8 +49,10 @@ instance:
 | Serverless (Lambda, Cloud Functions, Workers) | Computed once per warm container, again after every cold start, and separately in each concurrent one.      |
 
 The name says how long a value may be considered valid, not how many machines can see it. This is
-the same boundary `invalidateCache()` and `revalidateTag()` act on: they clear the cache of the
-process that calls them, so a value cached elsewhere stays until its own TTL expires.
+the boundary `invalidateCache()` acts on: it clears the cache of the process that calls it, so a
+value cached elsewhere stays until its own TTL expires. `revalidateTag()` reaches further when the
+project declares a [`cache.handler`](07-configuration.md) — see
+[Invalidate by tag instead of by key](#invalidate-by-tag-instead-of-by-key).
 
 That makes `cache()` right for what it is — an in-process memoizer that absorbs repeated work inside
 one server — and wrong as the only copy of anything. Put a value that must be identical everywhere
@@ -73,9 +75,18 @@ revalidateTag('products') // drops both `products:list` and `home:featured`
 
 `revalidateTag(tag)` removes every cache entry carrying that exact tag. Tags are matched exactly —
 there is no prefix or wildcard form — and each is 1–128 characters of letters, digits, `:`, `.`,
-`_`, `/`, or `-`; anything else throws. Like `invalidateCache()`, it acts on the cache of the
-process that calls it, so on a serverless platform it clears the calling instance and not the ones
-already warm elsewhere.
+`_`, `/`, or `-`; anything else throws.
+
+How far it reaches depends on whether the project declares one. With no
+[`cache.handler`](07-configuration.md), it acts on the cache of the process that calls it, so on a
+serverless platform it clears the calling instance and not the ones already warm elsewhere. With a
+handler that exports `revalidateTag`, the tag is also handed to that store after the response, so
+the next read on any instance misses there too — each instance still serves its own in-memory copy
+until that entry's window expires, which is what `cache.maxEntries: 0` exists to turn off.
+
+`invalidateCache()` does not have that second half: the handler contract has no key-level
+invalidation, so a key cleared here is still in the shared store and the next read on this instance
+reads it back. Label anything you need to invalidate behind a shared store with a tag.
 
 It clears cached **values**, not pre-rendered HTML. To make the server re-render a stored document,
 use [`revalidatePath()`](#on-demand-revalidation).

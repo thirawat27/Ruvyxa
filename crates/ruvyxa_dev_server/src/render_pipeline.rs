@@ -35,12 +35,14 @@ use crate::static_assets::{
     request_matches_etag, serve_client_file, serve_public_file, weak_content_etag,
 };
 use crate::worker_pool::{PostedForm, RenderActionRequest, RenderApiRequest, WorkerApiResponse};
+use crate::worker_protocol::{self, WorkerRequest};
 use crate::{
     AppState, RuntimeCache, RuntimeTrace, ServerConfig, TraceAssets, cached_html_response,
     html_response, project_env, streamed_html_response, uncacheable, with_security_headers,
 };
 use crate::{render_cache, style::collect_styles};
 use futures_util::StreamExt;
+use tracing::warn;
 
 /// Send the caching contract this route's strategy names.
 ///
@@ -938,13 +940,7 @@ async fn render_page_ssg_fresh(
     // synchronous file open per request otherwise dominates the hot path.
     if forced.is_none()
         && !state.config.watch
-        && let Some(html) = store_prerendered_html(
-            &state.render_cache,
-            &state.config.prerender_dir,
-            request_path,
-            cache_key,
-        )
-        .await
+        && let Some(html) = store_document(state, request_path, cache_key, None).await
     {
         return Ok(html);
     }
@@ -1078,13 +1074,8 @@ async fn render_page_isr_fresh(
     // build's document is the stale one the caller is replacing.
     if forced.is_none()
         && !state.config.watch
-        && let Some(html) = store_prerendered_html(
-            &state.render_cache,
-            &state.config.prerender_dir,
-            request_path,
-            cache_key,
-        )
-        .await
+        && let Some(html) =
+            store_document(state, request_path, cache_key, route.render.revalidate).await
     {
         return Ok(html);
     }
@@ -1420,6 +1411,24 @@ fn spawn_isr_revalidation(
         )
         .await
         {
+            // Published before the local cache is updated, not after, and only
+            // when the project declared a store. An ordinary revalidation used
+            // to end at `render_cache`, which is this process's memory — so a
+            // deployment running several instances refreshed the one that
+            // happened to receive the request and left every other one serving
+            // the document this render replaced. That is the arrangement
+            // `cache.handler` exists to fix, and the forced path was the only
+            // one that ever wrote anything another instance could read.
+            if revalidate_state.config.data_cache_handler.is_some() {
+                write_document_through_handler(
+                    &revalidate_state,
+                    &revalidate_path,
+                    &html,
+                    revalidate_route.render.revalidate,
+                    false,
+                )
+                .await;
+            }
             revalidate_state
                 .render_cache
                 .put(revalidate_key, html)
@@ -1520,6 +1529,15 @@ async fn settle_forced_revalidation(
         return;
     };
 
+    // The project's store first, and awaited: `revalidatePath()` answered a
+    // request that told its caller the old document is gone, so losing this
+    // write leaves every other instance serving exactly what was invalidated.
+    // The local artifact below is still replaced, because the build's directory
+    // stays the fallback this host reads when the store has nothing.
+    if !state.config.watch && state.config.data_cache_handler.is_some() {
+        write_document_through_handler(state, request_path, html, None, true).await;
+    }
+
     if !state.config.watch {
         let prerender_dir = state.config.prerender_dir.clone();
         let path = request_path.to_string();
@@ -1581,6 +1599,129 @@ async fn store_prerendered_html(
     Some(render_cache.put(cache_key.to_string(), html).await)
 }
 
+/// The stored document for this path: the project's store first, then the build.
+///
+/// One seam for every strategy that serves a stored document — SSG, CSR, ISR,
+/// and PPR all reach it through here — because the question "where does a
+/// stored document come from" has one answer and four callers, and a rule
+/// written four times is a rule three of them will miss.
+///
+/// **The project's store is consulted first, and the build's own directory is
+/// the fallback rather than being replaced.** The deployed hosts substitute
+/// `cache.handler`'s `read` for the platform reader outright, which is right
+/// there: a function bundle's copy of the documents is the platform store. Here
+/// they are two different things — `.ruvyxa/prerender` is what this build
+/// produced, and it is still the correct answer for a path the shared store has
+/// never held. Replacing it would make every SSG page re-render once per
+/// instance against a cold store, for no gain.
+///
+/// A document the store reports **stale** is treated as a miss. The host
+/// renders and writes back instead of serving it, which is the conservative
+/// direction: the alternative is answering with something the project's own
+/// store said was expired, and the render is already single-flighted so a hot
+/// path does not stampede.
+async fn store_document(
+    state: &AppState,
+    request_path: &str,
+    cache_key: &str,
+    revalidate: Option<u64>,
+) -> Option<CachedDocument> {
+    if state.config.data_cache_handler.is_some()
+        && let Some(html) = read_document_through_handler(state, request_path, revalidate).await
+    {
+        return Some(state.render_cache.put(cache_key.to_string(), html).await);
+    }
+    store_prerendered_html(
+        &state.render_cache,
+        &state.config.prerender_dir,
+        request_path,
+        cache_key,
+    )
+    .await
+}
+
+/// Ask a render worker for this path's document from the project's store.
+///
+/// Through the pool because the store is a JavaScript module the project wrote,
+/// and a worker is the only thing in this process tree that can call it.
+///
+/// A worker that fails is a store this request cannot reach, not a request that
+/// fails: the caller falls back to the build's own document and, failing that,
+/// renders. Reported rather than swallowed, because a store that is quietly
+/// unreachable is a deployment paying for one and getting per-instance caching.
+async fn read_document_through_handler(
+    state: &AppState,
+    request_path: &str,
+    revalidate: Option<u64>,
+) -> Option<String> {
+    let request = WorkerRequest::DocumentRead {
+        id: worker_protocol::next_request_id(),
+        pathname: request_path.to_string(),
+        revalidate,
+    };
+    match state.worker_pool.send(request).await {
+        Ok(response) if response.ok => {
+            // Stale is a miss. Serving it would answer with what the project's
+            // own store called expired.
+            if response.stale == Some(true) {
+                return None;
+            }
+            response.html
+        }
+        Ok(response) => {
+            warn!(
+                path = request_path,
+                message = response.message.unwrap_or_default(),
+                "cache.handler read failed; falling back to this build's documents"
+            );
+            None
+        }
+        Err(error) => {
+            warn!(
+                path = request_path,
+                error = error.to_string(),
+                "cache.handler read could not reach a worker"
+            );
+            None
+        }
+    }
+}
+
+/// Publish one rendered document to the project's store.
+///
+/// Awaited by the caller that persists a revalidation, for the reason the
+/// deployed hosts await theirs: the write is the point of the revalidation, and
+/// a process that exits between the response and an unawaited write leaves
+/// every other instance serving the document this one just replaced.
+async fn write_document_through_handler(
+    state: &AppState,
+    request_path: &str,
+    html: &str,
+    revalidate: Option<u64>,
+    forced: bool,
+) {
+    let request = WorkerRequest::DocumentWrite {
+        id: worker_protocol::next_request_id(),
+        pathname: request_path.to_string(),
+        html: html.to_string(),
+        revalidate,
+        forced,
+    };
+    match state.worker_pool.send(request).await {
+        Ok(response) if response.ok => {}
+        Ok(response) => warn!(
+            path = request_path,
+            message = response.message.unwrap_or_default(),
+            "cache.handler write failed; this document stayed on the local disk only"
+        ),
+        Err(error) => warn!(
+            path = request_path,
+            error = error.to_string(),
+            "cache.handler write could not reach a worker"
+        ),
+    }
+}
+
 /// CSR: emit a minimal HTML shell with no server-rendered content.
 /// The page loads entirely in the browser via the client bundle.
 /// In production: serve the pre-built CSR shell HTML.
@@ -1602,13 +1743,7 @@ async fn render_page_csr(
     // and re-reads the same shell file for the life of the process.
     if forced.is_none()
         && !state.config.watch
-        && let Some(html) = store_prerendered_html(
-            &state.render_cache,
-            &state.config.prerender_dir,
-            request_path,
-            &cache_key,
-        )
-        .await
+        && let Some(html) = store_document(state, request_path, &cache_key, None).await
     {
         return Ok(html);
     }
@@ -1719,13 +1854,7 @@ async fn render_page_ppr_fresh(
     // made the cache unreachable and re-read the same file on every request.
     if forced.is_none()
         && !state.config.watch
-        && let Some(html) = store_prerendered_html(
-            &state.render_cache,
-            &state.config.prerender_dir,
-            request_path,
-            cache_key,
-        )
-        .await
+        && let Some(html) = store_document(state, request_path, cache_key, None).await
     {
         return Ok(html);
     }
@@ -2741,6 +2870,19 @@ pub(crate) fn runtime_env(config: &ServerConfig) -> Result<BTreeMap<String, Stri
     }
     if let Some(bytes) = config.data_cache_max_bytes {
         env.insert("RUVYXA_DATA_CACHE_MAX_BYTES".to_string(), bytes.to_string());
+    }
+    // `cache.handler` travels the same way, and it is the half that decides
+    // whether two instances agree at all: the numbers bound a per-instance tier,
+    // this names the store they share. Absent unless the project configured one,
+    // so a worker with no variable behaves exactly as it always has.
+    if let Some(handler) = &config.data_cache_handler {
+        env.insert(
+            "RUVYXA_DATA_CACHE_HANDLER".to_string(),
+            handler.to_string_lossy().into_owned(),
+        );
+    }
+    if let Some(prefix) = &config.data_cache_key_prefix {
+        env.insert("RUVYXA_DATA_CACHE_KEY_PREFIX".to_string(), prefix.clone());
     }
     apply_production_node_env(&mut env, !config.watch);
     Ok(env)
@@ -3803,5 +3945,54 @@ mod tests {
                 "{traversal} escaped the prerender directory"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod document_store_protocol_tests {
+    use super::WorkerRequest;
+
+    /// The field names `handleDocumentRead` and `handleDocumentWrite` read.
+    ///
+    /// This request is the whole document half of `cache.handler` on this host,
+    /// and the two sides are in different languages: a rename here is a store
+    /// that silently answers nothing, because the worker would read `undefined`
+    /// for the path and hand the project's handler an empty lookup. Serializing
+    /// the request and reading the keys back is what holds them together —
+    /// `packages/ruvyxa/runtime/worker-pool.mjs` is the other half.
+    #[test]
+    fn a_document_request_serializes_the_fields_the_worker_reads() {
+        let read = serde_json::to_value(WorkerRequest::DocumentRead {
+            id: "1".to_string(),
+            pathname: "/blog/hello".to_string(),
+            revalidate: Some(60),
+        })
+        .unwrap();
+        assert_eq!(read["type"], "documentRead");
+        assert_eq!(read["pathname"], "/blog/hello");
+        assert_eq!(read["revalidate"], 60);
+
+        // A route with no window omits the key rather than sending a number the
+        // project never configured; `readPrerendered` takes it as optional in
+        // every deployed host too.
+        let windowless = serde_json::to_value(WorkerRequest::DocumentRead {
+            id: "2".to_string(),
+            pathname: "/".to_string(),
+            revalidate: None,
+        })
+        .unwrap();
+        assert!(windowless.get("revalidate").is_none());
+
+        let write = serde_json::to_value(WorkerRequest::DocumentWrite {
+            id: "3".to_string(),
+            pathname: "/blog/hello".to_string(),
+            html: "<!doctype html>".to_string(),
+            revalidate: Some(30),
+            forced: true,
+        })
+        .unwrap();
+        assert_eq!(write["type"], "documentWrite");
+        assert_eq!(write["html"], "<!doctype html>");
+        assert_eq!(write["forced"], true);
     }
 }

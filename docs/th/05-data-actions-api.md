@@ -46,9 +46,11 @@ deployment และความต่างนี้จะมองไม่เ
 | สอง instance หลัง load balancer               | เท่ากับ pool ข้างบนคูณสอง                                                                                                      |
 | Serverless (Lambda, Cloud Functions, Workers) | คำนวณหนึ่งครั้งต่อ container ที่อุ่นอยู่ คำนวณใหม่ทุก cold start และแยกกันในทุก container ที่ทำงานพร้อมกัน                     |
 
-ชื่อ scope บอกว่าค่าจะถือว่าใช้ได้นานแค่ไหน ไม่ได้บอกว่ากี่เครื่องเห็นค่านั้น
-นี่คือขอบเขตเดียวกับที่ `invalidateCache()` และ `revalidateTag()` ทำงาน — ล้าง cache ของ process
-ที่เรียกเท่านั้น ค่าที่ cache ไว้ที่อื่นจะอยู่ต่อจนกว่า TTL ของมันเองจะหมด
+ชื่อ scope บอกว่าค่าจะถือว่าใช้ได้นานแค่ไหน ไม่ได้บอกว่ากี่เครื่องเห็นค่านั้น นี่คือขอบเขตที่
+`invalidateCache()` ทำงาน — ล้าง cache ของ process ที่เรียกเท่านั้น ค่าที่ cache ไว้ที่อื่นจะอยู่ต่อ
+จนกว่า TTL ของมันเองจะหมด ส่วน `revalidateTag()` ไปได้ไกลกว่านั้นเมื่อโปรเจกต์ประกาศ
+[`cache.handler`](07-configuration.md) — ดู
+[invalidate ด้วย tag แทน key](#invalidate-ด้วย-tag-แทน-key)
 
 นั่นทำให้ `cache()` เหมาะกับสิ่งที่มันเป็น — ตัว memoize ภายใน process ที่ดูดซับงานซ้ำ ๆ
 ภายในเซิร์ฟเวอร์ตัวเดียว — และไม่เหมาะจะเป็นที่เก็บค่าเพียงที่เดียว
@@ -71,8 +73,18 @@ revalidateTag('products') // ลบทั้ง `products:list` และ `home:
 
 `revalidateTag(tag)` ลบทุก cache entry ที่มี tag นั้นแบบตรงตัว — การ match เป็นแบบ exact ไม่มีรูป
 prefix หรือ wildcard และแต่ละ tag ยาว 1–128 ตัวอักษร ประกอบด้วยตัวอักษร ตัวเลข `:`, `.`, `_`, `/`
-หรือ `-` เท่านั้น นอกเหนือจากนี้จะ throw เช่นเดียวกับ `invalidateCache()` มันทำงานกับ cache ของ
-process ที่เรียกมัน บน serverless จึงล้างเฉพาะ instance ที่เรียก ไม่ใช่ instance อื่นที่อุ่นอยู่แล้ว
+หรือ `-` เท่านั้น นอกเหนือจากนี้จะ throw
+
+ขอบเขตที่มันไปถึงขึ้นกับว่าโปรเจกต์ประกาศ [`cache.handler`](07-configuration.md) ไว้หรือไม่ ถ้าไม่มี
+handler มันทำงานกับ cache ของ process ที่เรียกมัน บน serverless จึงล้างเฉพาะ instance ที่เรียก
+ไม่ใช่ instance อื่นที่อุ่นอยู่แล้ว ถ้ามี handler ที่ export `revalidateTag` tag จะถูกส่งให้ store
+นั้นหลังตอบ response ด้วย การอ่านครั้งถัดไปของทุก instance จึง miss ที่ store เช่นกัน — แต่ละ
+instance ยังตอบจากสำเนาใน memory ของตัวเองจนกว่า entry นั้นจะหมดอายุ ซึ่งเป็นเหตุผลที่มี
+`cache.maxEntries: 0`
+
+`invalidateCache()` ไม่มีครึ่งหลังนี้ เพราะ contract ของ handler ไม่มีการ invalidate ระดับ key
+คีย์ที่ล้างตรงนี้จึงยังอยู่ใน shared store และการอ่านครั้งถัดไปบน instance นี้จะอ่านมันกลับมา
+สิ่งที่ต้อง invalidate ผ่าน shared store ให้ติด tag ไว้
 
 มันล้าง **ค่า** ที่ cache ไว้ ไม่ใช่ HTML ที่ pre-render แล้ว หากต้องการให้ server render
 เอกสารที่เก็บไว้ใหม่ ให้ใช้ [`revalidatePath()`](#revalidate-ตามคำสั่ง)

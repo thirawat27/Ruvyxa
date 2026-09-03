@@ -28,6 +28,7 @@
 import { runAction, validateActionPayload, validateActionRequest } from './action-runtime.mjs'
 import { methodNotAllowed, normalizeResponse, selectRouteHandler } from './api-methods.mjs'
 import {
+  collectCacheInvalidations,
   collectRevalidatedTags,
   collectRevalidations,
   requestContext,
@@ -416,6 +417,7 @@ export function createHandler(options) {
     readPrerendered,
     writePrerendered,
     revalidateTags,
+    deleteData,
     supportedStrategies = ['ssr', 'ssg', 'csr', 'isr', 'ppr', 'api'],
     middleware,
     i18n,
@@ -833,6 +835,7 @@ export function createHandler(options) {
     const result = await runWithRequestContext(context, () => selected.handler({ request, params }))
     recordRevalidations(collectRevalidations(context))
     await recordRevalidatedTags(collectRevalidatedTags(context))
+    await recordCacheInvalidations(collectCacheInvalidations(context))
     const response = normalizeResponse(result, `${method} ${new URL(request.url).pathname}`)
     // A `HEAD` answered by the route's `GET` keeps every header and drops the
     // content. There is no transport under a serverless function to do it: the
@@ -1142,6 +1145,7 @@ export function createHandler(options) {
       )
       recordRevalidations(collectRevalidations(context))
       await recordRevalidatedTags(collectRevalidatedTags(context))
+      await recordCacheInvalidations(collectCacheInvalidations(context))
       return new Response(payload, {
         headers: {
           'content-type': 'text/x-component; charset=utf-8',
@@ -1197,6 +1201,34 @@ export function createHandler(options) {
       await revalidateTags(tags)
     } catch (error) {
       console.error('[ruvyxa] cache.handler revalidateTag failed:', error)
+    }
+  }
+
+  /**
+   * Hand the project's store every key `invalidateCache()` cleared.
+   *
+   * Awaited before the response for the same reason `recordRevalidatedTags` is:
+   * this is an invalidation, and a mutation that answered `200` has told the
+   * caller the old value is gone. Without it the call is undone by its own next
+   * read — the entry is out of memory, the store still has it, and a miss reads
+   * it back under a full TTL.
+   *
+   * Each entry is already prefixed with this deployment's build id by
+   * `invalidateCache()`, which is the one place that knows the prefix.
+   */
+  async function recordCacheInvalidations(invalidations) {
+    if (invalidations.length === 0 || typeof deleteData !== 'function') return
+    if (invalidations.length > MAX_REVALIDATIONS_PER_REQUEST) {
+      console.warn(
+        `[ruvyxa] Received more than ${MAX_REVALIDATIONS_PER_REQUEST} cache invalidations from one ` +
+          'request; ignoring them rather than doing unbounded work after the response.',
+      )
+      return
+    }
+    try {
+      await deleteData(invalidations)
+    } catch (error) {
+      console.error('[ruvyxa] cache.handler deleteData failed:', error)
     }
   }
 
@@ -1683,7 +1715,11 @@ export function createHandler(options) {
     // is not a thing this host has ever applied, and starting to would change
     // every route's behaviour; a server function called by the form it was
     // posted to is exactly the case where the native host applies them.
-    if (formData) recordRevalidations(collectRevalidations(context))
+    if (formData) {
+      recordRevalidations(collectRevalidations(context))
+      await recordRevalidatedTags(collectRevalidatedTags(context))
+      await recordCacheInvalidations(collectCacheInvalidations(context))
+    }
     const html = localizeHtmlDocument(rendered, route.path, pathname, params ?? {}, i18n)
     const response = new Response(html, {
       status: 200,

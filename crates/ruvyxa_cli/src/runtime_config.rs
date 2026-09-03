@@ -109,6 +109,7 @@ pub(crate) fn dev_server_config(
     server.cache_css = config.cache.css.unwrap_or(true);
     server.data_cache_max_entries = config.cache.max_entries;
     server.data_cache_max_bytes = config.cache.max_bytes;
+    crate::build::report_inert_cache_handler(config);
     server.style_entries = config.style_entries(&args.root);
     server.prebundle_dependencies = config.build.prebundle_dependencies.unwrap_or(true);
     server.runtime = config.javascript_runtime();
@@ -361,6 +362,10 @@ pub(crate) fn production_server_config(
     server.cache_css = config.cache.css.unwrap_or(true);
     server.data_cache_max_entries = config.cache.max_entries;
     server.data_cache_max_bytes = config.cache.max_bytes;
+    if let Some(handler) = resolve_data_cache_handler(&args.root, config)? {
+        server.data_cache_key_prefix = Some(data_cache_key_prefix(&out_dir)?);
+        server.data_cache_handler = Some(handler);
+    }
     server.style_entries = config.style_entries(&out_dir.join("server"));
     server.runtime = config.javascript_runtime();
     server.jsx_runtime = parse_jsx_runtime(config.build.jsx_runtime.as_deref())?;
@@ -408,6 +413,99 @@ pub(crate) fn production_server_config(
     server.dynamic_images.max_width = config.images.on_demand.max_width();
     server.dynamic_images.default_quality = config.images.quality.clamp(1, 100);
     Ok(server)
+}
+
+/// Resolve `cache.handler` to the absolute module this host will load.
+///
+/// `None` when the project declared none, which is every project that has not
+/// asked for a shared store.
+///
+/// Validated here rather than in the worker for the reason every startup check
+/// exists: the pool is several processes, so a path that names no file would
+/// otherwise fail once per worker, after the server had reported itself up, in
+/// a message about a module specifier rather than about the setting that names
+/// it. `RUV2200` is the same code `documentCacheHandlerPrelude` refuses a bad
+/// `cache.handler` with, so the two hosts answer one question one way.
+///
+/// Normalized because the value becomes a module URL inside a Node process:
+/// `canonicalize` alone returns the Windows extended-length prefix, which
+/// `pathToFileURL` does not accept.
+pub(crate) fn resolve_data_cache_handler(
+    root: &Path,
+    config: &ProjectConfig,
+) -> anyhow::Result<Option<PathBuf>> {
+    let Some(handler) = crate::build::project_document_store(config) else {
+        return Ok(None);
+    };
+    let candidate = root.join(handler);
+    if !candidate.is_file() {
+        let diagnostic = ruvyxa_diagnostics::Diagnostic::new(
+            "RUV2200",
+            "cache.handler does not name a file under the project root",
+        )
+        .explain(format!(
+            "`cache.handler` is `{handler}`, which resolves to `{}` — and there is no file there.",
+            candidate.display()
+        ))
+        .at_file(&candidate)
+        .suggest(
+            "Point cache.handler at a module exporting read/write, readData/writeData, or both.",
+        );
+        return Err(ruvyxa_diagnostics::RuvyxaError::from(diagnostic).into());
+    }
+    Ok(Some(ruvyxa_diagnostics::normalized_canonical_path(
+        &candidate,
+    )))
+}
+
+/// The prefix every key this server hands the shared store carries.
+///
+/// `<build id>:`, read from the manifest `ruvyxa build` wrote, because that is
+/// where the deployed half gets it too — `documentCacheHandlerPrelude` takes
+/// `deployManifest.buildId` and appends the same colon. One project deployed
+/// two ways then addresses one store the same way, and two deployments pointed
+/// at one managed store cannot read each other's `cache('user:1')`.
+///
+/// An unreadable manifest or a missing id is an error rather than an empty
+/// prefix. The empty prefix is not a smaller version of this answer, it is the
+/// collision the prefix exists to prevent, and it would appear as two
+/// deployments quietly serving each other's cached values — which is a data
+/// leak before it is a caching bug. A build output this server has already
+/// accepted always has one; not having one means the output is not what it
+/// claims to be, and rebuilding is the fix.
+pub(crate) fn data_cache_key_prefix(out_dir: &Path) -> anyhow::Result<String> {
+    let manifest_path = out_dir.join("manifest.json");
+    let build_id = fs::read_to_string(&manifest_path)
+        .ok()
+        .and_then(|source| serde_json::from_str::<serde_json::Value>(&source).ok())
+        .and_then(|manifest| {
+            manifest
+                .get("deploy")?
+                .get("buildId")?
+                .as_str()
+                .map(str::to_string)
+        })
+        .filter(|id| !id.is_empty());
+
+    let Some(build_id) = build_id else {
+        // Its own code rather than `RUV2200`. That one means "cache.handler
+        // names no file", which is what `documentCacheHandlerPrelude` refuses a
+        // deployed build with; this is a complete setting against an incomplete
+        // build output, and a code that carries two meanings is a search term
+        // that finds the wrong one.
+        let diagnostic = ruvyxa_diagnostics::Diagnostic::new(
+            "RUV2208",
+            "cache.handler needs a build id and this build output has none",
+        )
+        .explain(format!(
+            "`{}` does not carry `deploy.buildId`, which is what namespaces this deployment's keys in the shared store. Without it this server would write unprefixed keys that another deployment pointed at the same store reads as its own.",
+            manifest_path.display()
+        ))
+        .at_file(&manifest_path)
+        .suggest("Run `ruvyxa build` again to write a complete manifest, then start the server.");
+        return Err(ruvyxa_diagnostics::RuvyxaError::from(diagnostic).into());
+    };
+    Ok(format!("{build_id}:"))
 }
 
 pub(crate) fn load_project_config(root: &Path) -> anyhow::Result<ProjectConfig> {

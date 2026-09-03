@@ -164,6 +164,13 @@ export function requestContext({ headerPairs, headers, method = 'GET', url = '/'
     // store write that happens before the response is a write that a failed
     // request still performed.
     revalidateTags: new Set(),
+    // Keys `invalidateCache()` asked the server to drop from the shared store.
+    //
+    // An array rather than a Set because each entry is an `{ key?, prefix }`
+    // pair: `invalidateCache('products')` clears `products` and everything
+    // under `products:` but not `productsXYZ`, which one string cannot say.
+    // `invalidateCache()` de-duplicates against what is already queued.
+    invalidatedKeys: [],
   }
 }
 
@@ -175,6 +182,11 @@ export function collectRevalidations(context) {
 /** Tags this request asked to revalidate, for the host to act on. */
 export function collectRevalidatedTags(context) {
   return context?.revalidateTags ? [...context.revalidateTags] : []
+}
+
+/** Shared-store keys this request asked to drop, for the host to act on. */
+export function collectCacheInvalidations(context) {
+  return Array.isArray(context?.invalidatedKeys) ? [...context.invalidatedKeys] : []
 }
 
 /**

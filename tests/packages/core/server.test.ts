@@ -674,6 +674,54 @@ describe('cache() through a project shared store', () => {
     }
   })
 
+  // An entry with no `value` reads back as `undefined`, which is an answer no
+  // producer can return — `assertCacheSerializable` refuses it on the way in.
+  // Trusting it committed `undefined` under a full TTL and stopped calling the
+  // producer at all, so the key answered `undefined` until the window expired.
+  it('produces when the shared store returns an entry carrying no value', async () => {
+    let produced = 0
+    const key = `shared-valueless-${Math.random()}`
+    const restore = install({
+      readData: () => ({ populatedAt: Date.now() }),
+      writeData: () => {},
+    })
+    try {
+      const first = await cache(key)
+        .ttl('60s')
+        .get(() => {
+          produced += 1
+          return 'produced locally'
+        })
+      assert.equal(first, 'produced locally')
+      assert.equal(produced, 1, 'the producer never ran, so the key answered undefined')
+    } finally {
+      restore()
+    }
+  })
+
+  // The local tier accepts only JSON-shaped trees, and the shared tier was the
+  // one way in that did not check. A `Date` weighs nothing against the byte
+  // budget and is not what the code that wrote it would ever get back.
+  it('produces when the shared store returns a value the local tier would refuse', async () => {
+    let produced = 0
+    const restore = install({
+      readData: () => ({ value: new Date(0), populatedAt: Date.now() }),
+      writeData: () => {},
+    })
+    try {
+      const value = await cache(`shared-unserializable-${Math.random()}`)
+        .ttl('60s')
+        .get(() => {
+          produced += 1
+          return 'produced locally'
+        })
+      assert.equal(value, 'produced locally')
+      assert.equal(produced, 1)
+    } finally {
+      restore()
+    }
+  })
+
   // A project that declares no handler must behave exactly as it did.
   it('is untouched when no shared store is installed', async () => {
     const restore = install(undefined)

@@ -298,6 +298,17 @@ function cacheValue(cache) {
     routes: booleanValue(cache?.routes),
     css: booleanValue(cache?.css),
     dir: stringValue(cache?.dir),
+    // The three the shared cache is made of. `CONFIG_KEY_SCHEMA` accepted them
+    // and `RuvyxaConfig` declared them, so a project setting one passed every
+    // check — and this function decides what actually leaves the renderer, so
+    // none of the three ever reached a consumer. `cache.handler` named a store
+    // nothing loaded, and both bounds were dropped on the way to the tier they
+    // bound. A key is accepted here or it does not exist.
+    handler: stringValue(cache?.handler),
+    // `numberValue` keeps `0`, which both bounds use as a decision: zero
+    // entries turns the local tier off, zero bytes removes the memory ceiling.
+    maxEntries: numberValue(cache?.maxEntries),
+    maxBytes: numberValue(cache?.maxBytes),
   })
 }
 
@@ -399,7 +410,14 @@ function assertConfigValueShape(config) {
       trustedProxyIps: 'string[]',
       headers: 'boolean',
     },
-    cache: { routes: 'boolean', css: 'boolean', dir: 'string' },
+    cache: {
+      routes: 'boolean',
+      css: 'boolean',
+      dir: 'string',
+      handler: 'string',
+      maxEntries: 'number',
+      maxBytes: 'number',
+    },
     middleware: { workers: 'number', timeoutMs: 'number' },
     adapter: 'object',
     adapterOptions: 'object',

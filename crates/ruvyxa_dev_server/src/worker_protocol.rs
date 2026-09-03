@@ -311,6 +311,35 @@ pub enum WorkerRequest {
         #[serde(rename = "traceId", skip_serializing_if = "Option::is_none")]
         trace_id: Option<String>,
     },
+    /// Read one stored document through the project's `cache.handler`.
+    ///
+    /// The document half of that setting, and the reason it has to cross this
+    /// protocol at all: the store is a JavaScript module the project wrote, and
+    /// only a worker can call it. `ruvyxa start` otherwise reads the build's own
+    /// `prerender` directory, which is per-instance — right for one container
+    /// and wrong for the several this setting exists to serve.
+    #[serde(rename = "documentRead")]
+    DocumentRead {
+        id: String,
+        pathname: String,
+        /// The route's window, so a handler can answer `stale` for itself. The
+        /// same argument `readPrerendered` takes in every deployed host.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        revalidate: Option<u64>,
+    },
+    /// Persist one rendered document through the project's `cache.handler`.
+    #[serde(rename = "documentWrite")]
+    DocumentWrite {
+        id: String,
+        pathname: String,
+        html: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        revalidate: Option<u64>,
+        /// Whether `revalidatePath()` asked for this write. A handler may treat
+        /// a forced write differently, and the deployed hosts pass the same
+        /// flag.
+        forced: bool,
+    },
     #[serde(rename = "ping")]
     Ping { id: String },
     /// Withdraw a request the host is no longer listening to.
@@ -400,6 +429,8 @@ impl WorkerRequest {
             | Self::RscDocument { id, .. }
             | Self::RscAction { id, .. }
             | Self::RscClientEntry { id, .. }
+            | Self::DocumentRead { id, .. }
+            | Self::DocumentWrite { id, .. }
             | Self::StaticParams { id, .. } => id,
         }
     }
@@ -432,6 +463,12 @@ impl WorkerRequest {
                 | Self::RscClientEntry { .. }
                 | Self::Ping { .. }
                 | Self::Warmup { .. }
+                // A read of the project's store, and a write that names the
+                // document it stores rather than appending to anything. Both
+                // land on the same key twice with the same result, so a worker
+                // that died mid-flight can be asked again.
+                | Self::DocumentRead { .. }
+                | Self::DocumentWrite { .. }
                 | Self::Invalidate { .. }
         )
     }
@@ -501,6 +538,14 @@ pub struct WorkerResponse {
     /// treated as `false` because those workers cannot expose the accessors
     /// that would make it true.
     pub request_scoped: Option<bool>,
+    /// Whether a document the project's `cache.handler` answered with is past
+    /// its window and wants a background refresh.
+    ///
+    /// `None` from a worker that answered no document, and from every request
+    /// that is not a `documentRead` — which is why it is an `Option<bool>`
+    /// rather than a `bool`: "the store said fresh" and "nothing was asked" are
+    /// different answers and only one of them means serve this.
+    pub stale: Option<bool>,
     /// Concrete URLs `revalidatePath()` asked the host to refresh, collected
     /// from the API route or server action that just ran. Absent from older
     /// workers, which never call it.

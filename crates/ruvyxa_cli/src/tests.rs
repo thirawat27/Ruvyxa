@@ -5264,3 +5264,91 @@ async fn a_fully_cached_server_component_pass_starts_no_worker() {
         Some("export default 1")
     );
 }
+
+/// `cache.handler` becomes an absolute module the render workers can import.
+///
+/// The path is project-relative in the config and becomes a module URL inside a
+/// Node process, so it is resolved and checked here rather than in the worker:
+/// the pool is several processes, and a path naming no file would otherwise
+/// fail once per worker, after the server reported itself up, in a message
+/// about a module specifier rather than about the setting that names it.
+#[test]
+fn a_configured_cache_handler_resolves_to_a_real_module() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = |value: Option<&str>| -> crate::config::ProjectConfig {
+        serde_json::from_value(serde_json::json!({
+            "cache": match value {
+                Some(handler) => serde_json::json!({ "handler": handler }),
+                None => serde_json::json!({}),
+            }
+        }))
+        .expect("the fixture config must deserialize")
+    };
+
+    assert_eq!(
+        crate::runtime_config::resolve_data_cache_handler(temp.path(), &config(None)).unwrap(),
+        None,
+        "a project that declares nothing loads nothing"
+    );
+
+    let missing = crate::runtime_config::resolve_data_cache_handler(
+        temp.path(),
+        &config(Some("./absent.mjs")),
+    );
+    assert!(
+        missing.is_err(),
+        "a handler naming no file must fail at startup, not once per worker"
+    );
+
+    std::fs::write(temp.path().join("cache-handler.mjs"), "export {}\n").unwrap();
+    let resolved = crate::runtime_config::resolve_data_cache_handler(
+        temp.path(),
+        &config(Some("./cache-handler.mjs")),
+    )
+    .unwrap()
+    .expect("a handler naming a real file resolves");
+    assert!(resolved.is_absolute());
+    assert!(resolved.ends_with("cache-handler.mjs"));
+    assert!(
+        !resolved.to_string_lossy().starts_with(r"\?\"),
+        "the extended-length prefix is not a path `pathToFileURL` accepts"
+    );
+}
+
+/// Every key this server hands the shared store carries the build id.
+///
+/// The same shape `documentCacheHandlerPrelude` writes into a deployed build's
+/// registry, so one project deployed two ways addresses one store the same way.
+/// A missing id is an error rather than an empty prefix: the empty prefix is
+/// not a smaller answer, it is the collision the prefix exists to prevent, and
+/// it surfaces as two deployments serving each other's cached values.
+#[test]
+fn the_shared_cache_key_prefix_comes_from_the_build_id() {
+    let temp = tempfile::tempdir().unwrap();
+
+    assert!(
+        crate::runtime_config::data_cache_key_prefix(temp.path()).is_err(),
+        "no manifest at all cannot answer with an unprefixed key"
+    );
+
+    std::fs::write(
+        temp.path().join("manifest.json"),
+        r#"{"deploy":{"buildId":""}}"#,
+    )
+    .unwrap();
+    assert!(
+        crate::runtime_config::data_cache_key_prefix(temp.path()).is_err(),
+        "an empty build id is the collision, not a shorter prefix"
+    );
+
+    std::fs::write(
+        temp.path().join("manifest.json"),
+        r#"{"deploy":{"buildId":"abc123"}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        crate::runtime_config::data_cache_key_prefix(temp.path()).unwrap(),
+        "abc123:",
+        "the same `<build id>:` a deployed build's registry writes"
+    );
+}

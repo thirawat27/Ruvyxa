@@ -845,12 +845,88 @@ export function cache(key: string): CacheBuilder {
 /**
  * Invalidate a specific cache key, all keys matching a prefix, or the entire cache.
  *
+ * The same two halves `revalidateTag()` has, and for the same reason. This
+ * process's own store drops the entries immediately. The instruction is *also*
+ * queued onto the request, when there is one, so the host can hand it to the
+ * project's cache handler after the response.
+ *
+ * Without that second half this call was undone by its own next read: the entry
+ * is gone from memory, the shared store still holds it, and a miss reads it
+ * back and re-commits it under a full TTL. An invalidation that the following
+ * line of code silently reverses is worse than one that never reached the other
+ * instances, because it looks like it worked.
+ *
+ * A project that declares no `cache.handler`, or one whose handler exports no
+ * `deleteData`, sees no change: there is nothing for the host to hand it to.
+ *
  * @param keyOrPrefix - If omitted, clears the entire cache. If provided, clears the
  *   exact key and any keys that start with `keyOrPrefix:`.
  */
 export function invalidateCache(keyOrPrefix?: string): void {
   cacheStore.invalidate(keyOrPrefix)
+
+  // Outside a request this is a no-op rather than an error, exactly as
+  // `revalidateTag()` is: both have always been callable from module scope.
+  const contextHost = (globalThis as Record<string, unknown>)[CONTEXT_KEY] as
+    RequestContextHost | undefined
+  const context = contextHost?.peek?.() ?? contextHost?.current() ?? null
+  if (!context?.invalidatedKeys) return
+
+  // Prefixed here rather than by the host, because the deployment prefix is
+  // this module's to apply — `sharedKey` is what every read and write already
+  // goes through, and a second place that knew the prefix is a second place
+  // that can disagree with it.
+  //
+  // `key` and `prefix` are carried separately because they are not derivable
+  // from one another: `invalidateCache('products')` clears `products` and
+  // everything under `products:`, and *not* `productsXYZ`. A single prefix
+  // string cannot say that, and collapsing the no-argument form onto the
+  // deployment prefix would make `invalidateCache('')` — which locally clears
+  // almost nothing — delete the whole namespace.
+  const invalidation: SharedCacheInvalidation =
+    keyOrPrefix === undefined
+      ? { prefix: sharedKey('') }
+      : { key: sharedKey(keyOrPrefix), prefix: sharedKey(keyOrPrefix) + ':' }
+
+  const already = context.invalidatedKeys.some(
+    (queued) => queued.key === invalidation.key && queued.prefix === invalidation.prefix,
+  )
+  if (already) return
+  if (context.invalidatedKeys.length >= MAX_INVALIDATIONS_PER_REQUEST) {
+    throw new Error(
+      `invalidateCache() accepts at most ${MAX_INVALIDATIONS_PER_REQUEST} distinct keys in one ` +
+        'request. Invalidate a broader prefix rather than enumerating narrow ones.',
+    )
+  }
+  context.invalidatedKeys.push(invalidation)
 }
+
+/**
+ * One `invalidateCache()` call, as the project's shared store must apply it.
+ *
+ * Both fields are already prefixed with this deployment's build id, so a
+ * handler applies them as they arrive.
+ */
+export interface SharedCacheInvalidation {
+  /**
+   * Delete exactly this key.
+   *
+   * Absent for `invalidateCache()` with no argument, which names no key: that
+   * call clears the deployment's whole namespace, which `prefix` alone says.
+   */
+  key?: string
+  /** Delete every key beginning with this. */
+  prefix: string
+}
+
+/**
+ * Keys one request may queue for the shared store.
+ *
+ * The same bound `revalidatePath()` and `revalidateTag()` use, for the same
+ * reason: the list crosses the worker protocol, and an unbounded one is a
+ * request that can make the host do unbounded work after it has answered.
+ */
+const MAX_INVALIDATIONS_PER_REQUEST = 64
 
 /**
  * Invalidate cache entries carrying one exact tag.
@@ -1043,6 +1119,14 @@ export interface RequestContext {
   /** Tags `revalidateTag()` asked the host to drop from the shared store. */
   revalidateTags?: Set<string>
   /**
+   * Keys `invalidateCache()` asked the host to drop from the shared store.
+   *
+   * An array rather than a `Set` because each entry is a pair, not a string:
+   * an exact key and a prefix, which a `Set` could not de-duplicate. The bound
+   * is small enough that the linear check costs nothing.
+   */
+  invalidatedKeys?: SharedCacheInvalidation[]
+  /**
    * `Set-Cookie` values a server action or API route has queued.
    *
    * Absent during page rendering: the response headers are already being
@@ -1148,6 +1232,17 @@ function dataCacheConfig(): SharedDataCache | null {
  * request that fails: the producer below still runs and still answers. Reported
  * rather than swallowed, because a store that is quietly unreachable is a
  * deployment paying for one and getting per-instance caching.
+ *
+ * The entry is held to the same shape a locally produced one is. Every value
+ * this process writes has been through `assertCacheSerializable`, and the
+ * shared tier is the one way into the store that had not: an entry carrying no
+ * `value` at all deserialized to `undefined`, which is a legitimate-looking
+ * answer no producer can ever return — so it was committed under a full TTL and
+ * served in place of the value, and the producer stopped being called. A
+ * handler that hands back a `Date` or a `Buffer` is the same failure one step
+ * later, where nothing can tell it apart from a value the code chose. Refusing
+ * it here means an unusable entry costs one produce, which is what a miss
+ * costs, rather than an entry's whole freshness window.
  */
 function readShared(key: string): Promise<SharedCacheEntry | null> | null {
   const store = dataCacheConfig()
@@ -1162,6 +1257,13 @@ function readShared(key: string): Promise<SharedCacheEntry | null> | null {
       const entry = await store.readData!(sharedKey(key))
       if (!entry || typeof entry !== 'object') return null
       if (typeof entry.populatedAt !== 'number' || !Number.isFinite(entry.populatedAt)) return null
+      if (!('value' in entry)) {
+        console.error(
+          `[ruvyxa] cache.handler readData returned an entry with no value for ${key}; producing instead.`,
+        )
+        return null
+      }
+      assertCacheSerializable(entry.value)
       return entry
     } catch (error) {
       console.error('[ruvyxa] cache.handler readData failed:', error)

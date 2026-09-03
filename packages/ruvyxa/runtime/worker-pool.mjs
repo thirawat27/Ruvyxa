@@ -29,6 +29,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createInterface } from 'node:readline'
 
 import {
+  collectCacheInvalidations,
+  collectRevalidatedTags,
   collectRevalidations,
   requestContext,
   runWithRequestContext,
@@ -198,11 +200,164 @@ function installDataCacheBounds() {
 
 installDataCacheBounds()
 
-/** What `cache()` will read, for the `ping` report. `null` when nothing installed one. */
+/**
+ * The project's `cache.handler` module, or `null` when it declared none.
+ *
+ * The bounds above say how large this worker's own tier may be; this says what
+ * every worker in every instance shares. Until it was loaded here the setting
+ * reached every deployed platform and neither host this file serves, so an
+ * application running several `ruvyxa start` instances behind one load balancer
+ * declared a shared store and got per-instance caching — the exact arrangement
+ * `cache.handler` exists for.
+ *
+ * `RUVYXA_DATA_CACHE_HANDLER` is an absolute path that
+ * `resolve_data_cache_handler` in `crates/ruvyxa_cli/src/runtime_config.rs`
+ * has already checked names a file, so a failure to import it here is the
+ * module itself failing and belongs to the operator, not to a render. It is
+ * absent under `ruvyxa dev` on purpose: a development server has no build id to
+ * namespace keys with, and unprefixed keys in the project's real store are
+ * production's entries.
+ */
+const dataCacheHandler = await loadDataCacheHandler()
+
+async function loadDataCacheHandler() {
+  const configured = (process.env.RUVYXA_DATA_CACHE_HANDLER ?? '').trim()
+  if (configured === '') return null
+  const handler = await import(pathToFileURL(configured).href)
+  // Named rather than spread, so a module exporting none of them is a value
+  // this worker can see is empty rather than an object that answers nothing.
+  // The same four names the deployed registry installs, split the same way:
+  // the two data accessors go on the global `@ruvyxa/core` reads, and the two
+  // invalidators are called from here after a request settles.
+  const installed = globalThis.__RUVYXA_DATA_CACHE__
+  globalThis.__RUVYXA_DATA_CACHE__ = {
+    ...(installed && typeof installed === 'object' ? installed : {}),
+    readData: handler.readData,
+    writeData: handler.writeData,
+    // Every key this deployment writes carries it, exactly as
+    // `documentCacheHandlerPrelude` makes a deployed build's keys carry it.
+    // The Rust half refuses to start without one rather than sending a bare
+    // key into a store another deployment is also using.
+    keyPrefix: process.env.RUVYXA_DATA_CACHE_KEY_PREFIX ?? '',
+  }
+  return handler
+}
+
+/**
+ * Collect a request's revalidations, and hand its invalidations to the store.
+ *
+ * One function rather than a `collectRevalidations` call at each of the five
+ * sites that finish a request, because the two halves have to happen together
+ * and the second was easy to forget: a path goes back to the Rust host, which
+ * owns the document cache, while a tag or a key goes to the project's own
+ * store, which only this process can reach.
+ *
+ * Awaited, for the reason `serverless-handler.mjs` awaits the same two calls: a
+ * mutation that answered `200` has told the caller the old value is gone, and a
+ * worker recycled between the response and an unawaited write never performs
+ * it. A store that throws is reported and does not fail the request — the write
+ * is already lost by then, and turning a successful mutation into a 500 would
+ * lose the mutation as well.
+ */
+/**
+ * Answer the host with one stored document from the project's `cache.handler`.
+ *
+ * The document half of that setting has to cross this protocol because the
+ * store is a module the project wrote and only a worker can call it. The host
+ * treats every failure — no handler, no `read`, a throw, a shape it cannot use
+ * — as "the store has nothing", and falls back to the documents this build
+ * produced.
+ *
+ * The shape is the one every deployed host already normalizes:
+ * `null` for a miss, a string for a document, or `{ html, stale }`.
+ */
+async function handleDocumentRead(request) {
+  if (typeof dataCacheHandler?.read !== 'function') return { ok: true, html: null }
+  try {
+    const entry = await dataCacheHandler.read(request.pathname, request.revalidate)
+    if (typeof entry === 'string') return { ok: true, html: entry, stale: false }
+    if (!entry || typeof entry !== 'object' || typeof entry.html !== 'string') {
+      return { ok: true, html: null }
+    }
+    return { ok: true, html: entry.html, stale: entry.stale === true }
+  } catch (error) {
+    return {
+      ok: false,
+      code: 'RUV2200',
+      message: `cache.handler read failed: ${error?.message ?? error}`,
+    }
+  }
+}
+
+/** Persist one rendered document through the project's `cache.handler`. */
+async function handleDocumentWrite(request) {
+  if (typeof dataCacheHandler?.write !== 'function') return { ok: true }
+  try {
+    await dataCacheHandler.write(
+      request.pathname,
+      request.html,
+      request.revalidate,
+      request.forced === true,
+    )
+    return { ok: true }
+  } catch (error) {
+    return {
+      ok: false,
+      code: 'RUV2200',
+      message: `cache.handler write failed: ${error?.message ?? error}`,
+    }
+  }
+}
+
+async function settleRequestCaches(context) {
+  const revalidate = collectRevalidations(context)
+  if (!dataCacheHandler) return revalidate
+
+  const tags = collectRevalidatedTags(context)
+  if (tags.length > 0 && typeof dataCacheHandler.revalidateTag === 'function') {
+    try {
+      await dataCacheHandler.revalidateTag(tags)
+    } catch (error) {
+      console.error('[ruvyxa] cache.handler revalidateTag failed:', error)
+    }
+  }
+
+  const keys = collectCacheInvalidations(context)
+  if (keys.length > 0 && typeof dataCacheHandler.deleteData === 'function') {
+    try {
+      await dataCacheHandler.deleteData(keys)
+    } catch (error) {
+      console.error('[ruvyxa] cache.handler deleteData failed:', error)
+    }
+  }
+
+  return revalidate
+}
+
+/**
+ * What `cache()` will read, for the `ping` report. `null` when nothing
+ * installed one.
+ *
+ * `handler` and `keyPrefix` answer the question the bounds cannot: whether this
+ * worker is in front of the project's shared store at all. Read back off the
+ * global rather than off the environment for the same reason the bounds are —
+ * the caller is asking whether the handshake happened, and re-reading the
+ * variables here would answer with this line's own arithmetic instead.
+ */
 function dataCacheBounds() {
   const installed = globalThis.__RUVYXA_DATA_CACHE__
   if (!installed || typeof installed !== 'object') return null
-  return { maxEntries: installed.maxEntries ?? null, maxBytes: installed.maxBytes ?? null }
+  return {
+    maxEntries: installed.maxEntries ?? null,
+    maxBytes: installed.maxBytes ?? null,
+    handler: {
+      readData: typeof installed.readData === 'function',
+      writeData: typeof installed.writeData === 'function',
+      revalidateTag: typeof dataCacheHandler?.revalidateTag === 'function',
+      deleteData: typeof dataCacheHandler?.deleteData === 'function',
+    },
+    keyPrefix: installed.keyPrefix ?? null,
+  }
 }
 
 /**
@@ -570,6 +725,10 @@ async function dispatchRequest(request, signal) {
         // would answer it with this line's own arithmetic instead.
         dataCache: dataCacheBounds(),
       }
+    case 'documentRead':
+      return handleDocumentRead(request)
+    case 'documentWrite':
+      return handleDocumentWrite(request)
     case 'invalidate':
       return { ok: true, traceId: request.traceId, ...invalidateBundleCache(request.paths) }
     default:
@@ -1423,7 +1582,7 @@ async function handleApi(request, signal) {
   const result = await runWithRequestContext(context, () =>
     handler({ request: req, params: params || {} }),
   )
-  const revalidate = collectRevalidations(context)
+  const revalidate = await settleRequestCaches(context)
   const response = normalizeResponse(result, `${upperMethod} ${requestPath}`)
   const headerPairsResult = responseHeaderPairs(response)
   const headers = Object.fromEntries(headerPairsResult)
@@ -1563,7 +1722,7 @@ async function handleAction(request) {
     status: response.status,
     headers,
     headerPairs: headerPairsResult,
-    revalidate: collectRevalidations(context),
+    revalidate: await settleRequestCaches(context),
     ...dependencyMetadata,
     body,
   }
@@ -2605,7 +2764,7 @@ async function handleRscAction(request) {
     ok: true,
     rscPayload: payload,
     requestScoped: usedRequestContext(context),
-    revalidate: collectRevalidations(context),
+    revalidate: await settleRequestCaches(context),
   }
 }
 
@@ -2705,7 +2864,7 @@ async function handleServerComponents(request, { fresh = false, html = true } = 
     html: rendered.html ?? undefined,
     rscPayload: rendered.payload,
     requestScoped: usedRequestContext(context),
-    revalidate: collectRevalidations(context),
+    revalidate: await settleRequestCaches(context),
     dependencyHash: server.dependencyHash,
     inputsVersion: inputsVersionOf(inputs),
     inputs,
@@ -2802,7 +2961,7 @@ async function handleServerComponentsDocument(request) {
     // already run by this point, which is why its `revalidatePath()` calls can
     // travel here rather than in the trailer.
     requestScoped: usedRequestContext(context),
-    revalidate: collectRevalidations(context),
+    revalidate: await settleRequestCaches(context),
     dependencyHash: server.dependencyHash,
     inputsVersion: server.inputsVersion,
     inputs: server.inputs,

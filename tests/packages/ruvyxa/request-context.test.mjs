@@ -17,6 +17,7 @@ import { describe, it } from 'node:test'
 import {
   collectRevalidations,
   DRAFT_MODE_COOKIE as RUNTIME_DRAFT_COOKIE,
+  collectCacheInvalidations,
   collectRevalidatedTags,
   requestContext,
   runWithRequestContext,
@@ -28,6 +29,7 @@ import {
   draftMode,
   headers,
   parseCookieHeader,
+  invalidateCache,
   revalidatePath,
   revalidateTag,
 } from '../../../packages/@ruvyxa/core/dist/server.js'
@@ -258,6 +260,70 @@ describe('revalidateTag', () => {
   // attach one to, and the local invalidation is still the whole behaviour.
   it('stays a local invalidation outside a request', () => {
     assert.doesNotThrow(() => revalidateTag('products'))
+  })
+})
+
+describe('invalidateCache', () => {
+  // The half `revalidateTag()` had and this did not. Clearing the local tier
+  // and stopping there is undone by the very next read once a shared store is
+  // declared: the key is gone from memory, the store still holds it, and the
+  // miss reads it back and re-commits it under a full TTL. The invalidation
+  // looks like it worked and the value never left.
+  it('queues the key and its prefix for the host to hand to the shared store', () => {
+    const store = requestContext({ headerPairs: [] })
+    runWithRequestContext(store, () => invalidateCache('products'))
+    assert.deepEqual(collectCacheInvalidations(store), [{ key: 'products', prefix: 'products:' }])
+  })
+
+  // `invalidateCache('products')` clears `products` and everything under
+  // `products:` — and not `productsXYZ`. One prefix string cannot say that,
+  // which is why the pair travels rather than a single value.
+  it('carries the exact key separately from the prefix', () => {
+    const store = requestContext({ headerPairs: [] })
+    runWithRequestContext(store, () => invalidateCache('products'))
+    const [queued] = collectCacheInvalidations(store)
+    assert.equal(queued.key, 'products')
+    assert.equal(queued.prefix, 'products:')
+  })
+
+  // No argument names no key: it clears the deployment's whole namespace, which
+  // the prefix alone says. Folding it onto the same shape as an empty-string
+  // key would make `invalidateCache('')` — which locally clears almost nothing
+  // — delete everything.
+  it('queues a namespace-wide prefix and no key when called with no argument', () => {
+    const store = requestContext({ headerPairs: [] })
+    runWithRequestContext(store, () => invalidateCache())
+    assert.deepEqual(collectCacheInvalidations(store), [{ prefix: '' }])
+  })
+
+  it('distinguishes no argument from an empty-string key', () => {
+    const store = requestContext({ headerPairs: [] })
+    runWithRequestContext(store, () => {
+      invalidateCache()
+      invalidateCache('')
+    })
+    assert.deepEqual(collectCacheInvalidations(store), [{ prefix: '' }, { key: '', prefix: ':' }])
+  })
+
+  it('collapses a key invalidated more than once', () => {
+    const store = requestContext({ headerPairs: [] })
+    runWithRequestContext(store, () => {
+      invalidateCache('products')
+      invalidateCache('products')
+    })
+    assert.deepEqual(collectCacheInvalidations(store), [{ key: 'products', prefix: 'products:' }])
+  })
+
+  it('does not make the caller uncacheable', () => {
+    const store = requestContext({ headerPairs: [] })
+    runWithRequestContext(store, () => invalidateCache('products'))
+    assert.equal(usedRequestContext(store), false)
+  })
+
+  // Callable at module scope since it existed. Adding a queue must not turn
+  // that into an error.
+  it('stays a local invalidation outside a request', () => {
+    assert.doesNotThrow(() => invalidateCache('products'))
   })
 })
 

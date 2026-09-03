@@ -164,6 +164,17 @@ export interface RuvyxaConfig {
      * // instead of only the one that served the mutation.
      * export async function revalidateTag(tags: string[]) {}
      *
+     * // Optional. The same seam for `invalidateCache()`. Each entry carries an
+     * // exact key and a prefix, already namespaced to this deployment: delete
+     * // the key, and delete everything beginning with the prefix. `key` is
+     * // absent for `invalidateCache()` with no argument, which names none.
+     * // Without this the call is undone by its own next read — the key is gone
+     * // from the calling process and still in the store, so the next miss
+     * // reads it back under a full TTL.
+     * export async function deleteData(
+     *   keys: { key?: string; prefix: string }[],
+     * ) {}
+     *
      * // Optional. The `cache()` data store, shared the same way. `populatedAt`
      * // is when the value was produced; the freshness window is recomputed
      * // from the caller's own `ttl`, so a stored entry cannot outlive it.
