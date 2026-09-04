@@ -29,7 +29,10 @@ export const products = loader(async ({ cache }) =>
 
 ระยะเวลา cache รับจำนวนเต็มบวกตามด้วย `ms`, `s`, `m`, `h` หรือ `d` `invalidateCache('products')` ลบ
 `products` และ key ที่ขึ้นต้นด้วย `products:`; หากไม่ส่ง argument จะล้าง cache ทั้ง process เรียก
-`cacheStats()` เพื่อได้ `{ size, maxEntries }`
+`cacheStats()` เพื่อได้ `{ size, maxEntries }` `pruneCache()` ลบ entry
+ที่หมดอายุเต็มที่แล้วทั้งหมดและคืนจำนวนที่ลบ เป็น sweep ที่โมดูลนี้รันเองอยู่แล้วทุกหกสิบวินาที
+มีไว้ให้ host ที่รู้ว่าตัวเองว่าง ไม่ใช่การ invalidate: entry ที่พ้นช่วง stale
+แล้วเสิร์ฟให้ใครไม่ได้อีก การลบจึงคืนหน่วยความจำโดยไม่เปลี่ยนคำตอบใด
 
 `.scope('request')` จะเก็บค่าไว้เฉพาะ request ปัจจุบันแทนการใช้ร่วมกันข้าม request ใช้เมื่อ producer
 อ่าน cookie, header หรือ draft mode — producer ที่ใช้ร่วมกันแล้วไปอ่าน request state จะ fail closed

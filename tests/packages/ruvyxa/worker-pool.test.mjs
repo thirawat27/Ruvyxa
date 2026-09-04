@@ -1744,3 +1744,54 @@ test('answers a document read with nothing when no handler is configured', async
   assert.equal(response.html, null, 'no handler is a miss, not a failure')
   assert.equal((await request({ type: 'documentWrite', pathname: '/', html: 'x' })).ok, true)
 })
+
+// A side table beside a bounded cache is bounded by that cache only while every
+// path that forgets a cache entry forgets the side table too, and the lists
+// diverged: `rscBundleReferences` was dropped by the watcher's invalidation and
+// by neither eviction path, so an LRU eviction — and the memory-pressure sweep,
+// whose whole job is to free memory — left one client/server reference list per
+// evicted server-components route behind forever.
+//
+// Held by reading the two constructs against each other rather than by a hand
+// list, in the shape AGENTS.md asks for: the clear-everything branch of
+// `invalidateBundleCache` is the authoritative set of collections keyed by a
+// bundle cache key, and `forgetBundleSideTables` is the per-key half of it.
+// Adding a seventh map to the file puts it in the first and fails here until it
+// is in the second.
+test('every collection a full invalidation clears is dropped per key on eviction', async () => {
+  const source = await readFile(workerScript, 'utf8')
+
+  const sliceBetween = (opening, closing) => {
+    const start = source.indexOf(opening)
+    assert.notEqual(start, -1, `worker-pool.mjs no longer contains ${JSON.stringify(opening)}`)
+    const end = source.indexOf(closing, start)
+    assert.notEqual(end, -1, `no ${JSON.stringify(closing)} after ${JSON.stringify(opening)}`)
+    return source.slice(start, end)
+  }
+
+  const namesIn = (body, method) =>
+    new Set(
+      [...body.matchAll(new RegExp(String.raw`(\w+)\.${method}\(`, 'g'))].map((match) => match[1]),
+    )
+
+  // The `paths.length === 0` branch, which ends at the `return` that reports it.
+  const clearEverything = sliceBetween(
+    'const invalidated = bundleCache.size',
+    'return { invalidated }',
+  )
+  const forgetPerKey = sliceBetween('function forgetBundleSideTables(', '\n}')
+
+  // The cache itself is handed to the eviction caller, its module entries go
+  // through `dropModuleCacheEntries`, and a build lock belongs to a build that
+  // may still be running — an eviction must not free it out from under one.
+  const notPerKey = new Set(['bundleCache', 'moduleCache', 'buildLocks'])
+  const missing = [...namesIn(clearEverything, 'clear')]
+    .filter((name) => !notPerKey.has(name))
+    .filter((name) => !namesIn(forgetPerKey, 'delete').has(name))
+
+  assert.deepEqual(
+    missing,
+    [],
+    `these are cleared by a full invalidation and leak past a single eviction: ${missing.join(', ')}`,
+  )
+})

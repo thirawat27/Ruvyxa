@@ -31,7 +31,7 @@
  */
 
 import { fetchSiteIsCrossSite, originIsCrossSite, parseForwardedScheme } from './origin-policy.mjs'
-import { collectRevalidations, requestContext, runWithRequestContext } from './request-context.mjs'
+import { requestContext, runWithRequestContext } from './request-context.mjs'
 
 /** Payload encodings a server action accepts. Mirrors `action_content_type`. */
 export const ACTION_CONTENT_TYPES = Object.freeze([
@@ -274,8 +274,8 @@ export async function runAction({
   if (!isActionExport(action)) {
     return {
       response: Response.json({ error: `Action ${actionName} was not found` }, { status: 404 }),
-      revalidate: [],
       realtimeEvent: null,
+      context: null,
     }
   }
 
@@ -315,7 +315,16 @@ export async function runAction({
       ? actionRealtimeEvent(action, actionName, requestPath, invalidated)
       : null
 
-  return { response, revalidate: collectRevalidations(context), realtimeEvent }
+  // The context travels with the response for the same reason `realtimeEvent`
+  // does: this function owns it, and a host that cannot reach it can only
+  // settle the part of the request this function chose to hand back. It used to
+  // hand back `collectRevalidations(context)` alone, so a deployed build drained
+  // `revalidatePath()` from a server action and dropped both `revalidateTag()`
+  // and `invalidateCache()` — a mutation that answered 200 while every instance
+  // went on serving what the caller believed it had invalidated. Handing over
+  // one of the three collectors' output is what made the other two forgettable,
+  // so the caller now gets the context and settles all of them.
+  return { response, realtimeEvent, context }
 }
 
 function textResponse(status, message) {

@@ -161,3 +161,70 @@ describe('a server function invoked by a native form submission', () => {
     assert.deepEqual(spy.calls.keys, [[{ key: 'products', prefix: 'products:' }]])
   })
 })
+
+describe('a server action posted to /__ruvyxa/action', () => {
+  const pageRoute = {
+    id: 'target',
+    path: '/target',
+    kind: 'page',
+    file: 'page.tsx',
+    render: { strategy: 'ssr' },
+  }
+
+  // The third completion site, and the one the other two describe blocks do not
+  // reach. `runAction` owns the request context and returned only
+  // `collectRevalidations(context)`, so this host had nothing left to hand the
+  // store: `revalidatePath()` from a server action worked and `revalidateTag()`
+  // and `invalidateCache()` from the same action reached nothing. The native
+  // host settles all three from its own copy of the action loop, so the two
+  // hosts disagreed about what a mutation invalidates.
+  function actionHandler(spy) {
+    const submit = async () => {
+      revalidateTag('products')
+      invalidateCache('products')
+      return { ok: true }
+    }
+    submit.ruvyxa = { kind: 'action' }
+    return createHandler({
+      routes: [pageRoute],
+      importPage: async () => ({}),
+      importApi: async () => ({}),
+      importAction: async () => ({ submit }),
+      revalidateTags: spy.revalidateTags,
+      deleteData: spy.deleteData,
+    })
+  }
+
+  function invocation() {
+    return new Request('http://localhost/__ruvyxa/action?path=/target&name=submit', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        host: 'localhost',
+        origin: 'http://localhost',
+        'sec-fetch-site': 'same-origin',
+      },
+      body: '{}',
+    })
+  }
+
+  it('hands over its tags rather than dropping them', async () => {
+    const spy = invalidationSpy()
+    const response = await actionHandler(spy)(invocation())
+    assert.equal(response.status, 200)
+    assert.deepEqual(spy.calls.tags, [['products']])
+  })
+
+  it('hands over its keys rather than dropping them', async () => {
+    const spy = invalidationSpy()
+    const response = await actionHandler(spy)(invocation())
+    assert.equal(response.status, 200)
+    assert.deepEqual(spy.calls.keys, [[{ key: 'products', prefix: 'products:' }]])
+  })
+
+  it('waits for the store before answering', async () => {
+    const spy = invalidationSpy()
+    await actionHandler(spy)(invocation())
+    assert.equal(spy.settled, true, 'the response was returned before the store was written')
+  })
+})

@@ -833,9 +833,7 @@ export function createHandler(options) {
       params: params ?? {},
     })
     const result = await runWithRequestContext(context, () => selected.handler({ request, params }))
-    recordRevalidations(collectRevalidations(context))
-    await recordRevalidatedTags(collectRevalidatedTags(context))
-    await recordCacheInvalidations(collectCacheInvalidations(context))
+    await settleRequestCaches(context)
     const response = normalizeResponse(result, `${method} ${new URL(request.url).pathname}`)
     // A `HEAD` answered by the route's `GET` keeps every header and drops the
     // content. There is no transport under a serverless function to do it: the
@@ -1143,9 +1141,7 @@ export function createHandler(options) {
       const payload = await runWithRequestContext(context, () =>
         module.rscAction({ reference, body }),
       )
-      recordRevalidations(collectRevalidations(context))
-      await recordRevalidatedTags(collectRevalidatedTags(context))
-      await recordCacheInvalidations(collectCacheInvalidations(context))
+      await settleRequestCaches(context)
       return new Response(payload, {
         headers: {
           'content-type': 'text/x-component; charset=utf-8',
@@ -1230,6 +1226,24 @@ export function createHandler(options) {
     } catch (error) {
       console.error('[ruvyxa] cache.handler deleteData failed:', error)
     }
+  }
+
+  /**
+   * Drain everything one finished request queued: paths to this instance's
+   * prerender bypass, tags and keys to the project's own store.
+   *
+   * One function rather than the three calls each completion site used to make,
+   * for the reason `settleRequestCaches` exists in `worker-pool.mjs`: the three
+   * have to happen together and the tail of the list was easy to forget. A
+   * completion site did forget it — the server action endpoint drained
+   * `revalidatePath()` and neither `revalidateTag()` nor `invalidateCache()`,
+   * because `runAction` handed back the paths alone and kept the context that
+   * held the rest.
+   */
+  async function settleRequestCaches(context) {
+    recordRevalidations(collectRevalidations(context))
+    await recordRevalidatedTags(collectRevalidatedTags(context))
+    await recordCacheInvalidations(collectCacheInvalidations(context))
   }
 
   function recordRevalidations(revalidations) {
@@ -1346,7 +1360,7 @@ export function createHandler(options) {
       // function's response is what the browser receives, every action on a
       // realtime-declaring route published its channel list and every key it
       // passed to `invalidate()` to the client.
-      const { response, revalidate } = await runAction({
+      const { response, context } = await runAction({
         module,
         actionName,
         payload: validated.payload,
@@ -1354,7 +1368,9 @@ export function createHandler(options) {
         requestPath: canonicalTarget,
         headerPairs: [...request.headers],
       })
-      recordRevalidations(revalidate)
+      // `context` is `null` only when the named export was not an action, which
+      // is a 404 with nothing queued behind it.
+      if (context) await settleRequestCaches(context)
       return response
     } catch (error) {
       if (isBodyLimitError(error)) {
@@ -1716,9 +1732,7 @@ export function createHandler(options) {
     // every route's behaviour; a server function called by the form it was
     // posted to is exactly the case where the native host applies them.
     if (formData) {
-      recordRevalidations(collectRevalidations(context))
-      await recordRevalidatedTags(collectRevalidatedTags(context))
-      await recordCacheInvalidations(collectCacheInvalidations(context))
+      await settleRequestCaches(context)
     }
     const html = localizeHtmlDocument(rendered, route.path, pathname, params ?? {}, i18n)
     const response = new Response(html, {

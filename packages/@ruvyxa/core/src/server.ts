@@ -389,13 +389,34 @@ class CacheStore {
     }
   }
 
-  /** Drop one key from both maps, keeping the byte sum with them. */
+  /**
+   * Drop one key from both maps, keeping the byte sum with them.
+   *
+   * The removal that reclaims memory. It says nothing about a value being
+   * wrong, so it leaves a write registered under the key alone — that write is
+   * producing data this store still wants. Eviction and the expiry sweep both
+   * go through here.
+   */
   #forget(key: string): boolean {
     this.#bytes -= this.#weights.get(key) ?? 0
     this.#weights.delete(key)
     return this.#entries.delete(key)
   }
 
+  /**
+   * Drop one key **and** cancel the write registered under it.
+   *
+   * The removal that means "this value is wrong", and cancelling the write is
+   * the whole point of it: a producer that started before an invalidation is
+   * holding data from before it, and `commitWrite` requires its token to still
+   * be the registered one, so dropping the registration turns that producer's
+   * commit into a no-op while its own caller still receives what it computed.
+   *
+   * Only `invalidate` and `invalidateTag` may use it. Eviction and the sweep
+   * are memory reclamation and want `#forget`; both were spelled this way once,
+   * and each lost a produced value — and the shared-store write gated on its
+   * commit — to a bound or a timer that had no opinion about the value at all.
+   */
   delete(key: string): boolean {
     this.#pendingWrites.delete(key)
     return this.#forget(key)
@@ -476,13 +497,25 @@ class CacheStore {
     }
   }
 
-  /** Remove all entries that have fully expired (past staleUntil). */
+  /**
+   * Remove all entries that have fully expired (past staleUntil).
+   *
+   * Through `#forget`, not `delete`. The two differ in one place and it is the
+   * place that matters here: `delete` also drops the key's registered write,
+   * which is how `invalidate` and `invalidateTag` stop a producer that started
+   * before the invalidation from committing data from before it. A sweep is not
+   * an invalidation — it reclaims memory from entries nobody can be served any
+   * more, and says nothing about a value being wrong. Spelling it as one made a
+   * producer running while its own fully-expired predecessor was swept lose its
+   * commit, and with it the shared-store write that is gated on the commit, so
+   * the value reached one caller and the next request produced it again.
+   */
   prune(): number {
     const now = Date.now()
     let pruned = 0
     for (const [key, entry] of this.#entries) {
       if (entry.staleUntil < now) {
-        this.delete(key)
+        this.#forget(key)
         pruned++
       }
     }
@@ -511,11 +544,19 @@ class CacheStore {
     return this.#entries.size
   }
 
-  /** Evict the least recently used entry. `false` when nothing was freed. */
+  /**
+   * Evict the least recently used entry. `false` when nothing was freed.
+   *
+   * Through `#forget` for the reason [`prune`] gives: making room is not an
+   * invalidation, and `delete` would cancel the registered write of whichever
+   * key the bound happened to reach. That write lands afterwards and re-inserts
+   * the key, which costs one more eviction and keeps a value that was already
+   * paid for — cancelling it kept nothing and threw the value away.
+   */
   #evictOldest(): boolean {
     const oldest = this.#entries.keys().next()
     if (oldest.done) return false
-    return this.delete(oldest.value)
+    return this.#forget(oldest.value)
   }
 }
 
@@ -1002,6 +1043,24 @@ export function cacheStats(): {
     pendingSharedWrites,
     droppedSharedWrites,
   }
+}
+
+/**
+ * Drop every entry that has fully expired, and report how many went.
+ *
+ * The sweep a timer in this module runs every sixty seconds, on demand. An
+ * entry past its stale window can no longer be served to anybody, so this frees
+ * memory and changes no answer — unlike [`invalidateCache`], which drops live
+ * entries and is how a caller says a value is *wrong*.
+ *
+ * Exported because a timer is not a seam. What the sweep does to a key that a
+ * producer is writing at the same moment is a real question with a wrong answer
+ * available — it used to cancel that producer's write — and nothing could ask
+ * it: the store is module-private and sixty seconds is not a test. A host that
+ * knows it is idle has the same reason to call this that the timer does.
+ */
+export function pruneCache(): number {
+  return cacheStore.prune()
 }
 
 export function redirect(location: string, status = 302): Response {

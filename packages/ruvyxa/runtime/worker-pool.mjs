@@ -1836,7 +1836,6 @@ function invalidateBundleCache(paths) {
     )
     if (entryMatches || dependencyMatches) {
       deleteBundleCacheEntry(key)
-      rscBundleReferences.delete(key)
       invalidated++
     }
   }
@@ -1882,15 +1881,37 @@ function isDirectoryInput(input) {
   return stats?.isDirectory() ?? false
 }
 
+/**
+ * Drop everything keyed by one bundle's cache key except the bundle itself.
+ *
+ * One function rather than the list written out at each teardown site, because
+ * the lists diverged: `rscBundleReferences` was in the watcher's invalidation
+ * path and in neither eviction path, so an LRU eviction and — worse — the
+ * memory-pressure sweep, whose whole job is to free memory, left a client and
+ * server reference list behind for every server-components route they evicted.
+ * A `Map` beside a bounded cache is only bounded by the cache while every path
+ * that forgets the cache entry forgets it too.
+ *
+ * `buildLocks` is deliberately not here: it belongs to a build that may still
+ * be running, and evicting a cache entry must not let a second build of the
+ * same key start. `deleteBundleCacheEntry` drops it, because that path is
+ * saying the key is gone rather than that its memory is wanted back.
+ */
+function forgetBundleSideTables(cacheKey, outfile) {
+  bundleInputs.delete(cacheKey)
+  bundleInputDirectories.delete(cacheKey)
+  bundleInputVersions.delete(cacheKey)
+  bundleFingerprints.delete(cacheKey)
+  rscBundleReferences.delete(cacheKey)
+  // Before `bundleVersions`, which holds the version half of its key.
+  dropModuleCacheEntries(cacheKey, outfile)
+  bundleVersions.delete(cacheKey)
+}
+
 function cacheBundle(cacheKey, outfile, projectRoot, inputs, dependencyHash, contentHash) {
   const evicted = bundleCache.set(cacheKey, outfile)
   if (evicted) {
-    bundleInputs.delete(evicted.key)
-    bundleInputDirectories.delete(evicted.key)
-    bundleInputVersions.delete(evicted.key)
-    bundleFingerprints.delete(evicted.key)
-    dropModuleCacheEntries(evicted.key, evicted.value)
-    bundleVersions.delete(evicted.key)
+    forgetBundleSideTables(evicted.key, evicted.value)
   }
   if (contentHash) bundleVersions.set(cacheKey, contentHash)
   const normalizedInputs = new Set(
@@ -1920,13 +1941,8 @@ function inputsVersionOf(inputs) {
 
 function deleteBundleCacheEntry(cacheKey, knownOutfile) {
   const outfile = knownOutfile ?? bundleCache.delete(cacheKey)
-  bundleInputs.delete(cacheKey)
-  bundleInputDirectories.delete(cacheKey)
-  bundleInputVersions.delete(cacheKey)
-  bundleFingerprints.delete(cacheKey)
   buildLocks.delete(cacheKey)
-  dropModuleCacheEntries(cacheKey, outfile)
-  bundleVersions.delete(cacheKey)
+  forgetBundleSideTables(cacheKey, outfile)
 }
 
 function bundleInputMetadata(cacheKey) {

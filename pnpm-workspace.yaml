@@ -10,6 +10,14 @@ packages:
 overrides:
   react: 19.2.8
   react-dom: 19.2.8
+  # `ajv` asks for `^3.0.1` and resolved 3.1.5, which carries four high
+  # advisories — two SSRF, two host confusion, all in URI normalisation. Nothing
+  # here executes it: it arrives under `webpack`'s `schema-utils`, and webpack is
+  # an auto-installed peer of `react-server-dom-webpack` that this repository
+  # never loads. A transitive nobody runs is still a transitive `pnpm audit`
+  # reports, and the floor costs nothing — the range is the one `ajv` already
+  # declared, narrowed to its first patched release.
+  fast-uri: ^3.1.6
 # `react-server-dom-webpack` lists webpack as a peer for one file — its bundler
 # plugin — which Ruvyxa never loads: the entries it does load (`server.edge`,
 # `client.edge`, `client.browser`) reach the framework through two globals and

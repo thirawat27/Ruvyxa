@@ -7,6 +7,7 @@ import {
   cacheStats,
   invalidateCache,
   loader,
+  pruneCache,
   status,
   redirect,
   revalidateTag,
@@ -353,6 +354,48 @@ describe('cache', () => {
       })
     assert.equal(cached, 'current')
     assert.equal(producerCalls, 0)
+  })
+
+  // The sweep reclaims memory from entries nobody can be served any more. It is
+  // not an invalidation, and it used to be spelled as one: it removed the key
+  // through `delete()`, which also drops the in-flight write registered under
+  // it, so a producer running while its own fully-expired predecessor was swept
+  // had its commit refused. The value reached the caller and then nothing — not
+  // the local tier, and not the shared store, whose write is gated on the same
+  // commit — so the next request produced it again.
+  it('keeps a write that was in flight when the sweep reached its key', async () => {
+    let resolveProducer: (value: string) => void = () => {}
+    const producerResult = new Promise<string>((resolve) => {
+      resolveProducer = resolve
+    })
+
+    // Stored, then left to expire completely: `swr` defaults to zero, so the
+    // stale window closes with the TTL and the entry becomes sweepable while
+    // staying in the store until the sweep runs.
+    await cache('swept-write')
+      .ttl('1ms')
+      .get(() => 'first')
+    await new Promise((resolve) => setTimeout(resolve, 5))
+
+    const pending = cache('swept-write')
+      .ttl('10s')
+      .get(() => producerResult)
+    // The flight is registered synchronously by `get()`, so the sweep below
+    // lands in the window this test exists for without a scheduling race.
+    assert.equal(pruneCache(), 1, 'the expired entry was not swept')
+
+    resolveProducer('second')
+    assert.equal(await pending, 'second')
+
+    let producerCalls = 0
+    const cached = await cache('swept-write')
+      .ttl('10s')
+      .get(() => {
+        producerCalls++
+        return 'recomputed'
+      })
+    assert.equal(cached, 'second')
+    assert.equal(producerCalls, 0, 'the swept key recomputed a value it had already produced')
   })
 
   it('invalidates by exact key', async () => {
@@ -813,6 +856,60 @@ describe('cache.maxEntries', () => {
         .ttl('60s')
         .get(() => 'b')
       assert.ok(cacheStats().size <= 1, `a bound of 1 held ${cacheStats().size} entries`)
+    } finally {
+      restore()
+    }
+  })
+
+  // The sibling of the sweep case above, and the same root cause: eviction is
+  // memory reclamation, and it used to reclaim through `delete()`, which is the
+  // invalidation removal and also drops the key's registered write. So a write
+  // in flight for the least recently used key lost its commit — and with it the
+  // shared-store write gated on that commit — whenever some other key's commit
+  // happened to be the one that hit the bound. Reachable on every write at
+  // capacity, which is the steady state of a bounded cache.
+  it('keeps a write that was in flight for the key eviction chose', async () => {
+    const restore = install({ maxEntries: 2 })
+    try {
+      // The store is module-level and shared by every test in this file, so a
+      // bound this small needs it empty to evict the key this test is about.
+      invalidateCache()
+      let resolveProducer: (value: string) => void = () => {}
+      const producerResult = new Promise<string>((resolve) => {
+        resolveProducer = resolve
+      })
+
+      // Stored, then fully expired, so the next read misses while the entry is
+      // still held — which is what makes the key both evictable and mid-write.
+      await cache('evicted-write')
+        .ttl('1ms')
+        .get(() => 'first')
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      const pending = cache('evicted-write')
+        .ttl('60s')
+        .get(() => producerResult)
+
+      // Two more keys: the first fills the bound, the second forces the
+      // eviction, and `evicted-write` is the least recently used of the three.
+      await cache('evicting-filler')
+        .ttl('60s')
+        .get(() => 'filler')
+      await cache('evicting-trigger')
+        .ttl('60s')
+        .get(() => 'trigger')
+
+      resolveProducer('second')
+      assert.equal(await pending, 'second')
+
+      let producerCalls = 0
+      const cached = await cache('evicted-write')
+        .ttl('60s')
+        .get(() => {
+          producerCalls++
+          return 'recomputed'
+        })
+      assert.equal(cached, 'second')
+      assert.equal(producerCalls, 0, 'the evicted key recomputed a value it had already produced')
     } finally {
       restore()
     }

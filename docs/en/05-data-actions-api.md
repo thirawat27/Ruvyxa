@@ -30,7 +30,10 @@ export const products = loader(async ({ cache }) =>
 
 Cache durations accept a positive integer plus `ms`, `s`, `m`, `h`, or `d`.
 `invalidateCache('products')` removes `products` and keys beginning `products:`; no argument clears
-the complete process cache. Call `cacheStats()` to obtain `{ size, maxEntries }`.
+the complete process cache. Call `cacheStats()` to obtain `{ size, maxEntries }`. `pruneCache()`
+drops every fully expired entry and returns how many went — the sweep this module already runs every
+sixty seconds, for a host that knows it is idle. It is not an invalidation: an entry past its stale
+window cannot be served to anybody, so pruning frees memory and changes no answer.
 
 `.scope('request')` keeps a value for the current request instead of sharing it across requests. Use
 it when the producer reads cookies, headers, or draft mode — a shared producer that reads request
