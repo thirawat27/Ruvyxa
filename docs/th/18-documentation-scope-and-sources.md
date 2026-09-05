@@ -26,20 +26,23 @@ implementation ที่ไม่อยู่ในเอกสารเป็�
 
 ## Inventory ของ command ที่ตรวจแล้ว
 
-| Scope                 | Command/script                                                                                                                                                                                                  |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Ruvyxa CLI            | `dev`, `build`, `check`, `start`, `preview`, `routes`, `analyze`, `adds`, `doctor`, `clean`, `trace`, `bench`, `test:parity`, `plugin create`                                                                   |
-| Generated application | `dev`, `build`, `start`, `preview`, `typecheck`, `check`, `routes`, `routes:json`, `analyze`, `analyze:html`, `adds`, `doctor`, `clean`, `trace`, `bench`, `test:parity`, `plugin`                              |
-| Repository root       | `build`, `check`, `test`, `prepare`, `check:cargo-lock`, `check:oxc-lockstep`, `format`, `format:check`, `format:staged`, `release:validate`, `release:bump`, `pack:smoke`, `test:full-flow`, `publish:dry-run` |
+| Scope                 | Command/script                                                                                                                                                                                                                                                                                                                                                                                               |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Ruvyxa CLI            | `dev`, `build`, `check`, `start`, `preview`, `routes`, `analyze`, `adds`, `doctor`, `clean`, `trace`, `bench`, `test:parity`, `plugin create`                                                                                                                                                                                                                                                                |
+| Generated application | `dev`, `build`, `start`, `preview`, `typecheck`, `check`, `routes`, `routes:json`, `analyze`, `analyze:html`, `adds`, `doctor`, `clean`, `trace`, `bench`, `test:parity`, `plugin`                                                                                                                                                                                                                           |
+| Repository root       | `build`, `check`, `lint`, `lint:fix`, `test`, `prepare`, `format`, `format:check`, `format:staged`, `check:cargo-lock`, `check:oxc-lockstep`, `check:source-refs`, `check:doc-attachment`, `check:silent-defaults`, `check:cross-language-constants`, `check:template-mirrors`, `check:unused`, `release:validate`, `release:bump`, `pack:smoke`, `verify:reproducible`, `test:full-flow`, `publish:dry-run` |
 
 ## สิ่งที่ยืนยันว่าไม่มี/ยังไม่ใช่ framework feature
 
 **React Server Components** ถูก implement แล้ว โดยอยู่หลัง `export const serverComponents = true`
 และใช้กับ route ที่เลือกเปิดใช้เท่านั้น — ดู
 [Routing และ rendering](04-routing-rendering.md#react-server-components) ว่าไปป์ไลน์ครอบคลุมอะไร
-และปฏิเสธชุดใดบ้าง ทุกอย่างใต้หัวข้อ "การ deploy" ในหน้านั้นคือขอบเขตปัจจุบัน: route ที่ยังต้องใช้
-เซิร์ฟเวอร์ตอนมี request จะถูกปฏิเสธสำหรับการ build แบบ adapter และการเข้า route ที่ใช้ server
-components เป็นการร้องขอเอกสารใหม่ ไม่ใช่ soft navigation
+และปฏิเสธชุดใดบ้าง ทุกอย่างใต้หัวข้อ "การ deploy" ในหน้านั้นคือขอบเขตปัจจุบัน: route ที่ pre-render
+แล้ว deploy ได้ทุกที่ route ที่ยังต้องใช้เซิร์ฟเวอร์ตอนมี request deploy ได้กับทุก adapter
+ที่รันเซิร์ฟเวอร์ และมีเพียง target แบบ static เท่านั้นที่ปฏิเสธ — ด้วย `RUV2202`
+เพราะไซต์ที่เผยแพร่แล้ว ไม่เหลือเซิร์ฟเวอร์ไว้รัน Flight pass ส่วน soft navigation เข้า route ที่ใช้
+server components ทำงานได้บนทุก target ที่รันเซิร์ฟเวอร์ โดยดึง payload จาก `/__ruvyxa/rsc`
+แทนการโหลดเอกสารใหม่
 
 ส่วน `flight` export และ `useFlight()` ของ Ruvyxa เป็นคนละเรื่อง: เป็น JSON payload ต่อ route สำหรับ
 soft navigation ซึ่งไม่มีอะไรร่วมกับ wire format ของ React นอกจากชื่อ — ดู

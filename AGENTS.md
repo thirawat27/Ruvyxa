@@ -227,15 +227,18 @@ cargo run -p ruvyxa_cli -- test:parity --root examples/demo
 
 The rest of the scripts, and when each is worth running:
 
-| Command                      | When                                                                                                               |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `pnpm check:cargo-lock`      | after any `Cargo.toml` edit — the lockfile has to describe the manifests                                           |
-| `pnpm check:oxc-lockstep`    | after touching `oxc` or `oxc-transform` — the Rust bundler and the Node runtime must be on one version             |
-| `pnpm check:source-refs`     | after moving or renaming a test, fixture, or script — comments naming it are gates, and a stale one points nowhere |
-| `pnpm check:silent-defaults` | after adding a read or a decode — a failure turned into a default is a wrong answer that looks right               |
-| `pnpm verify:reproducible`   | after a change to emitted bytes, ordering, or hashing — two builds of one input must agree                         |
-| `pnpm test:full-flow`        | before a release; scaffolds, builds, and runs a project end to end (PowerShell)                                    |
-| `pnpm publish:dry-run`       | before a release, to see what would actually be published                                                          |
+| Command                               | When                                                                                                               |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `pnpm check:cargo-lock`               | after any `Cargo.toml` edit — the lockfile has to describe the manifests                                           |
+| `pnpm check:oxc-lockstep`             | after touching `oxc` or `oxc-transform` — the Rust bundler and the Node runtime must be on one version             |
+| `pnpm check:source-refs`              | after moving or renaming a test, fixture, or script — comments naming it are gates, and a stale one points nowhere |
+| `pnpm check:silent-defaults`          | after adding a read or a decode — a failure turned into a default is a wrong answer that looks right               |
+| `pnpm check:doc-attachment`           | after moving a doc comment — a `///` block that drifted off its item documents the wrong thing and still compiles  |
+| `pnpm check:cross-language-constants` | after changing a value the Rust and JavaScript halves must both hold — the two copies drift silently               |
+| `pnpm check:template-mirrors`         | after editing `templates/` or a `create-ruvyxa` template — the two trees are one source published twice            |
+| `pnpm verify:reproducible`            | after a change to emitted bytes, ordering, or hashing — two builds of one input must agree                         |
+| `pnpm test:full-flow`                 | before a release; scaffolds, builds, and runs a project end to end (PowerShell)                                    |
+| `pnpm publish:dry-run`                | before a release, to see what would actually be published                                                          |
 
 `pnpm release:bump` writes every manifest with `JSON.stringify`, which Prettier disagrees with — run
 `pnpm format` after it or `pnpm format:check` fails on twenty-four `package.json` files.

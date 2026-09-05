@@ -19,9 +19,10 @@ state.
 app/
 ├── layout.tsx      the HTML shell wrapping every page
 ├── page.tsx        the home route, "/"
-├── globals.css     the default stylesheet
+├── globals.css     the default stylesheet, importing Tailwind CSS
 └── components/     your React components
 public/             files served as-is at the site root
+postcss.config.ts   the PostCSS chain Ruvyxa runs over every global stylesheet
 ruvyxa.config.ts    server, build, cache, security, and middleware settings
 ```
 

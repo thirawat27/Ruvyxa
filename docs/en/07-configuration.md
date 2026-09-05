@@ -197,6 +197,36 @@ copied from another project cannot make a memory-limited CI container ask for mo
 `sitemap.xml` and `robots.txt`; an exact app route or same-named `public/` file suppresses the core
 generator. `plugins` is the array of `RuvyxaPlugin` objects.
 
+## Sitemap and robots entries
+
+`site.sitemap: true` publishes every discovered route. The object form enriches that table rather
+than replacing it, so a URL route discovery already found keeps its place and gains whatever the
+entry adds.
+
+| Key                            | Type                                                           | Purpose                                                                                      |
+| ------------------------------ | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `sitemap.exclude`              | `string[]`                                                     | Exact paths or trailing-`*` prefixes to omit.                                                |
+| `sitemap.additionalPaths`      | `string[]`                                                     | Concrete dynamic URLs discovery and prerendering cannot infer.                               |
+| `sitemap.defaults`             | `{ lastModified?, changeFrequency?, priority? }`               | Inherited by every discovered and explicit entry.                                            |
+| `sitemap.entries[].url`        | `string`                                                       | Required. A root-relative URL resolves against `site.url`.                                   |
+| `sitemap.entries[]`            | `lastModified`, `changeFrequency`, `priority`                  | Per-entry overrides of the same three defaults.                                              |
+| `sitemap.entries[].alternates` | `{ languages: Record<string, string> }`                        | `hreflang` alternates for one URL.                                                           |
+| `sitemap.entries[].images`     | `string[]`                                                     | Image URLs for the image sitemap extension.                                                  |
+| `sitemap.entries[].videos`     | `SiteSitemapVideo[]`                                           | Video sitemap entries; `title`, `thumbnail_loc`, and `description` are required on each one. |
+| `robots.rules`                 | `SiteRobotsRule` or `SiteRobotsRule[]`                         | One group or several. Defaults to allowing every crawler.                                    |
+| `robots.rules[]`               | `userAgent` (default `"*"`), `allow`, `disallow`, `crawlDelay` | String fields accept a value or an array.                                                    |
+| `robots.sitemap`               | `string \| string[]`                                           | Absolute sitemap URLs. Defaults to the generated root sitemap.                               |
+| `robots.host`                  | `string`                                                       | Preferred absolute origin, written as a `Host:` record.                                      |
+
+`changeFrequency` is one of `always`, `hourly`, `daily`, `weekly`, `monthly`, `yearly`, or `never`;
+`priority` is `0`–`1`. A video entry also accepts `content_loc`, `player_loc`, `duration`,
+`view_count`, `rating`, `expiration_date`, `publication_date`, `family_friendly`,
+`requires_subscription`, `live`, `restriction`, `platform`, `uploader`, and `tag`; `restriction` and
+`platform` are `{ relationship: 'allow' | 'deny', content }` and `uploader` is `{ content, info? }`.
+The exported types — `SiteSitemapConfig`, `SiteSitemapEntry`, `SiteSitemapVideo`,
+`SiteRobotsConfig`, `SiteRobotsRule` — are the checked spelling of this table; see the
+[Public API reference](17-public-api-reference.md).
+
 ## Content artifacts without plugin wiring
 
 Markdown and MDX routes work without `content`. Enable `content: true` only when the site also needs
@@ -222,6 +252,19 @@ export default config({
 })
 ```
 
+| `content.engine` key | Default                | Purpose                                                                 |
+| -------------------- | ---------------------- | ----------------------------------------------------------------------- |
+| `exclude`            | none                   | Exact route paths or trailing-`*` patterns omitted from every artifact. |
+| `locale`             | `site.language`        | BCP 47 locale used for search tokenization.                             |
+| `stopWords`          | built-in list          | Terms the search index ignores.                                         |
+| `minTermLength`      | `2`                    | Ignore shorter search terms.                                            |
+| `manifestPath`       | `"/content.json"`      | Where the content manifest is published.                                |
+| `searchPath`         | `"/search-index.json"` | Where the search index is published.                                    |
+| `feedPath`           | `"/rss.xml"`           | Where the feed is published.                                            |
+| `sitemapPath`        | `"/sitemap.xml"`       | Where the content sitemap is published.                                 |
+| `llmsPath`           | `"/llms.txt"`          | Agent discovery index. `false` disables it.                             |
+| `language`           | `site.language`        | Feed language, when it differs from the search locale.                  |
+
 The existing `contentEngine(options)` plugin remains supported for advanced or programmatic plugin
 composition. Do not configure both forms in the same application.
 
@@ -237,6 +280,9 @@ composition. Do not configure both forms in the same application.
 | `RUVYXA_WORKER_POOL_SIZE`, `RUVYXA_WORKER_TIMEOUT_MS`, `RUVYXA_WORKER_MAX_CONCURRENCY`, `RUVYXA_WORKER_MAX_QUEUE`, `RUVYXA_MEMORY_LIMIT_MB`, `RUVYXA_WORKER_SHUTDOWN_MS` | Worker-pool operational controls.                                                                                                           |
 | `RUVYXA_MAX_CONCURRENCY`, `RUVYXA_MAX_QUEUE`                                                                                                                             | How many renders `ruvyxa start` runs at once and how many may wait; `0` concurrency turns admission off. Off by default under `ruvyxa dev`. |
 | `RUVYXA_DRAIN_DELAY`, `RUVYXA_SHUTDOWN_GRACE`                                                                                                                            | Milliseconds a shutdown keeps accepting so a readiness probe can read `503`, and how long in-flight work then has to finish.                |
+| `RUVYXA_PRERENDER_RECYCLE_AFTER`                                                                                                                                         | Isolated renders one build worker performs before it is replaced (default 32); `0` disables recycling.                                      |
+| `RUVYXA_STREAM_ASSET_THRESHOLD_BYTES`                                                                                                                                    | Public-asset size above which the response is streamed rather than buffered (default 8 MiB).                                                |
+| `RUVYXA_WORKER_MAX_LINE_BYTES`                                                                                                                                           | Largest single worker protocol line accepted before the worker is replaced (default 64 MiB).                                                |
 | `RUVYXA_PUBLIC_*`                                                                                                                                                        | Browser-safe values injected for client use.                                                                                                |
 | `RUVYXA_FUN`                                                                                                                                                             | Set to `0`/`false`/`off` to stop CLI spinners and the running mascot; colour is unaffected.                                                 |
 | `RUVYXA_ASCII`                                                                                                                                                           | Set to `1` to draw progress and status with ASCII glyphs only.                                                                              |
@@ -305,7 +351,7 @@ route. The framework's boundary validation is an additional guard, not a reason 
 shared modules. Pair the committed `.env.example` with `requireEnv([...])` for names that must be
 present at release time.
 
-### `cache.handler` — where a deployed build keeps a revalidated document
+### `cache.handler` — which store keeps a revalidated document
 
 An ISR or PPR route renders once and is served from a store until its window expires. Which store is
 normally the platform's answer: a Cloudflare Worker gets KV, a serverless function gets the one

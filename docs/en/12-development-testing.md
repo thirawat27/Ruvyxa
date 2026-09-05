@@ -17,8 +17,18 @@ cargo clippy --workspace --locked -- -D warnings
 pnpm -r build
 pnpm -r check
 pnpm -r test
+pnpm lint
 pnpm format:check
+pnpm check:unused
+pnpm release:validate
+pnpm pack:smoke
 ```
+
+`pnpm release:validate` is the umbrella gate: it runs `lint` and then the individual repository
+checks — package metadata, the release publish plan, `oxc` lockstep, Markdown links, repository
+paths named in source comments, doc-comment attachment, silent defaults, cross-language constants,
+template mirrors, adapter sync, and Knip. Run the narrower one directly while iterating; the
+per-check triggers are listed in the repository guide [`AGENTS.md`](../../AGENTS.md).
 
 For the broad fixture, use the exact commands established by the repository guide:
 

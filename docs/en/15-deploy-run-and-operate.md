@@ -43,7 +43,11 @@ health/readiness endpoint.
 - Set an explicit server host/port only when running the Node/Bun/Deno process yourself. Let managed
   adapters own their generated entrypoint.
 - Persist application state outside process memory. Core cache and auth memory stores are local to
-  an instance; provide shared database/cache/session infrastructure where required.
+  an instance; provide shared database/cache/session infrastructure where required. Running several
+  instances behind one domain is the case that needs [`cache.handler`](07-configuration.md): it
+  points `cache()` and revalidated ISR/PPR documents at a store every instance shares, on a deployed
+  build and under `ruvyxa start` and `ruvyxa preview` alike. Without it each instance revalidates
+  separately and a visitor is served whichever copy the load balancer picked.
 - Configure log collection for structured records and redact at the sink. Wire infrastructure
   metrics/alerts, because the repository does not expose a built-in alert manager, backup service,
   queue worker, or scheduler.

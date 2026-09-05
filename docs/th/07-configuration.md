@@ -195,6 +195,35 @@ non-loopback proxy ที่ตั้งค่าเท่านั้นที�
 `robots.txt` ตอน build; exact app route หรือไฟล์ชื่อเดียวกันใน `public/` จะระงับ core generator
 `plugins` คือ array ของ `RuvyxaPlugin`
 
+## Entry ของ sitemap และ robots
+
+`site.sitemap: true` เผยแพร่ทุก route ที่ค้นพบ ส่วนรูปแบบ object เป็นการเพิ่มข้อมูลให้ตารางนั้น
+ไม่ใช่แทนที่ URL ที่ route discovery เจอแล้วจึงยังอยู่เหมือนเดิม และได้ข้อมูลเพิ่มตามที่ entry ระบุ
+
+| Key                            | Type                                                           | จุดประสงค์                                                                         |
+| ------------------------------ | -------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `sitemap.exclude`              | `string[]`                                                     | path ตรงตัวหรือ prefix ที่ลงท้ายด้วย `*` ที่จะไม่ใส่                               |
+| `sitemap.additionalPaths`      | `string[]`                                                     | URL แบบ dynamic ที่ discovery และ prerendering เดาไม่ได้                           |
+| `sitemap.defaults`             | `{ lastModified?, changeFrequency?, priority? }`               | ค่าที่ทุก entry ทั้งที่ค้นพบเองและที่ระบุเองสืบทอด                                 |
+| `sitemap.entries[].url`        | `string`                                                       | จำเป็น URL แบบ root-relative จะ resolve เทียบกับ `site.url`                        |
+| `sitemap.entries[]`            | `lastModified`, `changeFrequency`, `priority`                  | override ค่า default สามตัวเดียวกันเป็นราย entry                                   |
+| `sitemap.entries[].alternates` | `{ languages: Record<string, string> }`                        | `hreflang` alternate ของ URL หนึ่ง                                                 |
+| `sitemap.entries[].images`     | `string[]`                                                     | URL ของรูปสำหรับส่วนขยาย image sitemap                                             |
+| `sitemap.entries[].videos`     | `SiteSitemapVideo[]`                                           | entry ของ video sitemap; แต่ละตัวต้องมี `title`, `thumbnail_loc` และ `description` |
+| `robots.rules`                 | `SiteRobotsRule` หรือ `SiteRobotsRule[]`                       | หนึ่งกลุ่มหรือหลายกลุ่ม ค่า default คืออนุญาตทุก crawler                           |
+| `robots.rules[]`               | `userAgent` (default `"*"`), `allow`, `disallow`, `crawlDelay` | field ที่เป็น string รับได้ทั้งค่าเดียวและ array                                   |
+| `robots.sitemap`               | `string \| string[]`                                           | URL sitemap แบบเต็ม ค่า default คือ root sitemap ที่ระบบสร้าง                      |
+| `robots.host`                  | `string`                                                       | origin แบบเต็มที่ต้องการ เขียนเป็นเรกคอร์ด `Host:`                                 |
+
+`changeFrequency` เป็นหนึ่งใน `always`, `hourly`, `daily`, `weekly`, `monthly`, `yearly` หรือ
+`never`; `priority` อยู่ระหว่าง `0`–`1` entry ของวิดีโอยังรับ `content_loc`, `player_loc`,
+`duration`, `view_count`, `rating`, `expiration_date`, `publication_date`, `family_friendly`,
+`requires_subscription`, `live`, `restriction`, `platform`, `uploader` และ `tag`; โดย `restriction`
+กับ `platform` เป็น `{ relationship: 'allow' | 'deny', content }` และ `uploader` เป็น
+`{ content, info? }` type ที่ export ไว้ — `SiteSitemapConfig`, `SiteSitemapEntry`,
+`SiteSitemapVideo`, `SiteRobotsConfig`, `SiteRobotsRule` — คือการสะกดตารางนี้แบบที่ type checker
+ตรวจได้ ดู [Public API reference](17-public-api-reference.md)
+
 ## สร้าง content artifact โดยไม่ต้องต่อ plugin เอง
 
 route Markdown และ MDX ใช้งานได้โดยไม่ต้องตั้ง `content` ให้เปิด `content: true` เฉพาะเมื่อ site
@@ -220,6 +249,19 @@ export default config({
 })
 ```
 
+| Key ของ `content.engine` | Default                | จุดประสงค์                                                             |
+| ------------------------ | ---------------------- | ---------------------------------------------------------------------- |
+| `exclude`                | ไม่มี                  | route path ตรงตัวหรือ pattern ที่ลงท้ายด้วย `*` ที่จะไม่ใส่ใน artifact |
+| `locale`                 | `site.language`        | locale แบบ BCP 47 ที่ใช้ตัดคำสำหรับ search                             |
+| `stopWords`              | ลิสต์ในตัว             | คำที่ search index ข้าม                                                |
+| `minTermLength`          | `2`                    | ข้ามคำค้นที่สั้นกว่านี้                                                |
+| `manifestPath`           | `"/content.json"`      | ที่เผยแพร่ content manifest                                            |
+| `searchPath`             | `"/search-index.json"` | ที่เผยแพร่ search index                                                |
+| `feedPath`               | `"/rss.xml"`           | ที่เผยแพร่ feed                                                        |
+| `sitemapPath`            | `"/sitemap.xml"`       | ที่เผยแพร่ content sitemap                                             |
+| `llmsPath`               | `"/llms.txt"`          | ดัชนีให้ agent ค้นพบ ใส่ `false` เพื่อปิด                              |
+| `language`               | `site.language`        | ภาษาของ feed เมื่อต่างจาก locale ของ search                            |
+
 plugin `contentEngine(options)` แบบเดิมยังรองรับสำหรับ advanced/programmatic composition แต่ห้าม
 ตั้งทั้งสองรูปแบบใน application เดียวกัน
 
@@ -235,6 +277,9 @@ plugin `contentEngine(options)` แบบเดิมยังรองรับ
 | `RUVYXA_WORKER_POOL_SIZE`, `RUVYXA_WORKER_TIMEOUT_MS`, `RUVYXA_WORKER_MAX_CONCURRENCY`, `RUVYXA_WORKER_MAX_QUEUE`, `RUVYXA_MEMORY_LIMIT_MB`, `RUVYXA_WORKER_SHUTDOWN_MS` | worker-pool operational control                                                                                                                |
 | `RUVYXA_MAX_CONCURRENCY`, `RUVYXA_MAX_QUEUE`                                                                                                                             | จำนวน render ที่ `ruvyxa start` รันพร้อมกันและจำนวนที่รอได้ ตั้ง concurrency เป็น `0` เพื่อปิด admission ส่วน `ruvyxa dev` ปิดไว้เป็นค่าปริยาย |
 | `RUVYXA_DRAIN_DELAY`, `RUVYXA_SHUTDOWN_GRACE`                                                                                                                            | จำนวนมิลลิวินาทีที่ยังรับ connection ต่อหลังรับสัญญาณ shutdown เพื่อให้ readiness probe อ่าน `503` ได้ และเวลาที่งานค้างมีให้ทำจนจบ            |
+| `RUVYXA_PRERENDER_RECYCLE_AFTER`                                                                                                                                         | จำนวน isolated render ที่ build worker หนึ่งตัวทำก่อนถูกแทนที่ (default 32); `0` คือปิดการ recycle                                             |
+| `RUVYXA_STREAM_ASSET_THRESHOLD_BYTES`                                                                                                                                    | ขนาด public asset ที่เกินแล้วจะ stream แทนการ buffer (default 8 MiB)                                                                           |
+| `RUVYXA_WORKER_MAX_LINE_BYTES`                                                                                                                                           | ขนาดสูงสุดของ worker protocol line หนึ่งบรรทัดก่อนที่ worker จะถูกแทนที่ (default 64 MiB)                                                      |
 | `RUVYXA_PUBLIC_*`                                                                                                                                                        | browser-safe value ที่ inject เพื่อใช้ใน client                                                                                                |
 | `RUVYXA_FUN`                                                                                                                                                             | ตั้งเป็น `0`/`false`/`off` เพื่อปิด spinner และมาสคอตที่วิ่งใน CLI โดยสีไม่เปลี่ยน                                                             |
 | `RUVYXA_ASCII`                                                                                                                                                           | ตั้งเป็น `1` เพื่อวาด progress และ status ด้วย glyph แบบ ASCII เท่านั้น                                                                        |
@@ -302,7 +347,7 @@ export function AppName() {
 framework เป็นด่านเสริม ไม่ใช่เหตุผลให้วาง secret ใน shared module จับคู่ `.env.example` ที่ commit
 ด้วย `requireEnv([...])` สำหรับชื่อที่ต้องมีจริงตอน release
 
-### `cache.handler` — deployed build เก็บเอกสารที่ revalidate แล้วไว้ที่ไหน
+### `cache.handler` — store ไหนเก็บเอกสารที่ revalidate แล้ว
 
 route แบบ ISR หรือ PPR render ครั้งเดียวแล้วถูกเสิร์ฟจาก store จนหมด window ปกติแล้ว platform
 เป็นคนตอบว่า store คืออะไร: Cloudflare Worker ได้ KV, serverless function

@@ -23,8 +23,9 @@ app/
 ├── blog/page.tsx        the post index, "/blog"
 ├── blog/[slug]/page.tsx one post — [slug] is a route parameter
 ├── blog/posts.ts        the post data this starter reads from
-└── globals.css          the default stylesheet
+└── globals.css          the default stylesheet, importing Tailwind CSS
 public/                  files served as-is at the site root
+postcss.config.ts        the PostCSS chain Ruvyxa runs over every global stylesheet
 ruvyxa.config.ts         server, build, cache, security, and middleware settings
 ```
 

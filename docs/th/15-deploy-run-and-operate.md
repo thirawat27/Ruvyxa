@@ -41,7 +41,11 @@ manifest/output และเรียก health route ที่ application ข�
 - ตั้ง server host/port ชัดเจนเมื่อคุณรัน Node/Bun/Deno process เองเท่านั้น ให้ managed adapter
   เป็นเจ้าของ generated entrypoint
 - เก็บ application state นอก process memory core cache และ auth memory store เป็น local ต่อ
-  instance; ให้ shared database/cache/session infrastructure เมื่อจำเป็น
+  instance; ให้ shared database/cache/session infrastructure เมื่อจำเป็น การรันหลาย instance
+  หลังโดเมนเดียวคือกรณีที่ต้องใช้ [`cache.handler`](07-configuration.md): มันชี้ `cache()` และเอกสาร
+  ISR/PPR ที่ revalidate แล้วไปยัง store ที่ทุก instance ใช้ร่วมกัน ทั้งบน build ที่ deploy
+  แล้วและภายใต้ `ruvyxa start` กับ `ruvyxa preview` หากไม่ตั้ง แต่ละ instance จะ revalidate แยกกัน
+  และผู้เข้าชมจะได้สำเนาที่ load balancer สุ่มเลือก
 - ตั้ง log collection สำหรับ structured record และ redact ที่ sink เชื่อม infrastructure
   metric/alert เพราะ repository ไม่มี built-in alert manager, backup service, queue worker หรือ
   scheduler

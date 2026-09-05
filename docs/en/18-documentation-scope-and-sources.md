@@ -26,11 +26,11 @@ undocumented private implementation is public API.
 
 ## Verified command inventory
 
-| Scope                 | Commands/scripts                                                                                                                                                                                                |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Ruvyxa CLI            | `dev`, `build`, `check`, `start`, `preview`, `routes`, `analyze`, `adds`, `doctor`, `clean`, `trace`, `bench`, `test:parity`, `plugin create`                                                                   |
-| Generated application | `dev`, `build`, `start`, `preview`, `typecheck`, `check`, `routes`, `routes:json`, `analyze`, `analyze:html`, `adds`, `doctor`, `clean`, `trace`, `bench`, `test:parity`, `plugin`                              |
-| Repository root       | `build`, `check`, `test`, `prepare`, `check:cargo-lock`, `check:oxc-lockstep`, `format`, `format:check`, `format:staged`, `release:validate`, `release:bump`, `pack:smoke`, `test:full-flow`, `publish:dry-run` |
+| Scope                 | Commands/scripts                                                                                                                                                                                                                                                                                                                                                                                             |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Ruvyxa CLI            | `dev`, `build`, `check`, `start`, `preview`, `routes`, `analyze`, `adds`, `doctor`, `clean`, `trace`, `bench`, `test:parity`, `plugin create`                                                                                                                                                                                                                                                                |
+| Generated application | `dev`, `build`, `start`, `preview`, `typecheck`, `check`, `routes`, `routes:json`, `analyze`, `analyze:html`, `adds`, `doctor`, `clean`, `trace`, `bench`, `test:parity`, `plugin`                                                                                                                                                                                                                           |
+| Repository root       | `build`, `check`, `lint`, `lint:fix`, `test`, `prepare`, `format`, `format:check`, `format:staged`, `check:cargo-lock`, `check:oxc-lockstep`, `check:source-refs`, `check:doc-attachment`, `check:silent-defaults`, `check:cross-language-constants`, `check:template-mirrors`, `check:unused`, `release:validate`, `release:bump`, `pack:smoke`, `verify:reproducible`, `test:full-flow`, `publish:dry-run` |
 
 ## Explicitly unverified / not implemented as framework features
 
@@ -38,9 +38,11 @@ undocumented private implementation is public API.
 for routes that opt in — see
 [Routing and rendering](04-routing-rendering.md#react-server-components) for what the pipeline
 covers and the three combinations it refuses. Everything below that section's "Deploying" heading is
-the current boundary: a route that still needs a server at request time is refused for adapter
-builds, and a server-components route is entered with a document request rather than a soft
-navigation.
+the current boundary: a pre-rendered route deploys anywhere, a route that still needs a server at
+request time deploys to any adapter that runs one, and only a static target refuses it — with
+`RUV2202`, because a published site has no server left to run the Flight pass. Soft navigation into
+a server-components route works on every target that runs a server; it fetches a payload from
+`/__ruvyxa/rsc` rather than reloading the document.
 
 Ruvyxa's own `flight` export and `useFlight()` are unrelated: a per-route JSON payload for soft
 navigation that shares nothing with React's wire format but the name — see

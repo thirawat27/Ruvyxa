@@ -36,15 +36,27 @@ also the clearest statement of where the code is meant to run.
 "Both" means the name is re-exported from `ruvyxa` as well as `ruvyxa/server`; prefer
 `ruvyxa/server` in server-only modules so the import itself states the boundary.
 
-Adapter authors also get build helpers from `ruvyxa` — `validateBuildContext`, `clientBuildOutput`,
-`runtimeBuildPolicy`, `projectRelativeOutDir`, `staticAssetGlobs`, `publicAssetGlobs`,
-`headersFileContents`, `DEFAULT_SECURITY_HEADERS`, `IMMUTABLE_CACHE_CONTROL`,
-`PUBLIC_ASSET_CACHE_CONTROL`, `STATIC_ASSET_EXTENSIONS`, and `CLIENT_BUNDLE_PREFIX`. They are used
-in context in the [Platform adapter guide](20-platform-adapter-guide.md).
+Adapter authors also get build helpers from `ruvyxa`, in four groups.
+
+| Group                     | Names                                                                                                                                                                                                                                                  |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Build context and out dir | `validateBuildContext`, `clientBuildOutput`, `runtimeBuildPolicy`, `projectRelativeOutDir`, `assertSafeOutDirForCommand`                                                                                                                               |
+| Assets and headers        | `staticAssetGlobs`, `publicAssetGlobs`, `staticAssetPattern`, `headersFileContents`, `DEFAULT_SECURITY_HEADERS`, `IMMUTABLE_CACHE_CONTROL`, `PUBLIC_ASSET_CACHE_CONTROL`, `STATIC_ASSET_EXTENSIONS`, `CLIENT_BUNDLE_PREFIX`, `DEFAULT_IMAGE_MAX_WIDTH` |
+| Deploy manifest           | `parseDeployManifest`, `deployHeaderRules`, `documentCacheControl`, `routeServeMode`, `nonPublishableStrategies`, `DEPLOY_MANIFEST_KEY`, `DEPLOY_MANIFEST_VERSION`, `DOCUMENT_CACHE_CONTROL`                                                           |
+| Emitted document stores   | `platformDocumentStoreSource`, `documentCacheOptionsSource`, `isrTemporaryCacheSource`, `isrTemporaryCacheDirSource`                                                                                                                                   |
+
+The last row is source an adapter emits into its generated handler rather than something it calls at
+build time: `platformDocumentStoreSource` returns the ISR/PPR document store a platform's wrapper
+installs, so eleven adapters do not carry eleven copies of it. All of them are used in context in
+the [Platform adapter guide](20-platform-adapter-guide.md).
 
 Types include `RuvyxaConfig`, `PageProps`, `GetStaticParams`, `RenderStrategy`, `Adapter`,
-`MiddlewareConfig`, `ImageConfig`, `I18nConfig`, `SiteConfig`, and plugin contracts. Use imports
-from `ruvyxa` for public primitives and `ruvyxa/config` or `ruvyxa/plugin` for explicit intent.
+`AdapterInspection`, `MiddlewareConfig`, `ImageConfig`, `I18nConfig`, `SiteConfig`, the site
+subtypes `SiteSitemapConfig`, `SiteSitemapEntry`, `SiteSitemapEntryDefaults`, `SiteSitemapVideo`,
+`SiteRobotsConfig`, and `SiteRobotsRule`, the content subtypes `ContentConfig` and
+`ContentEngineConfig`, the deploy-manifest types `DeployManifest`, `DeployRoute`, and
+`DeployServeMode`, and plugin contracts. Use imports from `ruvyxa` for public primitives and
+`ruvyxa/config` or `ruvyxa/plugin` for explicit intent.
 
 ## `@ruvyxa/react`
 

@@ -23,8 +23,9 @@ app/
 ├── tasks/page.tsx     the list UI, "/tasks"
 ├── tasks/server.ts    a loader — reads data on the server
 ├── tasks/action.ts    a server action — validated writes
-└── globals.css        the default stylesheet
+└── globals.css        the default stylesheet, importing Tailwind CSS
 public/                files served as-is at the site root
+postcss.config.ts      the PostCSS chain Ruvyxa runs over every global stylesheet
 ruvyxa.config.ts       server, build, cache, security, and middleware settings
 ```
 

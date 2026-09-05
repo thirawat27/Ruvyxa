@@ -18,8 +18,18 @@ cargo clippy --workspace --locked -- -D warnings
 pnpm -r build
 pnpm -r check
 pnpm -r test
+pnpm lint
 pnpm format:check
+pnpm check:unused
+pnpm release:validate
+pnpm pack:smoke
 ```
+
+`pnpm release:validate` คือ gate ตัวครอบ: มันรัน `lint` แล้วตามด้วย repository check แต่ละตัว —
+package metadata, release publish plan, `oxc` lockstep, Markdown link, path ของ repository
+ที่ถูกอ้างใน source comment, doc-comment attachment, silent default, cross-language constant,
+template mirror, adapter sync และ Knip ระหว่างทำงานให้รันตัวที่แคบกว่าโดยตรง;
+เงื่อนไขว่าควรรันตัวไหนเมื่อใด อยู่ใน repository guide [`AGENTS.md`](../../AGENTS.md)
 
 สำหรับ broad fixture ให้ใช้คำสั่งที่ repository guide กำหนดไว้ตรงตัว:
 

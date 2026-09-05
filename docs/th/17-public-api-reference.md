@@ -36,15 +36,27 @@ handler การเรียกที่ระดับ module scope หรื�
 "ทั้งสอง" หมายถึงชื่อนั้น re-export ทั้งจาก `ruvyxa` และ `ruvyxa/server` ในโมดูลที่รันฝั่ง server
 อย่างเดียว ควรเลือก `ruvyxa/server` เพื่อให้ตัว import เองบอกขอบเขตไว้
 
-ผู้เขียน adapter ยังได้ build helper จาก `ruvyxa` ด้วย — `validateBuildContext`,
-`clientBuildOutput`, `runtimeBuildPolicy`, `projectRelativeOutDir`, `staticAssetGlobs`,
-`publicAssetGlobs`, `headersFileContents`, `DEFAULT_SECURITY_HEADERS`, `IMMUTABLE_CACHE_CONTROL`,
-`PUBLIC_ASSET_CACHE_CONTROL`, `STATIC_ASSET_EXTENSIONS` และ `CLIENT_BUNDLE_PREFIX`
-ดูการใช้งานจริงได้ที่ [คู่มือ adapter สำหรับแพลตฟอร์ม](20-platform-adapter-guide.md)
+ผู้เขียน adapter ยังได้ build helper จาก `ruvyxa` ด้วย แบ่งเป็นสี่กลุ่ม
+
+| กลุ่ม                      | ชื่อ                                                                                                                                                                                                                                                   |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Build context และ out dir  | `validateBuildContext`, `clientBuildOutput`, `runtimeBuildPolicy`, `projectRelativeOutDir`, `assertSafeOutDirForCommand`                                                                                                                               |
+| Asset และ header           | `staticAssetGlobs`, `publicAssetGlobs`, `staticAssetPattern`, `headersFileContents`, `DEFAULT_SECURITY_HEADERS`, `IMMUTABLE_CACHE_CONTROL`, `PUBLIC_ASSET_CACHE_CONTROL`, `STATIC_ASSET_EXTENSIONS`, `CLIENT_BUNDLE_PREFIX`, `DEFAULT_IMAGE_MAX_WIDTH` |
+| Deploy manifest            | `parseDeployManifest`, `deployHeaderRules`, `documentCacheControl`, `routeServeMode`, `nonPublishableStrategies`, `DEPLOY_MANIFEST_KEY`, `DEPLOY_MANIFEST_VERSION`, `DOCUMENT_CACHE_CONTROL`                                                           |
+| Document store ที่ถูก emit | `platformDocumentStoreSource`, `documentCacheOptionsSource`, `isrTemporaryCacheSource`, `isrTemporaryCacheDirSource`                                                                                                                                   |
+
+แถวสุดท้ายคือ source ที่ adapter ปล่อยลงใน handler ที่มันสร้าง ไม่ใช่สิ่งที่เรียกตอน build:
+`platformDocumentStoreSource` คืน ISR/PPR document store ที่ wrapper ของแต่ละแพลตฟอร์มติดตั้ง
+adapter ทั้งสิบเอ็ดตัวจึงไม่ต้องถือสำเนาคนละชุด ดูการใช้งานจริงได้ที่
+[คู่มือ adapter สำหรับแพลตฟอร์ม](20-platform-adapter-guide.md)
 
 type มี `RuvyxaConfig`, `PageProps`, `GetStaticParams`, `RenderStrategy`, `Adapter`,
-`MiddlewareConfig`, `ImageConfig`, `I18nConfig`, `SiteConfig` และ plugin contract ใช้ import จาก
-`ruvyxa` สำหรับ public primitive และ `ruvyxa/config` หรือ `ruvyxa/plugin` เพื่อสื่อ intent ชัดเจน
+`AdapterInspection`, `MiddlewareConfig`, `ImageConfig`, `I18nConfig`, `SiteConfig`, subtype ของ site
+คือ `SiteSitemapConfig`, `SiteSitemapEntry`, `SiteSitemapEntryDefaults`, `SiteSitemapVideo`,
+`SiteRobotsConfig` และ `SiteRobotsRule`, subtype ของ content คือ `ContentConfig` และ
+`ContentEngineConfig`, type ของ deploy manifest คือ `DeployManifest`, `DeployRoute` และ
+`DeployServeMode` และ plugin contract ใช้ import จาก `ruvyxa` สำหรับ public primitive และ
+`ruvyxa/config` หรือ `ruvyxa/plugin` เพื่อสื่อ intent ชัดเจน
 
 ## `@ruvyxa/react`
 
