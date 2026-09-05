@@ -113,6 +113,13 @@ they did diverge — three awaited the flush and three did not. Two rules hold t
   message with `writeSync(1, …)` and exit — `css-runner.mjs`'s `respondAndExit` and
   `adapter-runner.mjs`'s `exitWithResponse` are the pattern. Setting `process.exitCode` and
   returning needs neither, because Node drains stdout on a natural exit.
+- **One `writeSync` is not one write.** It is one `write(2)`, and Node leaves a stdout pipe
+  non-blocking on macOS and Linux: past the pipe buffer it returns a short count instead of
+  blocking, and the bytes it did not take are gone the moment the process exits. Loop on the return
+  value — `writeAllSync` in all three exiting writers — and retry `EAGAIN`. This is not theoretical
+  and the local checkout will not show it: the buffer is 64 KiB on Linux, 16 KiB on macOS, and
+  Windows writes pipes blocking, so a Tailwind stylesheet crossing 16 KiB failed `pack:smoke` on the
+  macOS lane alone and reported itself as `RUV1406`, a PostCSS error, on a run that had succeeded.
 - **A loop that keeps writing must respect backpressure.** Check `write()`'s return value and
   `await once(process.stdout, 'drain')`, as `worker-pool.mjs`'s `writeWorkerMessage` and
   `plugin-runtime.mjs`'s persistent mode do. Ignoring it buffers every unread response in memory for

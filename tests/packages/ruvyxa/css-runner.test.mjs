@@ -164,6 +164,40 @@ export default { plugins: [rename({ to: '.renamed' })] }
       assert.equal(report.css, '.a { color: red }')
     }))
 
+  /**
+   * The response has to survive being larger than one pipe buffer.
+   *
+   * `writeSync` is a single `write(2)`, and Node leaves a stdout pipe
+   * non-blocking on macOS and Linux: past the buffer it returns a short count
+   * instead of blocking, and `process.exit()` discards whatever it did not
+   * take. A Tailwind stylesheet was the first payload to cross that line, and
+   * the Rust host reported the truncated JSON as `RUV1406: PostCSS did not
+   * report a result` — a PostCSS error, on a run where PostCSS had succeeded.
+   *
+   * One megabyte is far past every platform's buffer (64 KiB on Linux, 16 KiB
+   * on macOS). This assertion is weaker on Windows, where libuv writes pipes
+   * blocking and a short count cannot happen, so the Linux and macOS lanes are
+   * the ones that hold it.
+   */
+  it('returns a stylesheet larger than a pipe buffer without losing its tail', () =>
+    withProject({ 'postcss.config.mjs': 'export default { plugins: {} }\n' }, async (root) => {
+      // Distinct rules rather than one repeated byte, so a truncation cannot be
+      // masked by the tail happening to look like the head.
+      const rules = []
+      for (let index = 0, size = 0; size < 1024 * 1024; index += 1) {
+        const rule = `.rule-${index} { color: rgb(${index % 256} 0 0); content: '${'x'.repeat(64)}' }`
+        rules.push(rule)
+        size += rule.length + 1
+      }
+      const css = rules.join('\n')
+
+      const { exitCode, report } = await runCss(root, { css })
+      assert.equal(exitCode, 0)
+      assert.equal(report.ok, true)
+      assert.equal(report.css.length, css.length)
+      assert.equal(report.css, css)
+    }))
+
   it('reads a JSON config and reports an uninstallable plugin by name', () =>
     withProject(
       { '.postcssrc.json': JSON.stringify({ plugins: { 'not-a-real-plugin': {} } }) },

@@ -185,8 +185,40 @@ function describePostcssError(error, configFile) {
  * See the stdio-protocol rule in `AGENTS.md`.
  */
 function respondAndExit(payload, code) {
-  writeSync(1, `${JSON.stringify(payload)}\n`)
+  writeAllSync(1, `${JSON.stringify(payload)}\n`)
   process.exit(code)
+}
+
+/**
+ * Write every byte, however many `write(2)` calls that takes.
+ *
+ * `writeSync` is one `write(2)`, and Node leaves a stdout pipe non-blocking on
+ * macOS and Linux: once the pipe buffer is full the call returns a *short
+ * count* rather than blocking until the reader drains it. The bytes past that
+ * count are never written, and the `process.exit()` above means there is no
+ * second chance — so a response larger than one pipe buffer reached the Rust
+ * host cut mid-JSON, and the host reported `RUV1406: PostCSS did not report a
+ * result` for a run that had produced a perfectly good stylesheet.
+ *
+ * The buffer is 64 KiB on Linux and 16 KiB on macOS, so the first payload to
+ * cross it — a Tailwind stylesheet, once the starters gained Tailwind v4 —
+ * failed `pack:smoke` on macOS alone. Windows never reached it: libuv writes
+ * pipes blocking there, which is also why this cannot be reproduced locally on
+ * a Windows checkout.
+ */
+function writeAllSync(fd, text) {
+  const buffer = Buffer.from(text, 'utf8')
+  let written = 0
+  while (written < buffer.length) {
+    try {
+      written += writeSync(fd, buffer, written, buffer.length - written)
+    } catch (error) {
+      // A pipe with no room at all answers `EAGAIN` instead of a short count.
+      // The reader has not gone away, it has not caught up — so retry rather
+      // than lose the tail. Any other error is real and must not be swallowed.
+      if (error.code !== 'EAGAIN') throw error
+    }
+  }
 }
 
 function succeed(css, dependencies) {

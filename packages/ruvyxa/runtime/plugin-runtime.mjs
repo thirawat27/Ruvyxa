@@ -425,6 +425,36 @@ async function writeResponse(response, newline = false) {
  * `process.exitCode` and returns, which lets Node drain stdout on its own.
  */
 function exitWithResponse(response, code) {
-  writeSync(1, JSON.stringify(response))
+  writeAllSync(1, JSON.stringify(response))
   process.exit(code)
+}
+
+/**
+ * Write every byte, however many `write(2)` calls that takes.
+ *
+ * `writeSync` is one `write(2)`, and Node leaves a stdout pipe non-blocking on
+ * macOS and Linux: once the pipe buffer is full the call returns a *short
+ * count* rather than blocking until the reader drains it. The bytes past that
+ * count are never written, and the `process.exit()` above means there is no
+ * second chance, so a response larger than one pipe buffer arrives at the Rust
+ * host cut mid-JSON and is reported as unparsable output from a run that
+ * succeeded. `css-runner.mjs` hit exactly that with a Tailwind stylesheet.
+ *
+ * The buffer is 64 KiB on Linux and 16 KiB on macOS; Windows writes pipes
+ * blocking, so only the first two can lose a tail. See the stdio-protocol rule
+ * in `AGENTS.md`.
+ */
+function writeAllSync(fd, text) {
+  const buffer = Buffer.from(text, 'utf8')
+  let written = 0
+  while (written < buffer.length) {
+    try {
+      written += writeSync(fd, buffer, written, buffer.length - written)
+    } catch (error) {
+      // A pipe with no room at all answers `EAGAIN` instead of a short count.
+      // The reader has not gone away, it has not caught up — so retry rather
+      // than lose the tail. Any other error is real and must not be swallowed.
+      if (error.code !== 'EAGAIN') throw error
+    }
+  }
 }

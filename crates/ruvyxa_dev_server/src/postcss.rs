@@ -190,15 +190,34 @@ impl PostcssRunner {
         // The runner answers with exactly one JSON line. Anything else means it
         // died before reporting — a plugin calling `process.exit`, an OOM — and
         // the raw streams are the only evidence there is.
-        let Some(response) = stdout
-            .lines()
-            .rev()
-            .find_map(|line| serde_json::from_str::<RunnerResponse>(line).ok())
-        else {
+        // Why the last line did not parse is kept rather than dropped. `.ok()`
+        // alone reported "did not report a result" over a payload that plainly
+        // began `{"ok":true,` — the runner had succeeded and its stdout was
+        // truncated mid-JSON by a short `writeSync` on a non-blocking pipe, and
+        // the diagnostic said nothing that pointed there. Iteration is in
+        // reverse, so the retained error belongs to the last line.
+        let mut parse_error = None;
+        let parsed = stdout.lines().rev().find_map(|line| {
+            if line.trim().is_empty() {
+                return None;
+            }
+            match serde_json::from_str::<RunnerResponse>(line) {
+                Ok(response) => Some(response),
+                Err(error) => {
+                    parse_error.get_or_insert(error);
+                    None
+                }
+            }
+        });
+        let Some(response) = parsed else {
             return Err(
                 Diagnostic::new("RUV1406", "PostCSS did not report a result")
                     .explain(format!(
-                        "{}\n{}",
+                        "{}{} bytes of stdout, which did not contain a JSON response line.\n{}\n{}",
+                        parse_error
+                            .map(|error| format!("The last line did not parse: {error}\n"))
+                            .unwrap_or_default(),
+                        output.stdout.len(),
                         stdout.trim(),
                         String::from_utf8_lossy(&output.stderr).trim()
                     ))
