@@ -251,9 +251,12 @@ export const DOCUMENT_CACHE_CONTROL = 'public, max-age=0, must-revalidate'
  * document again — so a page a reader already holds was re-sent in full on every
  * navigation. ISR is the same question with `s-maxage` in front of it.
  *
- * `ssr` and `ppr` are absent because their document is produced for this request:
- * it may carry one visitor's data, it may still be streaming, and it is
- * `no-store` either way, so there is nothing for a validator to be about. The
+ * `ssr` is absent because its document is produced for this request: it may
+ * carry one visitor's data, it may still be streaming, and it is `no-store`
+ * either way, so there is nothing for a validator to be about. `ppr` is absent
+ * because its row in the cache-control table is `no-store` on every host too —
+ * the stored shell hydrates its dynamic slots client-side — and a validator on
+ * a document a browser may not reuse answers a `304` nobody asked for. The
  * same table is `DOCUMENT_VALIDATOR_STRATEGIES` in
  * `crates/ruvyxa_graph/src/cache_policy.rs`; both are replayed against
  * `tests/fixtures/deploy-output-conformance.json`.
@@ -1476,12 +1479,19 @@ export function createHandler(options) {
    * already holds it can be told so. See `DOCUMENT_VALIDATOR_HEADER` for why the
    * ETag is not written here.
    */
-  function prerenderedResponse(html, extraHeaders = {}) {
+  function prerenderedResponse(strategy, html, extraHeaders = {}) {
+    // Marked only for the strategies `DOCUMENT_VALIDATOR_STRATEGIES` names. A
+    // PPR shell is stored bytes too, but its table row is `no-store` on every
+    // host, and a validator on a `no-store` document is a `304` the native
+    // host would never answer.
+    const validator = DOCUMENT_VALIDATOR_STRATEGIES.includes(strategy)
+      ? { [DOCUMENT_VALIDATOR_HEADER]: '1' }
+      : {}
     return new Response(html, {
       status: 200,
       headers: {
         'content-type': 'text/html; charset=utf-8',
-        [DOCUMENT_VALIDATOR_HEADER]: '1',
+        ...validator,
         ...extraHeaders,
       },
     })
@@ -1501,16 +1511,17 @@ export function createHandler(options) {
   }
 
   /**
-   * CSR and SSG: serve what the build produced, and render only when there is
-   * nothing stored or `revalidatePath()` invalidated it.
+   * CSR, SSG, and PPR: serve what the build produced, and render only when
+   * there is nothing stored or `revalidatePath()` invalidated it.
    *
-   * The two strategies differ in what the stored document contains — a shell
-   * versus a full page — which the build decided. At request time they are the
-   * same lookup, so they share one path rather than two identical ones.
+   * The three strategies differ in what the stored document contains — a
+   * hydration shell, a full page, or a shell with Suspense fallbacks — which
+   * the build decided. At request time they are the same lookup, so they share
+   * one path rather than three identical ones.
    */
   async function servePrerendered(route, request, pathname, params, forced, forcedClaim) {
     const cached = forced ? null : normalizeCacheEntry(await readPrerendered?.(pathname))
-    if (cached) return prerenderedResponse(cached.html)
+    if (cached) return prerenderedResponse(route.render.strategy, cached.html)
 
     const rendered = await renderPage(route, pathname, params, request)
     if (forced) await persistForcedRender(pathname, forcedClaim, rendered)
@@ -1533,7 +1544,7 @@ export function createHandler(options) {
       : normalizeCacheEntry(await readPrerendered?.(pathname, revalidate))
     if (cached) {
       if (cached.stale) await refreshStaleEntry(route, pathname, params, runtimeContext)
-      return prerenderedResponse(cached.html, {
+      return prerenderedResponse('isr', cached.html, {
         'x-ruvyxa-isr': 'HIT',
         'cache-control': documentCacheControl('isr', revalidate),
       })
@@ -1629,22 +1640,22 @@ export function createHandler(options) {
       return rendered
     }
 
-    if (strategy === 'csr' || strategy === 'ssg') {
+    // PPR is a stored shell like SSG and CSR: the build wrote it, its dynamic
+    // slots fill in client-side on hydration, and `revalidatePath()` replaces
+    // it through the same store. This handler used to render a PPR page in
+    // full on every request while still *writing* the forced render to the
+    // store — a document it then never read — so a deployment paying for a
+    // shared store got per-request renders, and the Axum host, which serves
+    // the stored shell, disagreed with it about what a PPR URL answers.
+    // Streaming the shell ahead of the slots needs a platform hook this
+    // generic handler does not have; a platform wrapper overrides it where one
+    // exists. `tests/fixtures/stored-document-conformance.json` holds the
+    // three hosts to one answer per strategy.
+    if (strategy === 'csr' || strategy === 'ssg' || strategy === 'ppr') {
       return servePrerendered(route, request, pathname, params, forced, forcedClaim)
     }
     if (strategy === 'isr') {
       return serveIncremental(route, request, pathname, params, runtimeContext, forced, forcedClaim)
-    }
-
-    // PPR falls back to a full render here: streaming the shell separately needs
-    // a platform hook this generic handler does not have, and a platform wrapper
-    // overrides it where one exists.
-    if (strategy === 'ppr') {
-      const rendered = await renderPage(route, pathname, params, request)
-      if (forced) {
-        await persistForcedRender(pathname, forcedClaim, rendered, route.render.revalidate ?? 60)
-      }
-      return rendered
     }
 
     // SSR (default): full server render, nothing stored — the one strategy

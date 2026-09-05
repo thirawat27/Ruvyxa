@@ -1140,15 +1140,13 @@ describe('bounded path revalidation state', () => {
       assert.equal((await handler(new Request('http://localhost/page'))).status, 200, strategy)
       assert.equal(writes, 2, strategy)
 
+      // PPR included: the shell `revalidatePath()` replaced is read back like
+      // every other stored document. This handler used to write it and never
+      // read it, rendering a PPR page in full on every request instead.
       const afterAck = await handler(new Request('http://localhost/page'))
       assert.equal(afterAck.status, 200, strategy)
-      if (strategy === 'ppr') {
-        assert.equal(writes, 2, strategy)
-        assert.equal(reads, 0, strategy)
-      } else {
-        assert.equal(await afterAck.text(), '<html>fresh</html>', strategy)
-        assert.equal(reads, 1, strategy)
-      }
+      assert.equal(await afterAck.text(), '<html>fresh</html>', strategy)
+      assert.equal(reads, 1, strategy)
     }
   })
 
@@ -1625,6 +1623,18 @@ describe('deployed document validators', () => {
     // a 304 for a page that was rendered for somebody else.
     const response = await get(documentHandler('ssr', { readPrerendered: undefined }))
     assert.equal(response.status, 200)
+    assert.equal(response.headers.get('etag'), null)
+  })
+
+  it('serves a stored PPR shell without a validator', async () => {
+    // A PPR shell is stored bytes and is served from the store like SSG, but
+    // its cache-control row is `no-store` on every host, so a validator on it
+    // would be a 304 the native host never answers. `prerenderedResponse` marks
+    // only the strategies `DOCUMENT_VALIDATOR_STRATEGIES` names.
+    const response = await get(documentHandler('ppr'))
+    assert.equal(response.status, 200)
+    assert.equal(await response.text(), storedDocument, 'the shell is served, not re-rendered')
+    assert.equal(response.headers.get('cache-control'), 'no-store')
     assert.equal(response.headers.get('etag'), null)
   })
 

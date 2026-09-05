@@ -16,9 +16,10 @@
     "miss and the `stale` key is then absent), and what it means. `serving`: given a normalized",
     "document and the route's strategy, whether the host serves it and whether an ISR route refreshes",
     "it behind the response. A miss is served by neither host — the deployed host renders, the Axum",
-    "host falls back to the build's directory and then renders. PPR is not listed because the deployed",
-    "host does not consult the store for it at all; the Axum host does, and applies the general rule",
-    "(serve what is held, refresh only under ISR).",
+    "host falls back to the build's directory and then renders. PPR is a stored shell like SSG and",
+    "CSR — its dynamic slots fill in client-side on hydration — so it is served and never refreshed;",
+    "the deployed host used to render it in full on every request while still writing the forced",
+    "render to a store it never read.",
     "",
     "Replayed by `reads and writes stored documents through cache.handler` and",
     "`normalizes every store answer the fixture lists` in `tests/packages/ruvyxa/worker-pool.test.mjs`,",
@@ -134,6 +135,24 @@
       "name": "a stale document under CSR is served; there is no window to refresh against",
       "document": { "kind": "held", "html": "<p>stale</p>", "stale": true },
       "strategy": "csr",
+      "expect": { "served": true, "refresh": false }
+    },
+    {
+      "name": "a miss under PPR is rendered, not served",
+      "document": { "kind": "miss" },
+      "strategy": "ppr",
+      "expect": { "served": false, "refresh": false }
+    },
+    {
+      "name": "a fresh shell under PPR is served",
+      "document": { "kind": "held", "html": "<p>shell</p>", "stale": false },
+      "strategy": "ppr",
+      "expect": { "served": true, "refresh": false }
+    },
+    {
+      "name": "a stale shell under PPR is served; there is no window to refresh against",
+      "document": { "kind": "held", "html": "<p>shell</p>", "stale": true },
+      "strategy": "ppr",
       "expect": { "served": true, "refresh": false }
     }
   ]

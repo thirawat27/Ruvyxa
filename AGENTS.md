@@ -306,9 +306,14 @@ before believing it.
   `serve_stored_document` in `crates/ruvyxa_dev_server/src/render_pipeline.rs` — and they drifted
   twice: the worker called a bare string fresh while the deployed handler called it stale, and the
   Axum host treated a stale document as a miss (falling through to the build's older copy, with no
-  refresh) while the deployed host served it and refreshed behind the response.
-  `tests/fixtures/stored-document-conformance.json` holds all three now; add a case there before
-  changing what an answer means or what a strategy does with it.
+  refresh) while the deployed host served it and refreshed behind the response. The same file
+  exposed a third: the deployed host rendered a PPR page in full on every request while still
+  writing the forced render to the store — a shell it never read back — so a deployment paying for a
+  shared store got per-request renders, and the Axum host, which serves the stored shell, gave a
+  different answer for the same URL. PPR is a stored shell like SSG and CSR on every host now,
+  served with its `no-store` row and no validator. `tests/fixtures/stored-document-conformance.json`
+  holds all three implementations; add a case there before changing what an answer means or what a
+  strategy does with it.
 - A rule the two module graphs both enforce needs one table, not two implementations that happen to
   agree today. The client/server module lane is the newest example: `references.rs` read a module's
   leading directive and then its file stem, while `compiler.mjs` matched the single literal filename
