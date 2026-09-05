@@ -58,7 +58,7 @@ const NODE_HANDLER = new Set(['vercel', 'firebase'])
  * Which application's expectations to hold the deployment to.
  *
  * The transports below are the same whatever is deployed; what a check *asks
- * for* is not. `deploy-smoke` is four routes chosen for the emitted server's own
+ * for* is not. `deploy-smoke` is five routes chosen for the emitted server's own
  * decisions, and it is the only fixture every adapter can build. `demo` is the
  * broad feature fixture — 31 routes with plugins, every render strategy, and a
  * streamed document — and nothing had ever deployed it and asked it anything,
@@ -747,6 +747,31 @@ const checks = [
     },
   },
   {
+    name: 'GET /ppr serves the stored PPR shell rather than rendering it',
+    requires: 'ppr',
+    path: '/ppr',
+    assert: async (response, body) => {
+      if (response.status !== 200) return `status ${response.status}`
+      if (!body.includes('data-smoke="ppr"')) return `body ${body.slice(0, 120)}`
+      // A shell is stored bytes with a `no-store` row and no validator on every
+      // host: a validator on a document a browser may not reuse is a 304 the
+      // native host never answers.
+      const cache = response.headers.get('cache-control')
+      if (cache !== 'no-store') return `cache-control ${cache}`
+      if (response.headers.get('etag') !== null) return `a PPR shell carried an etag`
+      // The stamp is the build's clock. Every deployed host used to render this
+      // page in full per request — while writing the forced render to a store
+      // it never read — so a second request answered a different stamp.
+      const stamp = (text) => text.match(/data-smoke="ppr-stamp"[^>]*>(\d+)</)?.[1]
+      const first = stamp(body)
+      if (!first) return `no stamp in ${body.slice(0, 160)}`
+      const again = await (await fetch(base + '/ppr')).text()
+      const second = stamp(again)
+      if (second !== first) return `rendered per request: stamps ${first} then ${second}`
+      return null
+    },
+  },
+  {
     name: 'GET /smoke.svg serves a public asset with its cache policy',
     path: '/smoke.svg',
     assert: (response) => {
@@ -864,7 +889,7 @@ const checks = [
  * What `examples/demo` adds, which is everything the small fixture has no way
  * to reach.
  *
- * `deploy-smoke` is four routes and no plugins, so the whole plugin lane, every
+ * `deploy-smoke` is five routes and no plugins, so the whole plugin lane, every
  * render strategy but two, and a streamed document were deployed by nobody and
  * asked by nothing. A response hook that turned every 204 into a 500 lived in
  * that gap; so did a deployed build that never streamed. These checks are

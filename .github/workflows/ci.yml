@@ -231,19 +231,20 @@ jobs:
       # value React ever reads, and nothing here had ever run one.
       #
       # It builds a pruned copy rather than examples/deploy-smoke itself,
-      # because that app has an ISR route and `adapter.supports` says cloudflare
-      # has no ISR — the build refuses it with RUV2202, correctly. Add another
-      # ISR route and this step fails by name rather than skipping quietly.
+      # because that app has an ISR route and a PPR route, and `adapter.supports`
+      # says cloudflare has neither without KV — the build refuses them with
+      # RUV2202, correctly. Add another ISR or PPR route and this step fails by
+      # name rather than skipping quietly.
       - name: Build and exercise the Cloudflare worker
         timeout-minutes: 15
         shell: bash
         run: |
-          FIXTURE=$(node scripts/edge-fixture.mjs examples/deploy-smoke --drop cached)
+          FIXTURE=$(node scripts/edge-fixture.mjs examples/deploy-smoke --drop cached --drop ppr)
           cargo run -p ruvyxa_cli -- build --root "$FIXTURE" --adapter cloudflare
           node scripts/smoke-runtime-adapter.mjs edge "$FIXTURE/.ruvyxa/deploy/cloudflare/worker" 4393
       # The same emitted server, asked what the *application* carries.
       #
-      # Every lane above deploys `examples/deploy-smoke` — four routes, no
+      # Every lane above deploys `examples/deploy-smoke` — five routes, no
       # plugins — so the whole plugin lane, three of the five render strategies,
       # and a streamed document were deployed by nobody and asked by nothing. A
       # response hook that turned every 204 into a 500 lived in that gap, and so
@@ -313,13 +314,13 @@ jobs:
       # for a cache or security policy, and `404.html`, the only way the
       # project's own not-found page is reachable with nothing running to read a
       # manifest. Its fixture drops everything a publish directory cannot answer
-      # — add an API, ISR, or SSR route to deploy-smoke and this build fails with
+      # — add an API, ISR, PPR, or SSR route to deploy-smoke and this build fails with
       # RUV2202 naming it rather than skipping quietly.
       - name: Build and serve the static publish directory
         timeout-minutes: 15
         shell: bash
         run: |
-          FIXTURE=$(node scripts/edge-fixture.mjs examples/deploy-smoke --out .static --drop api/health --drop cached --drop rsc)
+          FIXTURE=$(node scripts/edge-fixture.mjs examples/deploy-smoke --out .static --drop api/health --drop cached --drop rsc --drop ppr)
           cargo run -p ruvyxa_cli -- build --root "$FIXTURE" --adapter static
           node scripts/smoke-runtime-adapter.mjs static "$FIXTURE/.ruvyxa/static" 4400 "$FIXTURE/.ruvyxa/static"
       # Reproducibility: build, wipe, build again, compare every emitted byte.

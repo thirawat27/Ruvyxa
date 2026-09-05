@@ -14,6 +14,7 @@ What is here is chosen for what the emitted server has to decide:
 | ------------- | -------------------------------------------------------------------------------------- |
 | `/`           | a pre-rendered page served from the publish directory                                  |
 | `/cached`     | ISR — the server reads the pre-rendered file and writes back                           |
+| `/ppr`        | PPR — the server serves the stored shell instead of rendering it per request           |
 | `/api/health` | the generated route registry, reached through the handler                              |
 | `/smoke.svg`  | a public asset and its cache headers                                                   |
 | `/rsc`        | a **dynamic** server-components route: the `react-server` graph, the SSR registry, and |
