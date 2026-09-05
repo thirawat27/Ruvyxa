@@ -21,6 +21,14 @@
     "the deployed host used to render it in full on every request while still writing the forced",
     "render to a store it never read.",
     "",
+    "`windows`: the revalidation window an ISR route's `read()` and `write()` are given, from what the",
+    "route declared. The default is applied before the number crosses to the handler, on every host:",
+    "a store that computes `stale` from it — as every platform's own does — gets `NaN` from an absent",
+    "value and never reports a document stale. The deployed host applied it and the Axum host handed",
+    "the route's absent value through, so one ISR page expired on every platform and never under",
+    "`ruvyxa start`. `isrWindow` in `serverless-handler.mjs` and `isr_window` in",
+    "`crates/ruvyxa_graph/src/cache_policy.rs` are the two implementations.",
+    "",
     "Replayed by `reads and writes stored documents through cache.handler` and",
     "`normalizes every store answer the fixture lists` in `tests/packages/ruvyxa/worker-pool.test.mjs`,",
     "by `stored document conformance` in `tests/packages/ruvyxa/serverless-handler.test.mjs`, and by",
@@ -154,6 +162,23 @@
       "document": { "kind": "held", "html": "<p>shell</p>", "stale": true },
       "strategy": "ppr",
       "expect": { "served": true, "refresh": false }
+    }
+  ],
+  "windows": [
+    {
+      "name": "an ISR route that named no window is read and written under the default",
+      "revalidate": null,
+      "expect": 60
+    },
+    {
+      "name": "a declared window crosses as declared",
+      "revalidate": 30,
+      "expect": 30
+    },
+    {
+      "name": "a zero window is a declared window, not an absent one",
+      "revalidate": 0,
+      "expect": 0
     }
   ]
 }

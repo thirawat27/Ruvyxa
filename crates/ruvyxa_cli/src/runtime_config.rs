@@ -105,60 +105,12 @@ pub(crate) fn dev_server_config(
     server.public_dir = args.root.join("public");
     server.client_dir = out_dir.join("client");
     server.prerender_dir = out_dir.join("prerender");
-    server.cache_route_manifest = config.cache.route_manifest.unwrap_or(true);
-    server.cache_css = config.cache.css.unwrap_or(true);
-    server.data_cache_max_entries = config.cache.max_entries;
-    server.data_cache_max_bytes = config.cache.max_bytes;
     crate::build::report_inert_cache_handler(config);
     server.style_entries = config.style_entries(&args.root);
     server.prebundle_dependencies = config.build.prebundle_dependencies.unwrap_or(true);
-    server.runtime = config.javascript_runtime();
-    server.jsx_runtime = parse_jsx_runtime(config.build.jsx_runtime.as_deref())?;
-    server.es_target = parse_es_target(config.build.es_target.as_ref())?;
     server.error_overlay = config.debug.overlay.unwrap_or(true);
     server.debug_traces = config.debug.traces.unwrap_or(false);
-    server.action_body_limit_bytes = config
-        .security
-        .action_body_limit_bytes
-        .unwrap_or(server.action_body_limit_bytes);
-    server.api_body_limit_bytes = config
-        .security
-        .api_body_limit_bytes
-        .unwrap_or(server.api_body_limit_bytes);
-    server.plugin_response_body_limit_bytes = config
-        .security
-        .plugin_response_body_limit_bytes
-        .unwrap_or(server.plugin_response_body_limit_bytes);
-    if let Some(rate_limit) = &config.security.action_rate_limit {
-        server.action_rate_limit_max = rate_limit.max.unwrap_or(server.action_rate_limit_max);
-        server.action_rate_limit_window = Duration::from_secs(
-            rate_limit
-                .window
-                .unwrap_or(server.action_rate_limit_window.as_secs()),
-        );
-    }
-    server.same_origin_actions = config
-        .security
-        .same_origin_actions
-        .unwrap_or(server.same_origin_actions);
-    server.fetch_metadata_actions = config
-        .security
-        .fetch_metadata_actions
-        .unwrap_or(server.fetch_metadata_actions);
-    server.trusted_proxies = parse_trusted_proxies(&config.security.trusted_proxy_ips)?;
-    server.security_headers = config
-        .security
-        .security_headers
-        .unwrap_or(server.security_headers);
-    server.middleware = config.middleware.clone();
-    server.plugins_enabled = !config.plugins.is_empty();
-    server.plugin_head = collect_plugin_head(&config.plugins);
-    server.default_render_strategy = config.rendering.default_strategy;
-    server.default_revalidate = config.rendering.default_revalidate;
-    server.i18n = config.i18n.as_ref().map(I18nConfigOptions::routing);
-    server.dynamic_images.enabled = config.images.on_demand.enabled();
-    server.dynamic_images.max_width = config.images.on_demand.max_width();
-    server.dynamic_images.default_quality = config.images.quality.clamp(1, 100);
+    apply_project_settings(&mut server, config)?;
     // Generated `sitemap.xml` and `robots.txt`, written where the dev server
     // looks for them after `public/`. A build publishes both into the assets
     // directory; development had neither, so the command a project runs while
@@ -358,15 +310,29 @@ pub(crate) fn production_server_config(
     server.public_dir = out_dir.join("assets");
     server.client_dir = out_dir.join("client");
     server.prerender_dir = out_dir.join("prerender");
-    server.cache_route_manifest = config.cache.route_manifest.unwrap_or(true);
-    server.cache_css = config.cache.css.unwrap_or(true);
-    server.data_cache_max_entries = config.cache.max_entries;
-    server.data_cache_max_bytes = config.cache.max_bytes;
     if let Some(handler) = resolve_data_cache_handler(&args.root, config)? {
         server.data_cache_key_prefix = Some(data_cache_key_prefix(&out_dir)?);
         server.data_cache_handler = Some(handler);
     }
     server.style_entries = config.style_entries(&out_dir.join("server"));
+    apply_project_settings(&mut server, config)?;
+    Ok(server)
+}
+
+/// The settings `ruvyxa.config.ts` decides the same way for both hosts.
+///
+/// `dev_server_config` and `production_server_config` differ in where the
+/// project's files are — the working tree against the build output — and in
+/// what only one of them runs: the overlay and edit traces, the discovery
+/// observer, `cache.handler`. Everything else is one list, and it was written
+/// out twice, so a setting added to one host was a setting the other silently
+/// left at its default with nothing to say so. It is one list now; a setting
+/// that genuinely differs by host stays beside the host that owns it.
+fn apply_project_settings(server: &mut ServerConfig, config: &ProjectConfig) -> anyhow::Result<()> {
+    server.cache_route_manifest = config.cache.route_manifest.unwrap_or(true);
+    server.cache_css = config.cache.css.unwrap_or(true);
+    server.data_cache_max_entries = config.cache.max_entries;
+    server.data_cache_max_bytes = config.cache.max_bytes;
     server.runtime = config.javascript_runtime();
     server.jsx_runtime = parse_jsx_runtime(config.build.jsx_runtime.as_deref())?;
     server.es_target = parse_es_target(config.build.es_target.as_ref())?;
@@ -412,7 +378,7 @@ pub(crate) fn production_server_config(
     server.dynamic_images.enabled = config.images.on_demand.enabled();
     server.dynamic_images.max_width = config.images.on_demand.max_width();
     server.dynamic_images.default_quality = config.images.quality.clamp(1, 100);
-    Ok(server)
+    Ok(())
 }
 
 /// Resolve `cache.handler` to the absolute module this host will load.

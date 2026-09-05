@@ -385,6 +385,72 @@ export function documentCacheOptionsSource(platformRead: string, platformWrite: 
   deleteData: documentCacheHandler?.deleteData,`
 }
 
+/**
+ * Generated JavaScript for a platform's own ISR document store: a reader that
+ * consults the runtime cache directory and then the build's prerender output,
+ * and a writer that fills the runtime cache directory.
+ *
+ * Four function templates carried this by hand — Netlify, Vercel, Firebase,
+ * and the standalone server — and they had drifted in shape before they drifted
+ * in behaviour: two spelled the two-directory read as a pair of `try` blocks
+ * and two as a loop, and only two of the four writers took the `forced` flag
+ * at all. Written once, for the reason `documentCacheOptionsSource` is.
+ *
+ * The emitted code needs `prerenderRelativePath`, `readFileSync`, `statSync`,
+ * `mkdirSync`, `writeFileSync`, and `path` in scope, plus `isrCacheDir` and
+ * `prerenderDir`. When the two directories are one — the standalone server
+ * without a temporary cache — the read consults it once.
+ *
+ * `onForcedWrite` names a function of one argument, the pathname, that a
+ * `revalidatePath()` write must reach as well as the store: a platform that
+ * caches the *response* in front of the function keeps serving the old
+ * document until told, and the handler passes `forced` so the writer can tell
+ * a background refresh from an invalidation. Absent for a platform with
+ * nothing to tell — the write alone is then the whole answer.
+ *
+ * @param options.onForcedWrite identifier of the purge to call after a forced write
+ * @returns the two store functions and their shared reader, ready to interpolate
+ */
+export function platformDocumentStoreSource(options: { onForcedWrite?: string } = {}): string {
+  const forcedWrite = options.onForcedWrite
+    ? `
+  if (forced === true) return ${options.onForcedWrite}(pathname);`
+    : ''
+  return `const readEntry = (htmlPath, revalidate) => {
+  const html = readFileSync(htmlPath, 'utf8');
+  const stale = Date.now() - statSync(htmlPath).mtimeMs >= revalidate * 1000;
+  return { html, stale };
+};
+
+// Named rather than passed inline, so a project that declares \`cache.handler\`
+// can stand its own store in front of these. See \`documentCacheOptionsSource\`
+// in \`@ruvyxa/core\`; the registry supplies \`documentCacheHandler\`.
+const platformReadPrerendered = (pathname, revalidate = 60) => {
+  // prerenderRelativePath rejects any request path that cannot be mapped to a
+  // location inside the cache directories, so reads can never escape them.
+  const relative = prerenderRelativePath(pathname);
+  if (relative === null) return null;
+  const cacheDirectories =
+    isrCacheDir === prerenderDir ? [prerenderDir] : [isrCacheDir, prerenderDir];
+  for (const cacheDirectory of cacheDirectories) {
+    try {
+      return readEntry(path.join(cacheDirectory, relative), revalidate);
+    } catch {
+      // try the deploy-time prerender output after the runtime cache
+    }
+  }
+  return null;
+};
+
+const platformWritePrerendered = (pathname, html, revalidate, forced) => {
+  const relative = prerenderRelativePath(pathname);
+  if (relative === null) return;
+  const htmlPath = path.join(isrCacheDir, relative);
+  mkdirSync(path.dirname(htmlPath), { recursive: true });
+  writeFileSync(htmlPath, html, 'utf8');${forcedWrite}
+};`
+}
+
 export function validateBuildContext(
   ctx: BuildContext,
   adapterName: string,

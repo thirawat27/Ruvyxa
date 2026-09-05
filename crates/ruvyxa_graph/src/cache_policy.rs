@@ -10,6 +10,22 @@ pub const DOCUMENT_CACHE_CONTROL: &str = "public, max-age=0, must-revalidate";
 /// The revalidation window an ISR route that named none is given.
 pub const DEFAULT_REVALIDATE_SECONDS: u64 = 60;
 
+/// The window an ISR route actually runs under: what it declared, or the default.
+///
+/// One function because the number leaves this process. It is written into the
+/// `cache-control` a CDN reads, and it is handed to the project's `cache.handler`
+/// on every read and write of an ISR document — where a handler that computes
+/// `stale` from it, as every platform's own store does, gets `NaN` from an
+/// absent value and never reports a document stale. The deployed hosts already
+/// applied the default before crossing that boundary (`isrWindow` in
+/// `packages/ruvyxa/runtime/serverless-handler.mjs`); the Axum host handed the
+/// route's `Option` through unchanged, so one project's ISR page expired after
+/// sixty seconds on every platform and never under `ruvyxa start`.
+/// `tests/fixtures/stored-document-conformance.json` holds both halves.
+pub fn isr_window(revalidate: Option<u64>) -> u64 {
+    revalidate.unwrap_or(DEFAULT_REVALIDATE_SECONDS)
+}
+
 /// How long a stale ISR document may still be served while it refreshes.
 ///
 /// The stale window is `ISR_EXPIRE_SECONDS - revalidate`, which is the formula
@@ -43,7 +59,7 @@ pub const ISR_EXPIRE_SECONDS: u64 = 31_536_000;
 pub fn document_cache_control(strategy: RenderStrategy, revalidate: Option<u64>) -> String {
     match strategy {
         RenderStrategy::Isr => {
-            let revalidate = revalidate.unwrap_or(DEFAULT_REVALIDATE_SECONDS);
+            let revalidate = isr_window(revalidate);
             format!(
                 "public, max-age=0, s-maxage={revalidate}, stale-while-revalidate={}",
                 ISR_EXPIRE_SECONDS.saturating_sub(revalidate)

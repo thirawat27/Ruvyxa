@@ -1149,35 +1149,19 @@ async function visitModule(context) {
       assertSupportedModuleKind(resolved, specifier, filePath || sourcefile)
       assertImportCaseMatches(resolved, specifier, baseDir, filePath || sourcefile)
       const depSource = await readSourceFile(resolved, buildTransform)
+      // The whole context travels, and only what changes for a dependency is
+      // named: its key, file, source, and base directory, plus whether it is
+      // bundled because an alias reached it. Spelling the other twenty-odd
+      // fields out again was a second list to extend for every compile option,
+      // and one that could silently drop a field the entry had been given.
       const dep = await visitModule({
+        ...context,
         key: moduleGraphKey(resolved),
         filePath: resolved,
         source: depSource,
-        sourcefile,
         baseDir: path.dirname(resolved),
-        root,
-        modules,
-        byKey,
-        externals,
-        externalSet,
-        externalUrls,
-        identifierPrefix,
-        aliases,
-        platform,
-        bundleTarget,
-        clientReferences,
-        serverReferences,
-        serverReferenceClient,
-        referenceBase,
-        bundlePackages,
-        bundleAliasDependencies,
         bundleDependencies:
           bundleDependencies || (bundleAliasDependencies && Boolean(resolvedAlias)),
-        jsxRuntime,
-        reactCompiler,
-        markdownConfig,
-        tsconfigPaths,
-        buildTransform,
       })
       module.deps.set(specifier, dep)
       continue

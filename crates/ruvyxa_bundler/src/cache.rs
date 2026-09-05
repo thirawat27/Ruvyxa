@@ -405,6 +405,11 @@ impl CompileCache {
     }
 
     /// Compute the cache key for a given source and JSX flag (classic mode).
+    ///
+    /// A test convenience: the compile path keys through
+    /// [`Self::cache_key_with_options_and_namespace`], and nothing else asks
+    /// for a key without a namespace.
+    #[cfg(test)]
     pub fn cache_key(source: &str, has_jsx: bool) -> String {
         Self::cache_key_with_options(source, has_jsx, JsxRuntime::Classic, EsTarget::EsNext)
     }
@@ -412,6 +417,7 @@ impl CompileCache {
     /// Compute the cache key for a given source, JSX flag, and JSX runtime mode.
     ///
     /// Key = blake3(source || "\0" || jsx_flag || "\0" || jsx_runtime || "\0" || compiler_version)[..32] as hex.
+    #[cfg(test)]
     pub fn cache_key_with_options(
         source: &str,
         has_jsx: bool,

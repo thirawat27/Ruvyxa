@@ -13,6 +13,7 @@ const {
   boundedKey,
   consumeFixedWindow,
   createHandler,
+  isrWindow,
   prerenderRelativePath,
   rateLimitKey,
 } = await import(`file://${handlerModule.replaceAll('\\', '/')}`)
@@ -1086,6 +1087,36 @@ describe('stored document conformance', () => {
         assert.equal(await response.text(), '<html>rendered</html>')
         assert.equal(counters.renders, 1)
       }
+    })
+  }
+
+  // The window the store is handed is decided before it crosses to the
+  // handler, on every host. This handler always did so, in three places that
+  // each spelled `?? 60`; the Axum host handed the route's absent value through
+  // and a store computing `stale` from `undefined` never reported one.
+  for (const entry of storedDocumentConformance.windows) {
+    it(`windows: ${entry.name}`, async () => {
+      assert.equal(isrWindow(entry.revalidate ?? undefined), entry.expect)
+
+      const route = pageRoute('windowed', '/windowed', 'isr')
+      if (entry.revalidate !== null) route.render.revalidate = entry.revalidate
+      const reads = []
+      const writes = []
+      const handler = createHandler({
+        routes: [route],
+        importPage: async () => ({ render: async () => '<html>rendered</html>' }),
+        importApi: async () => ({}),
+        readPrerendered: (pathname, revalidate) => {
+          reads.push(revalidate)
+          return null
+        },
+        writePrerendered: (pathname, html, revalidate) => {
+          writes.push(revalidate)
+        },
+      })
+      await handler(new Request('http://localhost/windowed'))
+      assert.deepEqual(reads, [entry.expect], 'the read is given the decided window')
+      assert.deepEqual(writes, [entry.expect], 'the write is given the decided window')
     })
   }
 })

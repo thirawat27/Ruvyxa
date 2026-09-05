@@ -282,6 +282,25 @@ const DOCUMENT_VALIDATOR_HEADER = 'x-ruvyxa-validate'
 const DEFAULT_REVALIDATE_SECONDS = 60
 
 /**
+ * The window an ISR route actually runs under: what it declared, or the default.
+ *
+ * One function because the number leaves this process. It is written into the
+ * `cache-control` a CDN reads, and it is handed to `readPrerendered` and
+ * `writePrerendered` — so to a project's `cache.handler` — on every ISR read and
+ * write, where a store that computes `stale` from it (as every platform's own
+ * does) gets `NaN` from `undefined` and never reports a document stale. This
+ * host always applied the default before that boundary, in three places that
+ * each spelled `?? 60`; the Axum host handed the route's absent value through,
+ * so one project's ISR page expired after sixty seconds on every platform and
+ * never under `ruvyxa start`. `isr_window` in
+ * `crates/ruvyxa_graph/src/cache_policy.rs` is the Rust half, and
+ * `tests/fixtures/stored-document-conformance.json` holds both to one answer.
+ */
+export function isrWindow(revalidate) {
+  return revalidate ?? DEFAULT_REVALIDATE_SECONDS
+}
+
+/**
  * How long a stale ISR document may still be served while it refreshes.
  *
  * The stale window is `ISR_EXPIRE_SECONDS - revalidate`, the formula Next.js
@@ -314,7 +333,7 @@ const ISR_EXPIRE_SECONDS = 31_536_000
  */
 export function documentCacheControl(strategy, revalidate) {
   if (strategy === 'isr') {
-    const window = revalidate ?? DEFAULT_REVALIDATE_SECONDS
+    const window = isrWindow(revalidate)
     const stale = Math.max(0, ISR_EXPIRE_SECONDS - window)
     return `public, max-age=0, s-maxage=${window}, stale-while-revalidate=${stale}`
   }
@@ -1538,7 +1557,7 @@ export function createHandler(options) {
     forced,
     forcedClaim,
   ) {
-    const revalidate = route.render.revalidate ?? 60
+    const revalidate = isrWindow(route.render.revalidate)
     const cached = forced
       ? null
       : normalizeCacheEntry(await readPrerendered?.(pathname, revalidate))
@@ -1767,7 +1786,7 @@ export function createHandler(options) {
         // page built from nobody's session and caching it for everybody.
         const rendered = await mod.render({ path: pathname, params: params ?? {} })
         const html = localizeHtmlDocument(rendered, route.path, pathname, params ?? {}, i18n)
-        await persistPrerendered(pathname, html, route.render.revalidate ?? 60)
+        await persistPrerendered(pathname, html, isrWindow(route.render.revalidate))
       } catch (error) {
         console.error(`[ruvyxa] ISR revalidation failed for ${logValue(pathname)}:`, error)
       } finally {

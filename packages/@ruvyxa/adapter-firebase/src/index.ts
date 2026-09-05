@@ -4,6 +4,7 @@ import {
   clientBuildOutput,
   documentCacheOptionsSource,
   isrTemporaryCacheSource,
+  platformDocumentStoreSource,
   DEFAULT_SECURITY_HEADERS,
   IMMUTABLE_CACHE_CONTROL,
   nonPublishableStrategies,
@@ -231,35 +232,7 @@ const runtimePolicy = ${JSON.stringify(runtimePolicy ?? {})};
 const prerenderDir = path.join(import.meta.dirname, 'prerender');
 ${isrTemporaryCacheSource(buildId)}
 
-const readEntry = (htmlPath, revalidate) => {
-  const html = readFileSync(htmlPath, 'utf8');
-  const stale = Date.now() - statSync(htmlPath).mtimeMs >= revalidate * 1000;
-  return { html, stale };
-};
-
-// Named rather than passed inline, so a project that declares \`cache.handler\`
-// can stand its own store in front of these. See \`documentCacheOptionsSource\`
-// in \`@ruvyxa/core\`; the registry supplies \`documentCacheHandler\`.
-const platformReadPrerendered = (pathname, revalidate = 60) => {
-  const relative = prerenderRelativePath(pathname);
-  if (relative === null) return null;
-  for (const directory of [isrCacheDir, prerenderDir]) {
-    try {
-      return readEntry(path.join(directory, relative), revalidate);
-    } catch {
-      // try the deploy-time prerender output after the runtime cache
-    }
-  }
-  return null;
-};
-
-const platformWritePrerendered = (pathname, html) => {
-  const relative = prerenderRelativePath(pathname);
-  if (relative === null) return;
-  const htmlPath = path.join(isrCacheDir, relative);
-  mkdirSync(path.dirname(htmlPath), { recursive: true });
-  writeFileSync(htmlPath, html, 'utf8');
-};
+${platformDocumentStoreSource()}
 
 const handler = createHandler({
   routes: manifest.routes,

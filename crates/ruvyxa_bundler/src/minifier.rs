@@ -210,11 +210,6 @@ fn codegen_options() -> CodegenOptions {
     }
 }
 
-/// Apply only the tree-shaking pass.
-pub fn tree_shake_exports(source: &str) -> String {
-    tree_shake(source)
-}
-
 /// Fold CommonJS `NODE_ENV` branches while resolving a production client
 /// graph. This prevents packages such as React from pulling both development
 /// and production implementations into the same browser bundle.

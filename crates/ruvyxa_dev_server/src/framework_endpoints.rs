@@ -598,6 +598,46 @@ fn rsc_action_rate_limit_key(
     format!("rsc:{client}:{request_path}:{reference}")
 }
 
+/// Charge one call to `rate_key` against the action limiter, and answer the
+/// refusal the caller must return when that client's budget is spent.
+///
+/// `None` admits the call. Both mutation endpoints — `/__ruvyxa/action` and
+/// the server-function `POST` on `/__ruvyxa/rsc` — run this gate at the same
+/// position, after validation and before a worker is asked for anything, and
+/// each used to spell the lock, the poisoned-mutex branch, and the `429` out
+/// by hand. A poisoned limiter refuses with `503` rather than admitting: the
+/// gate exists to protect the worker pool, and a gate that fails open under
+/// the one condition it cannot reason about is no gate.
+fn action_rate_limit_refusal(
+    state: &AppState,
+    rate_key: &str,
+    message: &'static str,
+) -> Option<Response> {
+    let retry_after = {
+        let Ok(mut limiter) = state.action_limiter.lock() else {
+            error!("action rate limiter mutex poisoned; rejecting request");
+            return Some(with_security_headers(
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Service temporarily unavailable",
+                )
+                    .into_response(),
+            ));
+        };
+        (!limiter.allow(rate_key)).then(|| limiter.retry_after_seconds(rate_key))
+    };
+    retry_after.map(|retry_after| {
+        with_security_headers(
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(header::RETRY_AFTER, retry_after.to_string())],
+                message,
+            )
+                .into_response(),
+        )
+    })
+}
+
 /// Resolve `/__ruvyxa/rsc`'s route, or the response explaining why it cannot.
 ///
 /// Every gate the two verbs share lives here rather than in each endpoint, so
@@ -836,28 +876,10 @@ pub(crate) async fn rsc_action_endpoint(
     // and must not consume a client's budget.
     let rate_key =
         rsc_action_rate_limit_key(peer, &headers, &route_match.path, reference, &state.config);
-    let retry_after = {
-        let Ok(mut limiter) = state.action_limiter.lock() else {
-            error!("action rate limiter mutex poisoned; rejecting request");
-            return with_security_headers(
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Service temporarily unavailable",
-                )
-                    .into_response(),
-            );
-        };
-        (!limiter.allow(&rate_key)).then(|| limiter.retry_after_seconds(&rate_key))
-    };
-    if let Some(retry_after) = retry_after {
-        return with_security_headers(
-            (
-                StatusCode::TOO_MANY_REQUESTS,
-                [(header::RETRY_AFTER, retry_after.to_string())],
-                "Server-function rate limit exceeded",
-            )
-                .into_response(),
-        );
+    if let Some(refusal) =
+        action_rate_limit_refusal(&state, &rate_key, "Server-function rate limit exceeded")
+    {
+        return refusal;
     }
 
     let content_type = headers
@@ -1171,28 +1193,10 @@ pub(crate) async fn action_endpoint(
     };
 
     let rate_key = action_rate_limit_key(peer, &headers, &query, &state.config);
-    let retry_after = {
-        let Ok(mut limiter) = state.action_limiter.lock() else {
-            error!("action rate limiter mutex poisoned; rejecting request");
-            return with_security_headers(
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Service temporarily unavailable",
-                )
-                    .into_response(),
-            );
-        };
-        (!limiter.allow(&rate_key)).then(|| limiter.retry_after_seconds(&rate_key))
-    };
-    if let Some(retry_after) = retry_after {
-        return with_security_headers(
-            (
-                StatusCode::TOO_MANY_REQUESTS,
-                [(header::RETRY_AFTER, retry_after.to_string())],
-                "Action rate limit exceeded",
-            )
-                .into_response(),
-        );
+    if let Some(refusal) =
+        action_rate_limit_refusal(&state, &rate_key, "Action rate limit exceeded")
+    {
+        return refusal;
     }
 
     if let Some(provided_reference) = query.id.as_deref() {

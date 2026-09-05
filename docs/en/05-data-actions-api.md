@@ -87,9 +87,11 @@ handler that exports `revalidateTag`, the tag is also handed to that store after
 the next read on any instance misses there too — each instance still serves its own in-memory copy
 until that entry's window expires, which is what `cache.maxEntries: 0` exists to turn off.
 
-`invalidateCache()` does not have that second half: the handler contract has no key-level
-invalidation, so a key cleared here is still in the shared store and the next read on this instance
-reads it back. Label anything you need to invalidate behind a shared store with a tag.
+`invalidateCache()` has the same second half, through the handler's optional `deleteData` export:
+each cleared key and prefix, already namespaced to this deployment, is handed to the store after the
+response. Without one, a key cleared here is still in the shared store and the next read on this
+instance reads it back under a full TTL — an invalidation that looks like it worked. The contract is
+in [`cache.handler`](07-configuration.md).
 
 It clears cached **values**, not pre-rendered HTML. To make the server re-render a stored document,
 use [`revalidatePath()`](#on-demand-revalidation).

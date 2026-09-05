@@ -923,6 +923,40 @@ async function withBuildLock(cacheKey, buildFn) {
   }
 }
 
+/**
+ * A cached plain bundle: the file, its version, and the inputs it was built
+ * from. `null` on a miss.
+ *
+ * `dependencyHash` is carried only when the build recorded one — the SSG
+ * bundle does, the others do not — so a response's shape is exactly what each
+ * caller wrote out by hand before this existed. `rscBundleCacheHit` is the
+ * same question for a server-components bundle, which also carries back the
+ * references its graph reported.
+ */
+function bundleCacheHit(cacheKey) {
+  const cached = bundleCache.get(cacheKey)
+  if (!cached) return null
+  const dependencyHash = bundleFingerprints.get(cacheKey)
+  return {
+    outfile: cached,
+    version: bundleVersions.get(cacheKey),
+    ...(dependencyHash ? { dependencyHash } : {}),
+    ...bundleInputMetadata(cacheKey),
+  }
+}
+
+/**
+ * Answer `hit` from the cache, or run `build` once under the key's lock.
+ *
+ * `hit` is asked twice on a miss — before the lock and again inside it —
+ * because the build that held the lock may have filled the cache while this
+ * caller waited for it. Nine bundle functions wrote the two lookups and the
+ * lock out by hand; the shape is one decision, and this is where it is made.
+ */
+async function cachedBundle(cacheKey, hit, build) {
+  return hit(cacheKey) ?? withBuildLock(cacheKey, async () => hit(cacheKey) ?? build())
+}
+
 // --- Fast mkdir (cached) ---
 async function ensureDir(dir) {
   if (createdDirs.has(dir)) return
@@ -1988,6 +2022,36 @@ function specialEntryParts(specials) {
   return { imports, names }
 }
 
+/**
+ * The imports and identifiers a page entry needs: the page, its wrapper
+ * levels, its special files, and the meta sources of everything on the path.
+ *
+ * `pageImport` is the one line the entries spell differently — the SSR entry
+ * also binds the page module's namespace. The SSR, SSG, and client entries
+ * each assembled this list by hand, so a source added to one was a source the
+ * other two left out until somebody noticed the bundles disagreed.
+ */
+function pageEntryParts(pageImport, pageFile, layouts, specials, nested = {}) {
+  const { templates = [], slots = [], intercepts = [] } = nested
+  const imports = [pageImport]
+  const {
+    imports: wrapperImports,
+    layoutNames,
+    levels,
+  } = wrapperEntryParts(layouts, templates, slots, intercepts)
+  imports.push(...wrapperImports)
+
+  const { imports: specialImports, names } = specialEntryParts(specials)
+  imports.push(...specialImports)
+
+  const { imports: metaImports, metaNames } = metaSourceImports(
+    [...layouts, pageFile].map(toImportPath),
+  )
+  imports.push(...metaImports)
+
+  return { imports, layoutNames, levels, names, metaNames }
+}
+
 // --- Bundle functions return { outfile, version } ---
 // `version` is the content hash of the emitted bundle and is the ESM import
 // token. Identical output keeps the same token, so no new module URL is
@@ -2001,25 +2065,22 @@ async function bundleSsrModule(
   specials = null,
   nested = {},
 ) {
-  const { templates = [], slots = [] } = nested
   const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'ssr')
   await ensureDir(cacheDir)
 
-  const imports = [`import Page, * as PageModule from ${JSON.stringify(toImportPath(pageFile))}`]
   const {
-    imports: wrapperImports,
+    imports,
     layoutNames: wrappers,
     levels,
-  } = wrapperEntryParts(layouts, templates, slots)
-  imports.push(...wrapperImports)
-
-  const { imports: specialImports, names } = specialEntryParts(specials)
-  imports.push(...specialImports)
-
-  const { imports: metaImports, metaNames } = metaSourceImports(
-    [...layouts, pageFile].map(toImportPath),
+    names,
+    metaNames,
+  } = pageEntryParts(
+    `import Page, * as PageModule from ${JSON.stringify(toImportPath(pageFile))}`,
+    pageFile,
+    layouts,
+    specials,
+    nested,
   )
-  imports.push(...metaImports)
 
   const moduleCode = nodeSsrEntrySource({
     imports,
@@ -2038,25 +2099,7 @@ async function bundleSsrModule(
   const outfile = path.join(cacheDir, `${hash}.mjs`)
 
   const cacheKey = `ssr:${pageFile}:${hash}`
-  const cached = bundleCache.get(cacheKey)
-  if (cached) {
-    return {
-      outfile: cached,
-      version: bundleVersions.get(cacheKey),
-      ...bundleInputMetadata(cacheKey),
-    }
-  }
-
-  return withBuildLock(cacheKey, async () => {
-    const rechecked = bundleCache.get(cacheKey)
-    if (rechecked) {
-      return {
-        outfile: rechecked,
-        version: bundleVersions.get(cacheKey),
-        ...bundleInputMetadata(cacheKey),
-      }
-    }
-
+  return cachedBundle(cacheKey, bundleCacheHit, async () => {
     const bundle = await compileBundleWithMetadata({
       projectRoot,
       entrySource: moduleCode,
@@ -2085,25 +2128,7 @@ async function bundleApiModule(projectRoot, routeFile) {
   const outfile = path.join(cacheDir, `${hash}.mjs`)
 
   const cacheKey = `api:${routeFile}:${hash}`
-  const cached = bundleCache.get(cacheKey)
-  if (cached) {
-    return {
-      outfile: cached,
-      version: bundleVersions.get(cacheKey),
-      ...bundleInputMetadata(cacheKey),
-    }
-  }
-
-  return withBuildLock(cacheKey, async () => {
-    const rechecked = bundleCache.get(cacheKey)
-    if (rechecked) {
-      return {
-        outfile: rechecked,
-        version: bundleVersions.get(cacheKey),
-        ...bundleInputMetadata(cacheKey),
-      }
-    }
-
+  return cachedBundle(cacheKey, bundleCacheHit, async () => {
     const bundle = await compileBundleWithMetadata({
       projectRoot,
       entrySource: moduleCode,
@@ -2131,25 +2156,7 @@ async function bundleActionModule(projectRoot, actionFile) {
   const outfile = path.join(cacheDir, `${hash}.mjs`)
 
   const cacheKey = `action:${actionFile}:${hash}`
-  const cached = bundleCache.get(cacheKey)
-  if (cached) {
-    return {
-      outfile: cached,
-      version: bundleVersions.get(cacheKey),
-      ...bundleInputMetadata(cacheKey),
-    }
-  }
-
-  return withBuildLock(cacheKey, async () => {
-    const rechecked = bundleCache.get(cacheKey)
-    if (rechecked) {
-      return {
-        outfile: rechecked,
-        version: bundleVersions.get(cacheKey),
-        ...bundleInputMetadata(cacheKey),
-      }
-    }
-
+  return cachedBundle(cacheKey, bundleCacheHit, async () => {
     const bundle = await compileBundleWithMetadata({
       projectRoot,
       entrySource: moduleCode,
@@ -2178,25 +2185,23 @@ async function bundleClientModule(
   specials = null,
   nested = {},
 ) {
-  const { templates = [], slots = [], intercepts = [] } = nested
+  const { intercepts = [] } = nested
   const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'client')
   await ensureDir(cacheDir)
 
-  const imports = [`import Page from ${JSON.stringify(toImportPath(pageFile))}`]
   const {
-    imports: wrapperImports,
+    imports,
     layoutNames: wrappers,
     levels,
-  } = wrapperEntryParts(layouts, templates, slots, intercepts)
-  imports.push(...wrapperImports)
-
-  const { imports: specialImports, names } = specialEntryParts(specials)
-  imports.push(...specialImports)
-
-  const { imports: metaImports, metaNames } = metaSourceImports(
-    [...layouts, pageFile].map(toImportPath),
+    names,
+    metaNames,
+  } = pageEntryParts(
+    `import Page from ${JSON.stringify(toImportPath(pageFile))}`,
+    pageFile,
+    layouts,
+    specials,
+    nested,
   )
-  imports.push(...metaImports)
 
   const moduleCode = clientEntrySource({
     imports,
@@ -2215,25 +2220,7 @@ async function bundleClientModule(
   const outfile = path.join(cacheDir, `${hash}.js`)
 
   const cacheKey = `client:${pageFile}:${hash}`
-  const cached = bundleCache.get(cacheKey)
-  if (cached) {
-    return {
-      outfile: cached,
-      version: bundleVersions.get(cacheKey),
-      ...bundleInputMetadata(cacheKey),
-    }
-  }
-
-  return withBuildLock(cacheKey, async () => {
-    const rechecked = bundleCache.get(cacheKey)
-    if (rechecked) {
-      return {
-        outfile: rechecked,
-        version: bundleVersions.get(cacheKey),
-        ...bundleInputMetadata(cacheKey),
-      }
-    }
-
+  return cachedBundle(cacheKey, bundleCacheHit, async () => {
     const bundle = await compileBundleWithMetadata({
       projectRoot,
       entrySource: moduleCode,
@@ -2336,13 +2323,7 @@ async function bundleRscServerModule(
   const outfile = path.join(cacheDir, `server.${hash}.mjs`)
   const cacheKey = `rsc:server:${pageFile}:${hash}`
 
-  const hit = rscBundleCacheHit(cacheKey)
-  if (hit) return hit
-
-  return withBuildLock(cacheKey, async () => {
-    const rechecked = rscBundleCacheHit(cacheKey)
-    if (rechecked) return rechecked
-
+  return cachedBundle(cacheKey, rscBundleCacheHit, async () => {
     const bundle = await compileBundleWithMetadata({
       projectRoot,
       entrySource: moduleCode,
@@ -2431,13 +2412,7 @@ async function bundleRscSsrRegistry(projectRoot, appDir, references) {
   const outfile = path.join(cacheDir, `registry.${hash}.mjs`)
   const cacheKey = `rsc:registry:${hash}`
 
-  const hit = rscBundleCacheHit(cacheKey)
-  if (hit) return hit
-
-  return withBuildLock(cacheKey, async () => {
-    const rechecked = rscBundleCacheHit(cacheKey)
-    if (rechecked) return rechecked
-
+  return cachedBundle(cacheKey, rscBundleCacheHit, async () => {
     const bundle = await compileBundleWithMetadata({
       projectRoot,
       entrySource: moduleCode,
@@ -2541,13 +2516,7 @@ async function bundleRscClientModule(
   const outfile = path.join(cacheDir, `rsc.${hash}.js`)
   const cacheKey = `rsc:client:${hash}`
 
-  const hit = rscBundleCacheHit(cacheKey)
-  if (hit) return hit
-
-  return withBuildLock(cacheKey, async () => {
-    const rechecked = rscBundleCacheHit(cacheKey)
-    if (rechecked) return rechecked
-
+  return cachedBundle(cacheKey, rscBundleCacheHit, async () => {
     const bundle = await compileBundleWithMetadata({
       projectRoot,
       entrySource: moduleCode,
@@ -2594,13 +2563,7 @@ async function bundleRscActionModule(projectRoot, appDir, references) {
   const outfile = path.join(cacheDir, `action.${hash}.mjs`)
   const cacheKey = `rsc:action:${hash}`
 
-  const hit = rscBundleCacheHit(cacheKey)
-  if (hit) return hit
-
-  return withBuildLock(cacheKey, async () => {
-    const rechecked = rscBundleCacheHit(cacheKey)
-    if (rechecked) return rechecked
-
+  return cachedBundle(cacheKey, rscBundleCacheHit, async () => {
     const bundle = await compileBundleWithMetadata({
       projectRoot,
       entrySource: moduleCode,
@@ -2701,6 +2664,39 @@ async function runPostedFormAction({ projectRoot, appDir, request, server, regis
 }
 
 /**
+ * Compile the `react-server` graph one route request renders through.
+ *
+ * The prologue every server-components handler shares: the project's React and
+ * server-components dependencies checked, instrumentation loaded, the route's
+ * directory levels collected, and the server graph built from them. Three
+ * handlers spelled it out by hand, and the list of steps is the kind that grows
+ * — `ensureInstrumentation` is the newest — so it is one function.
+ */
+async function prepareRscRoute({ projectRoot, appDir, pageFile, requestPath, routePath }) {
+  const resolvedRoot = path.resolve(projectRoot || process.cwd())
+  ensureReactDeps(resolvedRoot)
+  ensureServerComponentDeps(resolvedRoot)
+  await ensureInstrumentation(resolvedRoot)
+
+  const routeDir = path.dirname(pageFile)
+  const layouts = collectLayouts(appDir, routeDir)
+  const templates = collectTemplates(appDir, routeDir)
+  const slots = collectSlots(appDir, routeDir)
+  const specials = collectSpecials(appDir, routeDir)
+
+  const server = await bundleRscServerModule(
+    resolvedRoot,
+    appDir,
+    pageFile,
+    layouts,
+    routePath || requestPath,
+    specials,
+    { templates, slots },
+  )
+  return { resolvedRoot, server }
+}
+
+/**
  * Run one server function and encode what it returned.
  *
  * The reply is a Flight payload, not JSON, so the function may return an
@@ -2714,35 +2710,8 @@ async function runPostedFormAction({ projectRoot, appDir, request, server, regis
  * in the application would be a second index to keep current.
  */
 async function handleRscAction(request) {
-  const {
-    projectRoot,
-    appDir,
-    pageFile,
-    requestPath,
-    requestTarget,
-    params,
-    routePath,
-    reference,
-  } = request
-  const resolvedRoot = path.resolve(projectRoot || process.cwd())
-  ensureReactDeps(resolvedRoot)
-  ensureServerComponentDeps(resolvedRoot)
-  await ensureInstrumentation(resolvedRoot)
-
-  const layouts = collectLayouts(appDir, path.dirname(pageFile))
-  const templates = collectTemplates(appDir, path.dirname(pageFile))
-  const slots = collectSlots(appDir, path.dirname(pageFile))
-  const specials = collectSpecials(appDir, path.dirname(pageFile))
-
-  const server = await bundleRscServerModule(
-    resolvedRoot,
-    appDir,
-    pageFile,
-    layouts,
-    routePath || requestPath,
-    specials,
-    { templates, slots },
-  )
+  const { appDir, requestPath, requestTarget, params, routePath, reference } = request
+  const { resolvedRoot, server } = await prepareRscRoute(request)
   // Compiled for its reference list, not for its output: this is the graph that
   // sees the actions a `'use client'` component imports.
   const registry = await bundleRscSsrRegistry(resolvedRoot, appDir, server.clientReferences)
@@ -2816,26 +2785,8 @@ function rscBundleCacheHit(cacheKey) {
  * asks for on the ordinary path.
  */
 async function handleServerComponents(request, { fresh = false, html = true } = {}) {
-  const { projectRoot, appDir, pageFile, requestPath, requestTarget, params, routePath } = request
-  const resolvedRoot = path.resolve(projectRoot || process.cwd())
-  ensureReactDeps(resolvedRoot)
-  ensureServerComponentDeps(resolvedRoot)
-  await ensureInstrumentation(resolvedRoot)
-
-  const layouts = collectLayouts(appDir, path.dirname(pageFile))
-  const templates = collectTemplates(appDir, path.dirname(pageFile))
-  const slots = collectSlots(appDir, path.dirname(pageFile))
-  const specials = collectSpecials(appDir, path.dirname(pageFile))
-
-  const server = await bundleRscServerModule(
-    resolvedRoot,
-    appDir,
-    pageFile,
-    layouts,
-    routePath || requestPath,
-    specials,
-    { templates, slots },
-  )
+  const { appDir, requestPath, requestTarget, params, routePath } = request
+  const { resolvedRoot, server } = await prepareRscRoute(request)
   // The registry is only needed by the SSR pass: it is what turns a reference
   // id into a module whose markup can be rendered. A payload-only render never
   // resolves one, so a soft navigation does not pay to compile it.
@@ -2911,26 +2862,8 @@ async function handleServerComponents(request, { fresh = false, html = true } = 
  * document at the point the stream ends.
  */
 async function handleServerComponentsDocument(request) {
-  const { projectRoot, appDir, pageFile, requestPath, requestTarget, params, routePath } = request
-  const resolvedRoot = path.resolve(projectRoot || process.cwd())
-  ensureReactDeps(resolvedRoot)
-  ensureServerComponentDeps(resolvedRoot)
-  await ensureInstrumentation(resolvedRoot)
-
-  const layouts = collectLayouts(appDir, path.dirname(pageFile))
-  const templates = collectTemplates(appDir, path.dirname(pageFile))
-  const slots = collectSlots(appDir, path.dirname(pageFile))
-  const specials = collectSpecials(appDir, path.dirname(pageFile))
-
-  const server = await bundleRscServerModule(
-    resolvedRoot,
-    appDir,
-    pageFile,
-    layouts,
-    routePath || requestPath,
-    specials,
-    { templates, slots },
-  )
+  const { appDir, requestPath, requestTarget, params, routePath } = request
+  const { resolvedRoot, server } = await prepareRscRoute(request)
   const registry = await bundleRscSsrRegistry(resolvedRoot, appDir, server.clientReferences)
   await importModule(registry.outfile, registry.version)
   const serverModule = await importModule(server.outfile, server.version)
@@ -3163,25 +3096,22 @@ async function bundleSsgModule(
   specials = null,
   nested = {},
 ) {
-  const { templates = [], slots = [] } = nested
   const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'ssg')
   await ensureDir(cacheDir)
 
-  const imports = [`import Page from ${JSON.stringify(toImportPath(pageFile))}`]
   const {
-    imports: wrapperImports,
+    imports,
     layoutNames: wrappers,
     levels,
-  } = wrapperEntryParts(layouts, templates, slots)
-  imports.push(...wrapperImports)
-
-  const { imports: specialImports, names } = specialEntryParts(specials)
-  imports.push(...specialImports)
-
-  const { imports: metaImports, metaNames } = metaSourceImports(
-    [...layouts, pageFile].map(toImportPath),
+    names,
+    metaNames,
+  } = pageEntryParts(
+    `import Page from ${JSON.stringify(toImportPath(pageFile))}`,
+    pageFile,
+    layouts,
+    specials,
+    nested,
   )
-  imports.push(...metaImports)
 
   const moduleCode = nodeSsrEntrySource({
     imports,
@@ -3206,27 +3136,7 @@ async function bundleSsgModule(
   const outfile = path.join(cacheDir, `${hash}.mjs`)
 
   const cacheKey = `ssg:${pageFile}:${hash}`
-  const cached = bundleCache.get(cacheKey)
-  if (cached) {
-    return {
-      outfile: cached,
-      version: bundleVersions.get(cacheKey),
-      dependencyHash: bundleFingerprints.get(cacheKey),
-      ...bundleInputMetadata(cacheKey),
-    }
-  }
-
-  return withBuildLock(cacheKey, async () => {
-    const rechecked = bundleCache.get(cacheKey)
-    if (rechecked) {
-      return {
-        outfile: rechecked,
-        version: bundleVersions.get(cacheKey),
-        dependencyHash: bundleFingerprints.get(cacheKey),
-        ...bundleInputMetadata(cacheKey),
-      }
-    }
-
+  return cachedBundle(cacheKey, bundleCacheHit, async () => {
     const bundle = await compileBundleWithMetadata({
       projectRoot,
       entrySource: moduleCode,

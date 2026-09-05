@@ -6,6 +6,7 @@ import {
   clientBuildOutput,
   documentCacheOptionsSource,
   isrTemporaryCacheSource,
+  platformDocumentStoreSource,
   DEFAULT_SECURITY_HEADERS,
   IMMUTABLE_CACHE_CONTROL,
   nonPublishableStrategies,
@@ -124,40 +125,7 @@ async function purgeDurableCache(pathname) {
   }
 }
 
-const readEntry = (htmlPath, revalidate) => {
-  const html = readFileSync(htmlPath, 'utf8');
-  const stale = Date.now() - statSync(htmlPath).mtimeMs >= revalidate * 1000;
-  return { html, stale };
-};
-
-// Named rather than passed inline, so a project that declares \`cache.handler\`
-// can stand its own store in front of these. See \`documentCacheOptionsSource\`
-// in \`@ruvyxa/core\`; the registry supplies \`documentCacheHandler\`.
-const platformReadPrerendered = (pathname, revalidate = 60) => {
-  // prerenderRelativePath rejects any request path that cannot be mapped to a
-  // location inside the cache directories, so reads can never escape them.
-  const relative = prerenderRelativePath(pathname);
-  if (relative === null) return null;
-  try {
-    return readEntry(path.join(isrCacheDir, relative), revalidate);
-  } catch {
-    // fall through to the bundled prerender output
-  }
-  try {
-    return readEntry(path.join(prerenderDir, relative), revalidate);
-  } catch {
-    return null;
-  }
-};
-
-const platformWritePrerendered = (pathname, html, revalidate, forced) => {
-  const relative = prerenderRelativePath(pathname);
-  if (relative === null) return;
-  const htmlPath = path.join(isrCacheDir, relative);
-  mkdirSync(path.dirname(htmlPath), { recursive: true });
-  writeFileSync(htmlPath, html, 'utf8');
-  if (forced === true) return purgeDurableCache(pathname);
-};
+${platformDocumentStoreSource({ onForcedWrite: 'purgeDurableCache' })}
 
 const handler = createHandler({
   routes: manifest.routes,

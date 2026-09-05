@@ -85,9 +85,11 @@ handler มันทำงานกับ cache ของ process ที่เ�
 instance ยังตอบจากสำเนาใน memory ของตัวเองจนกว่า entry นั้นจะหมดอายุ ซึ่งเป็นเหตุผลที่มี
 `cache.maxEntries: 0`
 
-`invalidateCache()` ไม่มีครึ่งหลังนี้ เพราะ contract ของ handler ไม่มีการ invalidate ระดับ key
-คีย์ที่ล้างตรงนี้จึงยังอยู่ใน shared store และการอ่านครั้งถัดไปบน instance นี้จะอ่านมันกลับมา
-สิ่งที่ต้อง invalidate ผ่าน shared store ให้ติด tag ไว้
+`invalidateCache()` มีครึ่งหลังแบบเดียวกัน ผ่าน export `deleteData` (ไม่บังคับ) ของ handler: ทุก key
+และ prefix ที่ล้าง ซึ่ง namespace ด้วย build id ของ deployment นี้แล้ว จะถูกส่งให้ store หลังตอบ
+response ถ้าไม่มี export นี้ คีย์ที่ล้างตรงนี้จะยังอยู่ใน shared store และการอ่านครั้งถัดไปบน
+instance นี้จะอ่านมันกลับมาพร้อม TTL เต็ม — การ invalidate ที่ดูเหมือนสำเร็จ ดู contract ได้ที่
+[`cache.handler`](07-configuration.md)
 
 มันล้าง **ค่า** ที่ cache ไว้ ไม่ใช่ HTML ที่ pre-render แล้ว หากต้องการให้ server render
 เอกสารที่เก็บไว้ใหม่ ให้ใช้ [`revalidatePath()`](#revalidate-ตามคำสั่ง)

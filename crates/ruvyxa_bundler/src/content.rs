@@ -104,20 +104,19 @@ fn content_cache_key(extension: &str, source: &str, provider_import: Option<&str
     hasher.finalize().to_hex().to_string()
 }
 
-/// Find the nearest conventional MDX component provider for a content route.
+/// Find the nearest conventional MDX component provider for a content route,
+/// without walking above `project_root`.
 ///
 /// Walking ancestors lets one provider cover a section while a closer file can
 /// override it. The same helper is used by route validation so this implicit
 /// compiler import remains visible to client/server boundary checks.
-pub fn resolve_mdx_components_file(path: &Path) -> Option<PathBuf> {
-    resolve_mdx_components_file_with_root(path, None)
-}
-
-/// Find the nearest provider without walking above `project_root`.
 pub fn resolve_mdx_components_file_in_root(path: &Path, project_root: &Path) -> Option<PathBuf> {
     resolve_mdx_components_file_with_root(path, Some(project_root))
 }
 
+/// The walk behind [`resolve_mdx_components_file_in_root`]; `None` for the
+/// root walks to the filesystem root, which is what [`compile_content_module`]
+/// does for a file compiled outside any project.
 fn resolve_mdx_components_file_with_root(
     path: &Path,
     project_root: Option<&Path>,
@@ -1072,7 +1071,7 @@ mod tests {
         let page = docs.join("page.mdx");
         fs::write(&page, "# Hello").unwrap();
 
-        let provider = resolve_mdx_components_file(&page).unwrap();
+        let provider = resolve_mdx_components_file_with_root(&page, None).unwrap();
         assert_eq!(provider, app.join("docs/mdx-components.js"));
         let module = compile_content_module("# Hello", &page).unwrap();
         assert!(module.contains(

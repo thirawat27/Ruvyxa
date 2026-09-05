@@ -17,7 +17,7 @@
 //! [`Gradient::paint`] walks it once from left to right — for a wordmark, a
 //! rule, a bar, anything whose ends mean "start" and "end".
 //!
-//! [`Gradient::paint_cycled`] wraps the last stop back around to the first and
+//! [`Gradient::paint_cycled_with`] wraps the last stop back around to the first and
 //! offsets the whole ramp by a phase, so repainting the same text with a
 //! rising phase makes light appear to travel through it. That is the shimmer on
 //! the spinner and on the runner's trail, and it is why those two look alive
@@ -138,10 +138,6 @@ impl Gradient {
 
     /// Walks the ramp cyclically, offset by `phase` turns. Repainting the same
     /// text with a rising phase moves the highlight along it.
-    pub fn paint_cycled(&self, text: impl AsRef<str>, phase: f64) -> String {
-        self.paint_cycled_with(color_depth(), text, phase)
-    }
-
     pub fn paint_cycled_with(
         &self,
         depth: ColorDepth,

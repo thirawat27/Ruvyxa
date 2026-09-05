@@ -1,5 +1,168 @@
 # Changelog
 
+## v1.1.5 (2026-09-05)
+
+### `cache.handler` takes effect under `ruvyxa start` and `ruvyxa preview`
+
+The setting reached every deployed platform and neither host this repository serves. A deployed
+build compiles the handler into the route registry every adapter wrapper imports; `start` and
+`preview` go through no wrapper, served documents from `.ruvyxa/prerender`, and gave `cache()`
+nothing at all — so an application running several `ruvyxa start` instances behind one load balancer
+declared a shared store, was told by the build that it had one, and got per-instance caching.
+
+- **The handler module is loaded into the render workers.** `resolve_data_cache_handler` checks once
+  at startup that `cache.handler` names a file under the project root and refuses with `RUV2200`
+  otherwise, rather than failing once per worker after the server reported itself up.
+  `RUVYXA_DATA_CACHE_HANDLER` carries the absolute path; `loadDataCacheHandler` in the worker
+  installs `readData`/`writeData` for `cache()` and keeps `revalidateTag`/`deleteData` for the
+  request-settling path.
+- **Every key carries the build id.** `data_cache_key_prefix` reads `deploy.buildId` from the build
+  manifest and refuses to start with `RUV2208` when it is absent: an unprefixed key in a shared
+  store is the collision the prefix exists to prevent, and two deployments pointed at one managed
+  store would otherwise read each other's `cache('user:1')`.
+- **`ruvyxa dev` says it is skipping the handler.** A development server has no build to namespace
+  keys with, and reading and writing production cache entries from a working copy is not a smaller
+  version of the feature. `report_inert_cache_handler` prints the note once and `dev` keeps its
+  per-process cache.
+- **Stored documents cross the worker protocol.** Two new requests, `documentRead` and
+  `documentWrite`, let the Axum host read and write ISR, SSG, CSR, and PPR documents through the
+  project's store, which is a JavaScript module only a worker can call. Both are idempotent, so a
+  worker that died mid-flight can be asked again.
+
+### `cache.maxEntries` and `cache.maxBytes` reach the long-lived worker pool
+
+Both bounds were read by the deployed build's registry alone. `ruvyxa dev` and `ruvyxa start` run a
+long-lived pool, which is the one place an unbounded in-memory tier has time to grow, so the bound
+was missing exactly where it was load-bearing and the build reported nothing. `runtime_env` now
+hands `RUVYXA_DATA_CACHE_MAX_ENTRIES` and `RUVYXA_DATA_CACHE_MAX_BYTES` to every worker, only when
+the project configured a value — a default written down twice is a default that drifts — and
+`installDataCacheBounds` reads them with a parser that keeps `0`, because zero is the value that
+carries the decision.
+
+The config renderer had been dropping all three keys. `CONFIG_KEY_SCHEMA` accepted `handler`,
+`maxEntries`, and `maxBytes` and `RuvyxaConfig` declared them, so a project setting one passed every
+check — and `cacheValue()` decides what actually leaves the renderer, and it named none of them.
+`config-renderer-surface.test.mjs` now sweeps every key the schema declares against what the
+renderer emits, so a key accepted in one place and dropped in the other fails by name.
+
+### Stored documents mean the same thing on every host
+
+A `cache.handler` `read()` answer is interpreted in three places that cannot share code — the render
+worker, the deployed handler, and the Axum host — and they had drifted twice. The worker called a
+bare string fresh while the deployed handler called it stale. The Axum host treated a document the
+store reported stale as a miss, and a miss falls through to the build's own directory: the document
+served was then the one the build produced, which is _older_ than the stale one the store had just
+answered with, and it was cached under a fresh timestamp so no refresh ran for a whole window.
+
+`StoredDocument` now carries three answers rather than two — missing, held and fresh, held and stale
+— and a held document is served whatever its freshness, because the build's copy is never newer. An
+ISR route refreshes a stale one behind the response, exactly as `serveIncremental` does on a
+deployed build, and the refresh is written back through the handler so every other instance sees it;
+an ordinary revalidation used to end at this process's memory. `revalidatePath()` writes through the
+handler first and awaited, then replaces the local artifact.
+`tests/fixtures/stored-document-conformance.json` holds all three implementations to one answer per
+strategy.
+
+### PPR is a stored shell on the deployed host too
+
+The deployed handler rendered a PPR page in full on every request while still _writing_ the forced
+render to the store — a document it then never read — so a deployment paying for a shared store got
+per-request renders, and the Axum host, which serves the stored shell, disagreed with it about what
+a PPR URL answers. PPR now goes through `servePrerendered` with SSG and CSR: the build wrote the
+shell, its dynamic slots fill in client-side on hydration, and `revalidatePath()` replaces it
+through the same store. Its response carries `no-store` and no validator on every host, because a
+validator on a document a browser may not reuse is a `304` the native host would never answer.
+`examples/deploy-smoke` gained a `/ppr` route and the runtime smoke asserts a second request answers
+the same build-time stamp.
+
+### The ISR window handed to `cache.handler` no longer differs by host
+
+The deployed handler always applied the sixty-second default before a route's window crossed to
+`readPrerendered` and `writePrerendered`; the Axum host handed the route's absent value through. A
+store that computes `stale` from it — as every platform's own does — gets `NaN` from `undefined` and
+never reports a document stale, so one project's ISR page expired after sixty seconds on every
+platform and never under `ruvyxa start`. `isr_window` in `ruvyxa_graph::cache_policy` and
+`isrWindow` in the serverless handler are the two implementations, replacing three inline `?? 60`,
+and the fixture above holds both.
+
+### `invalidateCache()` reaches the shared store
+
+It cleared this process's entries and stopped, and was undone by its own next read: the key was gone
+from memory, the shared store still held it, and a miss read it back and re-committed it under a
+full TTL — an invalidation that looked like it worked. A handler may now export `deleteData(keys)`;
+each entry carries an exact key and a prefix, already namespaced to the deployment, because
+`invalidateCache('products')` clears `products` and everything under `products:` and not
+`productsXYZ`, which one string cannot say. At most 64 distinct invalidations per request, the same
+bound `revalidatePath()` and `revalidateTag()` carry.
+
+The deployed server-action endpoint had drained `revalidatePath()` alone. `runAction` handed back
+the path list and kept the context that held the tags and keys, so a mutation that answered `200`
+left every instance serving what the caller believed it had invalidated. It hands back the context
+now and one `settleRequestCaches` settles all three, on both hosts.
+
+### The in-memory cache no longer loses a value to its own housekeeping
+
+- **A sweep or an eviction is not an invalidation.** Both went through `delete`, which also cancels
+  the write registered under the key — the mechanism `invalidate` and `invalidateTag` use to stop a
+  producer that started before the invalidation from committing data from before it. A producer
+  running while its fully-expired predecessor was swept therefore lost its commit, and with it the
+  shared-store write gated on the commit, so the value reached one caller and the next request
+  produced it again. Memory reclamation goes through `#forget` now.
+- **`revalidateTag()` cancels the writes in flight, not only the entries stored.** A cold key has no
+  entry to match, so the ordinary mutate-then-revalidate sequence racing a first reader committed
+  the pre-mutation value under a full TTL. Pending writes record their tags when the flight starts.
+- **A cold-miss commit gates the shared write.** A rejected commit means the value was invalidated
+  while it was being produced; publishing it would hand every other instance the answer this one
+  refused to keep.
+- **A shared entry with no `value`, or one that is not serializable, is a miss.** It deserialized to
+  `undefined`, a legitimate-looking answer no producer can return, and was served under a full TTL
+  while the producer stopped being called.
+- **`pruneCache()` is exported.** The sweep the module runs every sixty seconds, on demand, because
+  a timer is not a seam and what the sweep does to a key being written was a question nothing could
+  ask.
+
+### A `#` import respects `tsconfig` `paths`, in both module graphs
+
+The Rust resolver read a `#` specifier against the importer's own `package.json` alone, on the claim
+that `paths` never spells one; it may, `tsc` honours it, and `compiler.mjs` resolves `paths` ahead
+of every specifier shape. A project that aliased one had its dev server and prerender workers take
+the alias while the client build answered nothing.
+`tests/fixtures/module-resolution-conformance.json` states the order.
+
+### One emitted document store for every function template
+
+Netlify, Vercel, Firebase, and the standalone server each carried their own copy of the platform ISR
+store — a reader over the runtime cache directory and the build's prerender output, and a writer
+into the first — and the copies had drifted in shape before they drifted in behaviour: two spelled
+the two-directory read as a pair of `try` blocks and two as a loop, and only two of the four writers
+took the `forced` flag at all. `platformDocumentStoreSource` in `@ruvyxa/core` emits it once; an
+adapter that must reach its platform's cache on a forced write names the purge as `onForcedWrite`,
+and the contract test asserts both halves rather than a parameter list.
+
+### Smaller repairs
+
+- The two Axum mutation endpoints share one rate-limit gate, `action_rate_limit_refusal`, rather
+  than two hand-written copies of the lock, the poisoned-mutex branch, and the `429`.
+- `dev_server_config` and `production_server_config` build the host-independent half of
+  `ServerConfig` through one `apply_project_settings`; the list was written twice, and a setting
+  added to one host was a setting the other silently left at its default.
+- The render worker answers a bundle from its cache through one `cachedBundle` rather than nine
+  hand-written copies of the lookup, the lock, and the re-check; the SSR, SSG, and client entries
+  assemble their imports through one `pageEntryParts`; and the three server-components handlers
+  share one `prepareRscRoute`.
+- `compiler.mjs` passes the module context to a dependency by spreading it, naming only what
+  changes, instead of restating twenty-five fields that every new compile option had to be added to
+  twice.
+- Removed production-dead code the compiler could not see: `tree_shake_exports`,
+  `SourceMapBuilder::add_identity_mappings` and `add_name`, the `link_parallel` wrapper,
+  `Gradient::paint_cycled`, the root-less `resolve_mdx_components_file`, and
+  `ResolveGraphCache::invalidate_paths`, which its own doc comment said no production caller needed.
+  Accessors only tests read are `#[cfg(test)]` now.
+- The data-actions guide said `invalidateCache()` had no shared-store half, one section after the
+  configuration guide documented `deleteData`; both languages say the same thing now.
+- `fast-uri` is floored at its first patched release. It arrives under `webpack`'s `schema-utils`, a
+  peer this repository never loads, and the floor is the range `ajv` already declared.
+
 ## v1.1.4 (2026-08-31)
 
 ### The shared cache no longer trades correctness or memory for latency

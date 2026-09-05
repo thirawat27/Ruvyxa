@@ -29,7 +29,7 @@
 //!
 //! ## Performance: Parallel Linking
 //!
-//! The `link_parallel` function computes topological layers and rewrites
+//! `link_parallel_with_dynamic_imports` computes topological layers and rewrites
 //! modules within each layer concurrently using rayon. Since import rewrites
 //! only reference the deterministic `module_id` (blake3 hash of the dep's
 //! path), each module's rewrite is independent and embarrassingly parallel.
@@ -402,7 +402,8 @@ fn assemble_linked(
     }
 }
 
-/// Link modules using parallel import/export rewriting.
+/// Link modules using parallel import/export rewriting, preserving selected
+/// dynamic imports as relative ESM chunk loads.
 ///
 /// Computes topological layers from the dependency graph. Modules in the same
 /// layer have no dependencies on each other (only on earlier layers), so their
@@ -410,11 +411,6 @@ fn assemble_linked(
 ///
 /// For small graphs (<8 modules), falls back to sequential linking to avoid
 /// rayon scheduling overhead. Circular dependencies are detected before linking.
-pub fn link_parallel(modules: &[CompiledModule], input: &BundleInput) -> Result<String> {
-    link_parallel_with_dynamic_imports(modules, input, &BTreeMap::new())
-}
-
-/// Link modules while preserving selected dynamic imports as relative ESM chunk loads.
 ///
 /// The map is internal to chunk planning: keys are resolved module paths and values are emitted
 /// chunk filenames. Imports not present in the map keep the existing inline namespace behavior.
@@ -4003,7 +3999,8 @@ export default function Page() {}",
         };
         let module = fixture(path, "module.exports = { answer: 42 };", Vec::new());
 
-        let output = link_parallel(&[module], &input).unwrap();
+        let output =
+            link_parallel_with_dynamic_imports(&[module], &input, &BTreeMap::new()).unwrap();
 
         assert!(output.contains("var module = { exports: __exports };"));
         assert!(output.contains("var exports = module.exports;"));

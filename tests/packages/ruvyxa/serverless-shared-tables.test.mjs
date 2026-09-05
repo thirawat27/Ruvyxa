@@ -23,6 +23,9 @@ const handlerPath = path.join(workspaceRoot, 'packages/ruvyxa/runtime/serverless
 const { DEFAULT_SECURITY_HEADERS, isStaticAssetPath, createHandler } = await import(
   `file://${handlerPath.replaceAll('\\', '/')}`
 )
+const { platformDocumentStoreSource } = await import(
+  `file://${path.join(workspaceRoot, 'packages/@ruvyxa/core/dist/index.js').replaceAll('\\', '/')}`
+)
 
 const handlerSource = readFileSync(handlerPath, 'utf8')
 
@@ -338,10 +341,14 @@ describe('serverless handler dynamic image bounds', () => {
 describe('adapter on-demand revalidation', () => {
   const contract = fixture('adapter-contract.json')
 
-  /** The adapters whose claim rests on a purge call rather than on their store. */
+  /**
+   * The adapters whose claim rests on a purge call rather than on their store:
+   * the marker that proves the purge is still written, and the name of the
+   * function the adapter hands the shared store as its forced-write hook.
+   */
   const PURGES = new Map([
-    ['vercel', /'x-prerender-revalidate'/],
-    ['netlify', /purgeCache\(\{ tags:/],
+    ['vercel', { marker: /'x-prerender-revalidate'/, hook: 'revalidateOnVercel' }],
+    ['netlify', { marker: /purgeCache\(\{ tags:/, hook: 'purgeDurableCache' }],
   ])
 
   it('is declared for every adapter', () => {
@@ -355,7 +362,7 @@ describe('adapter on-demand revalidation', () => {
   })
 
   it('is earned by the adapters that implement a purge', () => {
-    for (const [name, marker] of PURGES) {
+    for (const [name, { marker, hook }] of PURGES) {
       const adapter = contract.adapters.find((entry) => entry.name === name)
       assert.equal(adapter?.onDemandRevalidation, true, `${name} should claim the capability`)
       const source = adapterSource(name)
@@ -363,16 +370,26 @@ describe('adapter on-demand revalidation', () => {
       // A purge that is never reached is the same as no purge: only a forced
       // write may trigger one, and the handler has to be told which it is.
       //
-      // The binding is deliberately not pinned. The writer used to be passed to
-      // `createHandler` inline and is now a named `platformWritePrerendered`,
-      // so a project's own `cache.handler` can stand in front of it — a change
-      // to where the function is bound, not to what it is handed. Matching the
-      // parameter list rather than the spelling is what keeps this assertion
-      // about the claim it exists for.
+      // The writer is shared text now — `platformDocumentStoreSource` in
+      // `@ruvyxa/core` emits it for every function template — so what the
+      // adapter owns is the name of its purge, handed over as the forced-write
+      // hook. Both halves are held: the adapter names the hook, and the shared
+      // writer takes the `forced` flag and calls the hook on it alone.
       assert.match(
         source,
-        /[Ww]ritePrerendered\s*[:=]\s*\(pathname, html, revalidate, forced\)/,
-        `adapter-${name} must receive the forced flag to know when to purge`,
+        new RegExp(`platformDocumentStoreSource\\(\\{ onForcedWrite: '${hook}' \\}\\)`),
+        `adapter-${name} must hand its purge to the shared store as the forced-write hook`,
+      )
+      const store = platformDocumentStoreSource({ onForcedWrite: hook })
+      assert.match(
+        store,
+        /platformWritePrerendered = \(pathname, html, revalidate, forced\)/,
+        'the shared writer must receive the forced flag to know when to purge',
+      )
+      assert.match(
+        store,
+        new RegExp(`if \\(forced === true\\) return ${hook}\\(pathname\\);`),
+        'the shared writer must reach the purge on a forced write and on nothing else',
       )
     }
   })
@@ -386,10 +403,15 @@ describe('adapter on-demand revalidation', () => {
       assert.equal(adapter?.onDemandRevalidation, false, `${name} cannot drop a cached document`)
       assert.doesNotMatch(
         adapterSource(name),
-        /purgeCache|x-prerender-revalidate/,
+        /purgeCache|x-prerender-revalidate|onForcedWrite/,
         `adapter-${name} appears to purge now; the contract has to say so`,
       )
     }
+    // A store with no hook writes and stops: the flag is accepted, because the
+    // handler always passes it, and nothing is called on it.
+    const store = platformDocumentStoreSource()
+    assert.match(store, /platformWritePrerendered = \(pathname, html, revalidate, forced\)/)
+    assert.doesNotMatch(store, /forced === true/)
   })
 })
 

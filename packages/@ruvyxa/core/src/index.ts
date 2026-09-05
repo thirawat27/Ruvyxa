@@ -71,6 +71,7 @@ export {
   documentCacheOptionsSource,
   isrTemporaryCacheDirSource,
   isrTemporaryCacheSource,
+  platformDocumentStoreSource,
   IMMUTABLE_CACHE_CONTROL,
   assertSafeOutDirForCommand,
   projectRelativeOutDir,

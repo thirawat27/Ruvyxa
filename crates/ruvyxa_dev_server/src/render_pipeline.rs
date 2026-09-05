@@ -17,7 +17,7 @@ use ruvyxa_bundler::JsxRuntime;
 use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError};
 use ruvyxa_graph::{
     DiscoverOptions, RenderStrategy, RouteEntry, RouteKind, RouteManifest, RouteParams,
-    discover_routes, document_cache_control, document_has_validator,
+    discover_routes, document_cache_control, document_has_validator, isr_window,
 };
 use serde::Deserialize;
 use tokio::sync::broadcast;
@@ -1007,7 +1007,7 @@ async fn render_page_ssg_fresh(
     );
 
     let document = state.render_cache.put(cache_key.to_string(), html).await;
-    settle_forced_revalidation(state, request_path, forced, &document.html).await;
+    settle_forced_revalidation(state, request_path, forced, &document.html, None).await;
     Ok(document)
 }
 
@@ -1080,7 +1080,7 @@ async fn render_page_isr_fresh(
             request_path,
             cache_key,
             RenderStrategy::Isr,
-            route.render.revalidate,
+            Some(isr_window(route.render.revalidate)),
         )
         .await
     {
@@ -1098,7 +1098,14 @@ async fn render_page_isr_fresh(
     // No cached version — render synchronously (blocking fallback)
     let html = render_isr_background(state, route, request_path, params, styles).await?;
     let document = state.render_cache.put(cache_key.to_string(), html).await;
-    settle_forced_revalidation(state, request_path, forced, &document.html).await;
+    settle_forced_revalidation(
+        state,
+        request_path,
+        forced,
+        &document.html,
+        Some(isr_window(route.render.revalidate)),
+    )
+    .await;
     Ok(document)
 }
 
@@ -1439,7 +1446,7 @@ fn spawn_isr_revalidation(
                     &revalidate_state,
                     &revalidate_path,
                     &html,
-                    revalidate_route.render.revalidate,
+                    Some(isr_window(revalidate_route.render.revalidate)),
                     false,
                 )
                 .await;
@@ -1534,11 +1541,19 @@ fn settle_prerendered_artifact(prerender_dir: &Path, request_path: &str, html: &
 /// value: a document that reaches this function cannot contain request state.
 /// Should that ever change, this write needs the same guard the serverless
 /// handler has, and so does the `render_cache.put` above every call site.
+///
+/// `window` is the ISR route's revalidation window, and `None` for every other
+/// strategy — the same argument the deployed hosts hand `writePrerendered` for
+/// a forced render: `serveIncremental` passes the route's window and
+/// `servePrerendered` passes nothing. It used to be `None` here for ISR too, so
+/// a handler that keys a document's freshness on it stored a forced ISR render
+/// under no window on this host and under the route's window everywhere else.
 async fn settle_forced_revalidation(
     state: &AppState,
     request_path: &str,
     claim: Option<ForcedRevalidationClaim>,
     html: &Arc<str>,
+    window: Option<u64>,
 ) {
     let Some(claim) = claim else {
         return;
@@ -1550,7 +1565,7 @@ async fn settle_forced_revalidation(
     // The local artifact below is still replaced, because the build's directory
     // stays the fallback this host reads when the store has nothing.
     if !state.config.watch && state.config.data_cache_handler.is_some() {
-        write_document_through_handler(state, request_path, html, None, true).await;
+        write_document_through_handler(state, request_path, html, window, true).await;
     }
 
     if !state.config.watch {
@@ -1863,7 +1878,7 @@ async fn render_page_csr(
         // the build's shell has been replaced, and the fresh shell answers the
         // requests that arrive before then.
         let document = state.render_cache.put(cache_key, shell).await;
-        settle_forced_revalidation(state, request_path, forced, &document.html).await;
+        settle_forced_revalidation(state, request_path, forced, &document.html, None).await;
         Ok(document)
     } else {
         // Not cache-backed: the shell is built for this request only, so there
@@ -1997,7 +2012,7 @@ async fn render_page_ppr_fresh(
     );
 
     let document = state.render_cache.put(cache_key.to_string(), html).await;
-    settle_forced_revalidation(state, request_path, forced, &document.html).await;
+    settle_forced_revalidation(state, request_path, forced, &document.html, None).await;
     Ok(document)
 }
 
@@ -4026,8 +4041,8 @@ mod tests {
 #[cfg(test)]
 mod document_store_protocol_tests {
     use super::{
-        RenderStrategy, StoredDocument, WorkerRequest, WorkerResponse, serve_stored_document,
-        stored_document_from_response,
+        RenderStrategy, StoredDocument, WorkerRequest, WorkerResponse, isr_window,
+        serve_stored_document, stored_document_from_response,
     };
 
     /// The rule shared with both JavaScript hosts, replayed from the fixture
@@ -4062,6 +4077,20 @@ mod document_store_protocol_tests {
             assert_eq!(
                 stored_document_from_response(response),
                 expected_document(&case["expect"]),
+                "{name}"
+            );
+        }
+
+        // The window handed to the store, from what the route declared. The
+        // deployed host applied the default before the number crossed to the
+        // handler and this host handed `None` through, so a store computing
+        // `stale` from it never reported one under `ruvyxa start`.
+        for case in fixture["windows"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let declared = case["revalidate"].as_u64();
+            assert_eq!(
+                isr_window(declared),
+                case["expect"].as_u64().unwrap(),
                 "{name}"
             );
         }

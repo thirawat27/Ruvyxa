@@ -312,7 +312,9 @@ impl IncrementalGraphCache {
         Ok(())
     }
 
-    /// Number of modules in the previous build's manifest.
+    /// Number of modules in the previous build's manifest, for tests to assert
+    /// what a load kept.
+    #[cfg(test)]
     pub fn previous_module_count(&self) -> usize {
         self.previous.modules.len()
     }

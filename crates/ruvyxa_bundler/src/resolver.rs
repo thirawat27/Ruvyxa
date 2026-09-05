@@ -415,12 +415,15 @@ impl ResolveGraphCache {
         self.resolutions.len()
     }
 
-    /// Number of cached source files. Intended for diagnostics/tests.
+    /// Number of cached source files, for tests to assert reuse against.
+    #[cfg(test)]
     pub fn source_count(&self) -> usize {
         self.sources.len()
     }
 
-    /// Number of content-keyed dependency lists retained by this context.
+    /// Number of content-keyed dependency lists retained by this context, for
+    /// tests to assert reuse against.
+    #[cfg(test)]
     pub fn dependency_count(&self) -> usize {
         self.dependencies.len()
     }
@@ -561,35 +564,6 @@ impl ResolveGraphCache {
         self.package_json.clear();
         self.glob_matches.clear();
         evicted
-    }
-
-    /// Drop cached entries for specific file paths.
-    ///
-    /// The only cache that outlives a single read is the [`Self::for_build`]
-    /// snapshot, which skips metadata checks entirely, so this is how a caller
-    /// tells that snapshot a file underneath it moved. Every `BundleContext` in
-    /// the tree is built and dropped inside one bundle pass, which is why no
-    /// production caller needs it today: the snapshot cannot outlive the inputs
-    /// it froze. A longer-lived context would.
-    pub fn invalidate_paths(&self, paths: &[PathBuf]) {
-        for path in paths {
-            self.sources.remove(path);
-            self.package_json.remove(path);
-            // Remove any resolution entries that resolved to this path.
-            self.resolutions.retain(|_, v| v.as_ref() != Some(path));
-            self.tsconfigs.retain(|root, entry| {
-                path != &root.join("tsconfig.json")
-                    && path != &root.join("jsconfig.json")
-                    && !entry.paths.config_files.contains(path)
-            });
-        }
-        self.dependencies.clear();
-        // A glob answers with the files that exist, so the event this method
-        // reports — a file moved underneath a snapshot that skips metadata
-        // checks — is exactly the event that can add or remove a match. The
-        // path that changed need not be one the pattern matched (a new
-        // directory changes what the walk reaches), so the whole memo goes.
-        self.glob_matches.clear();
     }
 }
 
@@ -3317,8 +3291,13 @@ mod tests {
         );
     }
 
+    /// The [`ResolveGraphCache::for_build`] snapshot skips metadata checks: a
+    /// file rewritten underneath it is still answered from the first read.
+    /// Every `BundleContext` is built and dropped inside one bundle pass, so
+    /// the snapshot cannot outlive the inputs it froze — which is why nothing
+    /// invalidates it, and why this asserts only that it freezes.
     #[test]
-    fn production_snapshot_skips_revalidation_until_explicit_invalidation() {
+    fn production_snapshot_skips_revalidation() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source.ts");
         fs::write(&source, "export const value = 'first';").unwrap();
@@ -3327,9 +3306,6 @@ mod tests {
         assert!(cache.read_source(&source).unwrap().contains("first"));
         fs::write(&source, "export const value = 'after';").unwrap();
         assert!(cache.read_source(&source).unwrap().contains("first"));
-
-        cache.invalidate_paths(std::slice::from_ref(&source));
-        assert!(cache.read_source(&source).unwrap().contains("after"));
     }
 
     #[test]

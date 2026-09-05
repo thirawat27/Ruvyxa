@@ -309,12 +309,6 @@ export function swallowedReads(source, { allowed = [], file = '<snippet>', onAll
 // returns a value, logs, or branches was left out of this pass entirely.
 const ALLOWED_JS = [
   {
-    file: 'packages/@ruvyxa/core/src/standalone-server.ts',
-    contains: 'readFileSync(htmlPath',
-    reason:
-      'Reads a stored ISR document. Not written yet and not readable are the same answer to the only question being asked -- is there a cached page for this path -- and the miss path renders it.',
-  },
-  {
     file: 'packages/ruvyxa/runtime/compiler.mjs',
     contains: '=== contents) return',
     reason:

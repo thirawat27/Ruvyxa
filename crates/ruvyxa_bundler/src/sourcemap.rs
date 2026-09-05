@@ -93,20 +93,6 @@ impl SourceMapBuilder {
         }
     }
 
-    /// Register a symbol name in the `names` table and return its index.
-    ///
-    /// The returned index can be used as the optional 5th VLQ segment in a
-    /// [`Mapping`] to attach a name to a generated position.
-    pub fn add_name(&mut self, name: impl Into<String>) -> u32 {
-        let name = name.into();
-        if let Some(idx) = self.names.iter().position(|n| *n == name) {
-            return idx as u32;
-        }
-        let idx = self.names.len() as u32;
-        self.names.push(name);
-        idx
-    }
-
     /// Mark a source index as an "ignore-listed" library file.
     ///
     /// DevTools that support `x_google_ignoreList` will skip these files in
@@ -141,34 +127,6 @@ impl SourceMapBuilder {
     /// Add a mapping segment.
     pub fn add_mapping(&mut self, mapping: Mapping) {
         self.mappings.push(mapping);
-    }
-
-    /// Add identity mappings for a source file being appended at a given
-    /// generated line offset.  This maps each line 1:1 from the source.
-    pub fn add_identity_mappings(&mut self, source_idx: u32, source: &str, gen_line_offset: u32) {
-        for (line_no, line) in source.lines().enumerate() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            self.mappings.push(Mapping {
-                gen_line: gen_line_offset + line_no as u32,
-                gen_col: 0,
-                source_idx,
-                orig_line: line_no as u32,
-                orig_col: 0,
-            });
-            // Also map the first non-whitespace character
-            let leading = line.len() - line.trim_start().len();
-            if leading > 0 {
-                self.mappings.push(Mapping {
-                    gen_line: gen_line_offset + line_no as u32,
-                    gen_col: leading as u32,
-                    source_idx,
-                    orig_line: line_no as u32,
-                    orig_col: leading as u32,
-                });
-            }
-        }
     }
 
     /// Import mappings from a Source Map v3 document at a generated-line offset.
@@ -618,21 +576,6 @@ mod tests {
     }
 
     #[test]
-    fn identity_mappings() {
-        let mut builder = SourceMapBuilder::new("bundle.js", PathBuf::from("/p"));
-        let idx = builder.add_source(Path::new("/p/file.ts"), None);
-        let source = "const x = 1;\nconst y = 2;\n\nconst z = 3;";
-        builder.add_identity_mappings(idx, source, 5);
-
-        // Should have mappings at gen lines 5, 6, 8 (skipping blank line 7)
-        let lines: Vec<u32> = builder.mappings.iter().map(|m| m.gen_line).collect();
-        assert!(lines.contains(&5));
-        assert!(lines.contains(&6));
-        assert!(lines.contains(&8));
-        assert!(!lines.contains(&7)); // blank line skipped
-    }
-
-    #[test]
     fn add_source_deduplicates() {
         let mut builder = SourceMapBuilder::new("out.js", PathBuf::from("/root"));
         let idx1 = builder.add_source(Path::new("/root/foo.ts"), None);
@@ -641,24 +584,6 @@ mod tests {
         assert_eq!(idx1, idx2);
         assert_ne!(idx1, idx3);
         assert_eq!(builder.sources.len(), 2);
-    }
-
-    #[test]
-    fn names_array_in_output() {
-        let mut builder = SourceMapBuilder::new("bundle.js", PathBuf::from("/p"));
-        let n1 = builder.add_name("MyComponent");
-        let n2 = builder.add_name("helper");
-        let n3 = builder.add_name("MyComponent"); // duplicate — should return same idx
-        assert_eq!(n1, 0);
-        assert_eq!(n2, 1);
-        assert_eq!(n1, n3, "duplicate names should return the same index");
-
-        let json = builder.to_json();
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        let names = parsed["names"].as_array().unwrap();
-        assert_eq!(names.len(), 2);
-        assert_eq!(names[0].as_str().unwrap(), "MyComponent");
-        assert_eq!(names[1].as_str().unwrap(), "helper");
     }
 
     #[test]
