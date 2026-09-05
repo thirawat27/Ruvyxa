@@ -1690,16 +1690,23 @@ export async function write(pathname, html, revalidate, forced) {
   assert.equal(fresh.html, '<p>fresh</p>')
   assert.equal(fresh.stale, false)
 
-  // The host treats a stale answer as a miss and renders instead, so what
-  // matters here is that the flag survives rather than being dropped — a
-  // dropped flag serves what the project's own store called expired.
+  // The host serves a stale answer and refreshes it behind the response, the
+  // way the deployed hosts do, so what matters here is that the flag survives
+  // rather than being dropped — a dropped flag serves what the project's own
+  // store called expired for a whole window with no refresh.
   const stale = await request({ type: 'documentRead', pathname: '/stale' })
+  assert.equal(stale.html, '<p>stale</p>')
   assert.equal(stale.stale, true)
 
-  // A bare string is the other shape every deployed host already normalizes.
+  // A bare string is the other shape every deployed host already normalizes,
+  // and it normalizes to stale there (`normalizeCacheEntry` in
+  // `serverless-handler.mjs`): a document whose freshness the store did not
+  // state gets refreshed rather than trusted. This worker answered `false`
+  // for the same string, so one handler got a refresh on every deployed
+  // platform and none under `ruvyxa start`.
   const plain = await request({ type: 'documentRead', pathname: '/plain' })
   assert.equal(plain.html, '<p>plain</p>')
-  assert.equal(plain.stale, false)
+  assert.equal(plain.stale, true)
 
   // The route's window reaches the handler, which is what lets it answer
   // `stale` for itself rather than guessing.
@@ -1794,4 +1801,41 @@ test('every collection a full invalidation clears is dropped per key on eviction
     [],
     `these are cleared by a full invalidation and leak past a single eviction: ${missing.join(', ')}`,
   )
+})
+
+/**
+ * Every `read()` answer shape the fixture lists, normalized the way the deployed
+ * handler normalizes it.
+ *
+ * `tests/fixtures/stored-document-conformance.json` is replayed here, by
+ * `serverless-handler.test.mjs`, and by `render_pipeline.rs`, because the rule
+ * lived in three places with no fixture and drifted: this worker called a bare
+ * string fresh while the deployed handler called it stale.
+ */
+test('normalizes every store answer the fixture lists', async (t) => {
+  const conformance = JSON.parse(
+    await readFile(path.join(repoRoot, 'tests/fixtures/stored-document-conformance.json'), 'utf8'),
+  )
+  const projectRoot = await mkdtemp(path.join(fixtureWorkspace, 'document-store-conformance-'))
+  const handlerFile = path.join(projectRoot, 'cache-handler.mjs')
+  await writeFile(
+    handlerFile,
+    `const answers = ${JSON.stringify(conformance.answers.map((entry) => entry.answer))}
+export function read(pathname) {
+  return answers[Number(pathname.slice(1))]
+}
+`,
+  )
+
+  const { request } = startWorker(t, [projectRoot], {
+    RUVYXA_DATA_CACHE_HANDLER: handlerFile,
+    RUVYXA_DATA_CACHE_KEY_PREFIX: 'build-id:',
+  })
+
+  for (const [index, entry] of conformance.answers.entries()) {
+    const response = await request({ type: 'documentRead', pathname: `/${index}` })
+    assert.equal(response.ok, true, entry.name)
+    assert.equal(response.html, entry.wire.html, `${entry.name}: html`)
+    assert.equal(response.stale, entry.wire.stale, `${entry.name}: stale`)
+  }
 })

@@ -35,7 +35,7 @@ use crate::static_assets::{
     request_matches_etag, serve_client_file, serve_public_file, weak_content_etag,
 };
 use crate::worker_pool::{PostedForm, RenderActionRequest, RenderApiRequest, WorkerApiResponse};
-use crate::worker_protocol::{self, WorkerRequest};
+use crate::worker_protocol::{self, WorkerRequest, WorkerResponse};
 use crate::{
     AppState, RuntimeCache, RuntimeTrace, ServerConfig, TraceAssets, cached_html_response,
     html_response, project_env, streamed_html_response, uncacheable, with_security_headers,
@@ -940,7 +940,8 @@ async fn render_page_ssg_fresh(
     // synchronous file open per request otherwise dominates the hot path.
     if forced.is_none()
         && !state.config.watch
-        && let Some(html) = store_document(state, request_path, cache_key, None).await
+        && let Some((html, _)) =
+            store_document(state, request_path, cache_key, RenderStrategy::Ssg, None).await
     {
         return Ok(html);
     }
@@ -1074,9 +1075,23 @@ async fn render_page_isr_fresh(
     // build's document is the stale one the caller is replacing.
     if forced.is_none()
         && !state.config.watch
-        && let Some(html) =
-            store_document(state, request_path, cache_key, route.render.revalidate).await
+        && let Some((html, refresh)) = store_document(
+            state,
+            request_path,
+            cache_key,
+            RenderStrategy::Isr,
+            route.render.revalidate,
+        )
+        .await
     {
+        // The store said this document is past its window. Serve it now and
+        // refresh it behind the response, exactly as `render_page_isr` does for
+        // an entry its own memory has aged out, and as the deployed hosts do in
+        // `serveIncremental`. The refresh publishes through the handler, so the
+        // next instance to ask the store gets a fresh answer.
+        if refresh {
+            spawn_isr_revalidation(state, route, request_path, params, styles, cache_key);
+        }
         return Ok(html);
     }
 
@@ -1615,21 +1630,36 @@ async fn store_prerendered_html(
 /// never held. Replacing it would make every SSG page re-render once per
 /// instance against a cold store, for no gain.
 ///
-/// A document the store reports **stale** is treated as a miss. The host
-/// renders and writes back instead of serving it, which is the conservative
-/// direction: the alternative is answering with something the project's own
-/// store said was expired, and the render is already single-flighted so a hot
-/// path does not stampede.
+/// A document the store reports **stale** is still a document the store holds,
+/// and it is served. The returned flag says so, and the ISR caller refreshes it
+/// behind the response — the same stale-while-revalidate the deployed hosts
+/// run in `serveIncremental`, and the same rule this host already applies to
+/// its own memory in `render_page_isr`. It used to be treated as a miss, and a
+/// miss falls through to the build's directory: the document served was then
+/// the one the build produced, which is *older* than the stale one the store
+/// had just answered with, and it was stored with a fresh timestamp, so no
+/// refresh ran for a whole window either. A stale document is never older than
+/// the fallback, so serving it is the correct direction, and the refresh is
+/// what makes it temporary.
+///
+/// The rule for what an answer means and what each strategy does with it is
+/// `tests/fixtures/stored-document-conformance.json`, which the worker and the
+/// deployed handler replay too.
 async fn store_document(
     state: &AppState,
     request_path: &str,
     cache_key: &str,
+    strategy: RenderStrategy,
     revalidate: Option<u64>,
-) -> Option<CachedDocument> {
+) -> Option<(CachedDocument, bool)> {
     if state.config.data_cache_handler.is_some()
-        && let Some(html) = read_document_through_handler(state, request_path, revalidate).await
+        && let Some((html, refresh)) = serve_stored_document(
+            read_document_through_handler(state, request_path, revalidate).await,
+            strategy,
+        )
     {
-        return Some(state.render_cache.put(cache_key.to_string(), html).await);
+        let document = state.render_cache.put(cache_key.to_string(), html).await;
+        return Some((document, refresh));
     }
     store_prerendered_html(
         &state.render_cache,
@@ -1638,6 +1668,56 @@ async fn store_document(
         cache_key,
     )
     .await
+    .map(|document| (document, false))
+}
+
+/// What a strategy does with the store's answer: the document to serve, and
+/// whether to refresh it behind the response.
+///
+/// A held document is served whatever its freshness, because the alternative
+/// on this host is the build's own copy, which is never newer. Only ISR has a
+/// window to refresh against, so only ISR refreshes a stale one — the deployed
+/// hosts draw the same line between `serveIncremental` and `servePrerendered`.
+/// A miss serves nothing; the caller falls back and then renders.
+fn serve_stored_document(
+    answer: StoredDocument,
+    strategy: RenderStrategy,
+) -> Option<(String, bool)> {
+    match answer {
+        StoredDocument::Miss => None,
+        StoredDocument::Held { html, stale } => {
+            Some((html, stale && strategy == RenderStrategy::Isr))
+        }
+    }
+}
+
+/// What the project's store answered for one path.
+///
+/// Three answers, not two: "the store has nothing" and "the store has this and
+/// says it is expired" lead to different documents. A miss falls back to the
+/// build's own directory; a held document is served whether or not it is
+/// stale, because the build's copy is never newer than the store's.
+#[derive(Debug, PartialEq, Eq)]
+enum StoredDocument {
+    Miss,
+    Held { html: String, stale: bool },
+}
+
+/// Read a worker's `documentRead` answer.
+///
+/// Only the `ok` shape is interpreted here; a failed response is a store this
+/// request could not reach, and the caller reports it before treating it as a
+/// miss. `stale` is carried, not decided: `None` and `Some(false)` both mean
+/// the store called the document fresh, because a worker that predates the
+/// flag answers neither.
+fn stored_document_from_response(response: WorkerResponse) -> StoredDocument {
+    match response.html {
+        Some(html) if response.ok => StoredDocument::Held {
+            html,
+            stale: response.stale == Some(true),
+        },
+        _ => StoredDocument::Miss,
+    }
 }
 
 /// Ask a render worker for this path's document from the project's store.
@@ -1653,28 +1733,21 @@ async fn read_document_through_handler(
     state: &AppState,
     request_path: &str,
     revalidate: Option<u64>,
-) -> Option<String> {
+) -> StoredDocument {
     let request = WorkerRequest::DocumentRead {
         id: worker_protocol::next_request_id(),
         pathname: request_path.to_string(),
         revalidate,
     };
     match state.worker_pool.send(request).await {
-        Ok(response) if response.ok => {
-            // Stale is a miss. Serving it would answer with what the project's
-            // own store called expired.
-            if response.stale == Some(true) {
-                return None;
-            }
-            response.html
-        }
+        Ok(response) if response.ok => stored_document_from_response(response),
         Ok(response) => {
             warn!(
                 path = request_path,
                 message = response.message.unwrap_or_default(),
                 "cache.handler read failed; falling back to this build's documents"
             );
-            None
+            StoredDocument::Miss
         }
         Err(error) => {
             warn!(
@@ -1682,7 +1755,7 @@ async fn read_document_through_handler(
                 error = error.to_string(),
                 "cache.handler read could not reach a worker"
             );
-            None
+            StoredDocument::Miss
         }
     }
 }
@@ -1743,7 +1816,8 @@ async fn render_page_csr(
     // and re-reads the same shell file for the life of the process.
     if forced.is_none()
         && !state.config.watch
-        && let Some(html) = store_document(state, request_path, &cache_key, None).await
+        && let Some((html, _)) =
+            store_document(state, request_path, &cache_key, RenderStrategy::Csr, None).await
     {
         return Ok(html);
     }
@@ -1854,7 +1928,8 @@ async fn render_page_ppr_fresh(
     // made the cache unreachable and re-read the same file on every request.
     if forced.is_none()
         && !state.config.watch
-        && let Some(html) = store_document(state, request_path, cache_key, None).await
+        && let Some((html, _)) =
+            store_document(state, request_path, cache_key, RenderStrategy::Ppr, None).await
     {
         return Ok(html);
     }
@@ -3950,7 +4025,135 @@ mod tests {
 
 #[cfg(test)]
 mod document_store_protocol_tests {
-    use super::WorkerRequest;
+    use super::{
+        RenderStrategy, StoredDocument, WorkerRequest, WorkerResponse, serve_stored_document,
+        stored_document_from_response,
+    };
+
+    /// The rule shared with both JavaScript hosts, replayed from the fixture
+    /// they replay: what a worker's `documentRead` wire shape means, and what
+    /// each strategy does with it. `tests/fixtures/stored-document-conformance.json`
+    /// names the three implementations and the two ways they drifted before
+    /// it existed.
+    #[test]
+    fn stored_document_conformance() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/stored-document-conformance.json"
+        ))
+        .unwrap();
+
+        let expected_document = |expect: &serde_json::Value| match expect["kind"].as_str() {
+            Some("miss") => StoredDocument::Miss,
+            Some("held") => StoredDocument::Held {
+                html: expect["html"].as_str().unwrap().to_string(),
+                stale: expect["stale"].as_bool().unwrap(),
+            },
+            other => panic!("unknown document kind {other:?}"),
+        };
+
+        for case in fixture["answers"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            // The wire shape is what the worker wrote; `ok` and `id` are the
+            // envelope every response carries.
+            let mut wire = case["wire"].clone();
+            wire["id"] = serde_json::Value::String("1".to_string());
+            wire["ok"] = serde_json::Value::Bool(true);
+            let response: WorkerResponse = serde_json::from_value(wire).unwrap();
+            assert_eq!(
+                stored_document_from_response(response),
+                expected_document(&case["expect"]),
+                "{name}"
+            );
+        }
+
+        for case in fixture["serving"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let strategy: RenderStrategy =
+                serde_json::from_value(case["strategy"].clone()).unwrap();
+            let served = serve_stored_document(expected_document(&case["document"]), strategy);
+            let expect = &case["expect"];
+            assert_eq!(
+                served.is_some(),
+                expect["served"].as_bool().unwrap(),
+                "{name}: served"
+            );
+            assert_eq!(
+                served.as_ref().is_some_and(|(_, refresh)| *refresh),
+                expect["refresh"].as_bool().unwrap(),
+                "{name}: refresh"
+            );
+            if let (Some((html, _)), Some(expected_html)) =
+                (served, case["document"]["html"].as_str())
+            {
+                assert_eq!(html, expected_html, "{name}: html");
+            }
+        }
+    }
+
+    fn answer(html: Option<&str>, stale: Option<bool>) -> WorkerResponse {
+        WorkerResponse {
+            ok: true,
+            html: html.map(str::to_string),
+            stale,
+            ..WorkerResponse::default()
+        }
+    }
+
+    /// A stale document is held, not missing.
+    ///
+    /// The host used to fold `stale` into "the store has nothing", and nothing
+    /// falls through to the build's own directory — so a cold instance served
+    /// the document the build produced, which is older than the stale one the
+    /// store had just answered with, and stored it under a fresh timestamp so
+    /// no refresh ran for a whole window. The deployed hosts serve a stale
+    /// document and refresh behind it; this is the half that lets the native
+    /// host do the same.
+    #[test]
+    fn a_stale_document_is_held_rather_than_missing() {
+        assert_eq!(
+            stored_document_from_response(answer(Some("<p>old</p>"), Some(true))),
+            StoredDocument::Held {
+                html: "<p>old</p>".to_string(),
+                stale: true,
+            }
+        );
+    }
+
+    /// `None` and `Some(false)` both mean fresh: a worker that predates the
+    /// flag answers neither, and its documents were always served.
+    #[test]
+    fn a_fresh_document_is_held_with_or_without_the_flag() {
+        for stale in [None, Some(false)] {
+            assert_eq!(
+                stored_document_from_response(answer(Some("<p>new</p>"), stale)),
+                StoredDocument::Held {
+                    html: "<p>new</p>".to_string(),
+                    stale: false,
+                }
+            );
+        }
+    }
+
+    /// No document is a miss whatever the flag says, and a failed response is
+    /// a miss even when it carries a document — the caller has already reported
+    /// the failure, and a store that could not be read is not a store to serve
+    /// from.
+    #[test]
+    fn no_document_or_a_failed_read_is_a_miss() {
+        assert_eq!(
+            stored_document_from_response(answer(None, Some(true))),
+            StoredDocument::Miss
+        );
+        assert_eq!(
+            stored_document_from_response(answer(None, None)),
+            StoredDocument::Miss
+        );
+        let failed = WorkerResponse {
+            ok: false,
+            ..answer(Some("<p>partial</p>"), None)
+        };
+        assert_eq!(stored_document_from_response(failed), StoredDocument::Miss);
+    }
 
     /// The field names `handleDocumentRead` and `handleDocumentWrite` read.
     ///

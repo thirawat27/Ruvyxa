@@ -328,8 +328,9 @@ development server ไม่มี build — มันจะเขียน key 
 ไปเลย แต่ที่นี่มันถูกถาม*ก่อน* และไดเรกทอรี `prerender` ของ build เองเป็น fallback
 เพราะบนโฮสต์นี้สองอย่างนี้ไม่ใช่สิ่งเดียวกัน: path ที่ store ของคุณไม่เคยเก็บ ยังตอบด้วยเอกสารที่
 build นี้สร้างไว้ แทนที่จะ re-render หนึ่งครั้งต่อ instance กับ store ที่ยังว่าง ส่วนเอกสารที่ store
-บอกว่า `stale` จะถือเป็น miss — เซิร์ฟเวอร์ render ใหม่แล้วเขียนกลับ แทนที่จะเสิร์ฟสิ่งที่ store
-ของคุณเองบอกว่าหมดอายุแล้ว
+บอกว่า `stale` จะถูกเสิร์ฟทันที และถ้าเป็น route แบบ ISR จะ refresh อยู่เบื้องหลัง response —
+stale-while-revalidate แบบเดียวกับ deployed build — แล้วเขียนเอกสารใหม่กลับผ่าน handler เพื่อให้ทุก
+instance เห็นตรงกัน string เปล่าจาก `read` ถือว่า stale บนทั้งสองโฮสต์
 
 ```ts
 // ruvyxa.config.ts

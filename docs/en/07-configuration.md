@@ -332,8 +332,10 @@ One difference from a deployed build is worth knowing. There, the handler replac
 document store outright. Here it is consulted _first_ and the build's own `prerender` directory is
 the fallback, because on this host those are two different things: a path your store has never held
 is still answered by the document this build produced, rather than re-rendered once per instance
-against a cold store. A document the store reports as `stale` is treated as a miss — the server
-re-renders and writes back rather than serving what your own store called expired.
+against a cold store. A document the store reports as `stale` is served and, on an ISR route,
+refreshed behind the response — the same stale-while-revalidate a deployed build runs — and the
+refreshed document is written back through the handler so every other instance sees it. A bare
+string from `read` counts as stale on both hosts.
 
 ```ts
 // ruvyxa.config.ts

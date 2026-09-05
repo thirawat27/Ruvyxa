@@ -23,6 +23,9 @@ const { actionReferenceId, runAction } = await import(
 const revalidationConformance = JSON.parse(
   readFileSync(path.join(workspaceRoot, 'tests/fixtures/revalidation-conformance.json'), 'utf8'),
 )
+const storedDocumentConformance = JSON.parse(
+  readFileSync(path.join(workspaceRoot, 'tests/fixtures/stored-document-conformance.json'), 'utf8'),
+)
 
 function pageRoute(id, routePath, strategy = 'ssr') {
   return { id, path: routePath, kind: 'page', file: `${id}.tsx`, render: { strategy } }
@@ -1017,6 +1020,74 @@ describe('ISR cache freshness', () => {
     const response = await responsePromise
     assert.equal(await response.text(), '<html>stale</html>')
   })
+})
+
+/**
+ * What a `readPrerendered` answer means and what each strategy does with it,
+ * replayed from the fixture the worker and the Axum host replay too.
+ *
+ * The rule lived in three places with no fixture and drifted twice: the worker
+ * called a bare string fresh while `normalizeCacheEntry` here called it stale,
+ * and the Axum host treated a stale document as a miss while `serveIncremental`
+ * here serves it and refreshes behind the response.
+ */
+describe('stored document conformance', () => {
+  function handlerServing(strategy, answer, counters) {
+    const route = pageRoute('stored', '/stored', strategy)
+    route.render.revalidate = 60
+    return createHandler({
+      routes: [route],
+      importPage: async () => ({
+        render: async () => {
+          counters.renders += 1
+          return '<html>rendered</html>'
+        },
+      }),
+      importApi: async () => ({}),
+      readPrerendered: () => structuredClone(answer),
+      writePrerendered: () => {},
+    })
+  }
+
+  for (const entry of storedDocumentConformance.answers) {
+    it(`answers: ${entry.name}`, async () => {
+      const counters = { renders: 0 }
+      const handler = handlerServing('isr', entry.answer, counters)
+      const response = await handler(new Request('http://localhost/stored'))
+      await new Promise((resolve) => setImmediate(resolve))
+      if (entry.expect.kind === 'miss') {
+        assert.equal(await response.text(), '<html>rendered</html>')
+        assert.equal(counters.renders, 1, 'a miss renders')
+      } else {
+        assert.equal(await response.text(), entry.expect.html)
+        assert.equal(
+          counters.renders,
+          entry.expect.stale ? 1 : 0,
+          'only a stale document refreshes',
+        )
+      }
+    })
+  }
+
+  for (const entry of storedDocumentConformance.serving) {
+    it(`serving: ${entry.name}`, async () => {
+      const counters = { renders: 0 }
+      const answer =
+        entry.document.kind === 'held'
+          ? { html: entry.document.html, stale: entry.document.stale }
+          : null
+      const handler = handlerServing(entry.strategy, answer, counters)
+      const response = await handler(new Request('http://localhost/stored'))
+      await new Promise((resolve) => setImmediate(resolve))
+      if (entry.expect.served) {
+        assert.equal(await response.text(), entry.document.html)
+        assert.equal(counters.renders, entry.expect.refresh ? 1 : 0)
+      } else {
+        assert.equal(await response.text(), '<html>rendered</html>')
+        assert.equal(counters.renders, 1)
+      }
+    })
+  }
 })
 
 describe('bounded path revalidation state', () => {

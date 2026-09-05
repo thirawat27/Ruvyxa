@@ -269,13 +269,19 @@ async function loadDataCacheHandler() {
  * produced.
  *
  * The shape is the one every deployed host already normalizes:
- * `null` for a miss, a string for a document, or `{ html, stale }`.
+ * `null` for a miss, a string for a document, or `{ html, stale }`. A bare
+ * string is a document whose freshness the store did not state, and it is
+ * normalized exactly as `normalizeCacheEntry` in `serverless-handler.mjs`
+ * normalizes it — stale, so an ISR route refreshes it behind the response
+ * rather than trusting a window nobody reported. It was `stale: false` here
+ * and `stale: true` there, so the same handler answering the same string got
+ * a refresh on every deployed platform and none under `ruvyxa start`.
  */
 async function handleDocumentRead(request) {
   if (typeof dataCacheHandler?.read !== 'function') return { ok: true, html: null }
   try {
     const entry = await dataCacheHandler.read(request.pathname, request.revalidate)
-    if (typeof entry === 'string') return { ok: true, html: entry, stale: false }
+    if (typeof entry === 'string') return { ok: true, html: entry, stale: true }
     if (!entry || typeof entry !== 'object' || typeof entry.html !== 'string') {
       return { ok: true, html: null }
     }

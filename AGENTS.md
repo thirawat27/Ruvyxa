@@ -300,6 +300,15 @@ before believing it.
   serverless handler never had, so a project that configured only `origins` answered a cross-origin
   `PUT` under `ruvyxa dev` and had the browser block it in production.
   `tests/fixtures/cors-conformance.json` holds both hosts now.
+- A `cache.handler` `read()` answer is interpreted in three places — `handleDocumentRead` in
+  `packages/ruvyxa/runtime/worker-pool.mjs`, `normalizeCacheEntry` in
+  `packages/ruvyxa/runtime/serverless-handler.mjs`, and `stored_document_from_response` plus
+  `serve_stored_document` in `crates/ruvyxa_dev_server/src/render_pipeline.rs` — and they drifted
+  twice: the worker called a bare string fresh while the deployed handler called it stale, and the
+  Axum host treated a stale document as a miss (falling through to the build's older copy, with no
+  refresh) while the deployed host served it and refreshed behind the response.
+  `tests/fixtures/stored-document-conformance.json` holds all three now; add a case there before
+  changing what an answer means or what a strategy does with it.
 - A rule the two module graphs both enforce needs one table, not two implementations that happen to
   agree today. The client/server module lane is the newest example: `references.rs` read a module's
   leading directive and then its file stem, while `compiler.mjs` matched the single literal filename

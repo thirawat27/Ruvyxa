@@ -1,0 +1,140 @@
+{
+  "$comment": [
+    "What a project's `cache.handler` `read()` answer means, and what a host does with it.",
+    "",
+    "Three implementations hold this rule and cannot share code: `handleDocumentRead` in",
+    "`packages/ruvyxa/runtime/worker-pool.mjs` normalizes the answer for the Axum host,",
+    "`normalizeCacheEntry` in `packages/ruvyxa/runtime/serverless-handler.mjs` normalizes it for",
+    "every deployed build, and `stored_document_from_response` + `serve_stored_document` in",
+    "`crates/ruvyxa_dev_server/src/render_pipeline.rs` interpret the worker's answer and decide",
+    "what to serve. They drifted twice before this file existed: the worker called a bare string",
+    "fresh while the deployed handler called it stale, and the Rust host treated a stale document",
+    "as a miss — falling through to the build's own document, which is older — while the deployed",
+    "host served it and refreshed behind the response.",
+    "",
+    "`answers`: a raw `read()` answer, the wire shape the worker emits for it (`html` is `null` for a",
+    "miss and the `stale` key is then absent), and what it means. `serving`: given a normalized",
+    "document and the route's strategy, whether the host serves it and whether an ISR route refreshes",
+    "it behind the response. A miss is served by neither host — the deployed host renders, the Axum",
+    "host falls back to the build's directory and then renders. PPR is not listed because the deployed",
+    "host does not consult the store for it at all; the Axum host does, and applies the general rule",
+    "(serve what is held, refresh only under ISR).",
+    "",
+    "Replayed by `reads and writes stored documents through cache.handler` and",
+    "`normalizes every store answer the fixture lists` in `tests/packages/ruvyxa/worker-pool.test.mjs`,",
+    "by `stored document conformance` in `tests/packages/ruvyxa/serverless-handler.test.mjs`, and by",
+    "`stored_document_conformance` in `crates/ruvyxa_dev_server/src/render_pipeline.rs`."
+  ],
+  "answers": [
+    {
+      "name": "null is a miss",
+      "answer": null,
+      "wire": { "html": null },
+      "expect": { "kind": "miss" }
+    },
+    {
+      "name": "a bare string is a document whose freshness the store did not state, so it is stale",
+      "answer": "<p>plain</p>",
+      "wire": { "html": "<p>plain</p>", "stale": true },
+      "expect": { "kind": "held", "html": "<p>plain</p>", "stale": true }
+    },
+    {
+      "name": "an object that says fresh is fresh",
+      "answer": { "html": "<p>fresh</p>", "stale": false },
+      "wire": { "html": "<p>fresh</p>", "stale": false },
+      "expect": { "kind": "held", "html": "<p>fresh</p>", "stale": false }
+    },
+    {
+      "name": "an object that says stale is held, not missing",
+      "answer": { "html": "<p>stale</p>", "stale": true },
+      "wire": { "html": "<p>stale</p>", "stale": true },
+      "expect": { "kind": "held", "html": "<p>stale</p>", "stale": true }
+    },
+    {
+      "name": "an object with no flag is fresh",
+      "answer": { "html": "<p>unflagged</p>" },
+      "wire": { "html": "<p>unflagged</p>", "stale": false },
+      "expect": { "kind": "held", "html": "<p>unflagged</p>", "stale": false }
+    },
+    {
+      "name": "only boolean true means stale",
+      "answer": { "html": "<p>truthy</p>", "stale": "yes" },
+      "wire": { "html": "<p>truthy</p>", "stale": false },
+      "expect": { "kind": "held", "html": "<p>truthy</p>", "stale": false }
+    },
+    {
+      "name": "an object whose html is not a string is a miss whatever the flag says",
+      "answer": { "html": 42, "stale": true },
+      "wire": { "html": null },
+      "expect": { "kind": "miss" }
+    },
+    {
+      "name": "an object with no html is a miss",
+      "answer": { "stale": true },
+      "wire": { "html": null },
+      "expect": { "kind": "miss" }
+    },
+    {
+      "name": "a number is a miss",
+      "answer": 7,
+      "wire": { "html": null },
+      "expect": { "kind": "miss" }
+    },
+    {
+      "name": "a boolean is a miss",
+      "answer": true,
+      "wire": { "html": null },
+      "expect": { "kind": "miss" }
+    },
+    {
+      "name": "an array is a miss",
+      "answer": ["<p>listed</p>"],
+      "wire": { "html": null },
+      "expect": { "kind": "miss" }
+    }
+  ],
+  "serving": [
+    {
+      "name": "a miss under ISR is rendered, not served",
+      "document": { "kind": "miss" },
+      "strategy": "isr",
+      "expect": { "served": false, "refresh": false }
+    },
+    {
+      "name": "a fresh document under ISR is served and left alone",
+      "document": { "kind": "held", "html": "<p>fresh</p>", "stale": false },
+      "strategy": "isr",
+      "expect": { "served": true, "refresh": false }
+    },
+    {
+      "name": "a stale document under ISR is served and refreshed behind the response",
+      "document": { "kind": "held", "html": "<p>stale</p>", "stale": true },
+      "strategy": "isr",
+      "expect": { "served": true, "refresh": true }
+    },
+    {
+      "name": "a miss under SSG is rendered, not served",
+      "document": { "kind": "miss" },
+      "strategy": "ssg",
+      "expect": { "served": false, "refresh": false }
+    },
+    {
+      "name": "a fresh document under SSG is served",
+      "document": { "kind": "held", "html": "<p>fresh</p>", "stale": false },
+      "strategy": "ssg",
+      "expect": { "served": true, "refresh": false }
+    },
+    {
+      "name": "a stale document under SSG is served; there is no window to refresh against",
+      "document": { "kind": "held", "html": "<p>stale</p>", "stale": true },
+      "strategy": "ssg",
+      "expect": { "served": true, "refresh": false }
+    },
+    {
+      "name": "a stale document under CSR is served; there is no window to refresh against",
+      "document": { "kind": "held", "html": "<p>stale</p>", "stale": true },
+      "strategy": "csr",
+      "expect": { "served": true, "refresh": false }
+    }
+  ]
+}
