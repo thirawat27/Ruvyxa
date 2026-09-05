@@ -83,7 +83,7 @@ notify = "8.2.0"
 # packages/ruvyxa/package.json: the Rust bundler compiles the client bundle and
 # the Node runtime compiles the server bundle, so a version split would let the
 # two halves of one page disagree. `scripts/check-oxc-lockstep.mjs` enforces it.
-oxc = { version = "=0.147.0", default-features = false, features = ["codegen", "minifier", "semantic", "transformer"] }
+oxc = { version = "=0.148.0", default-features = false, features = ["codegen", "minifier", "semantic", "transformer"] }
 parking_lot = "0.12.5"
 rayon = "1.12.0"
 serde = { version = "1.0.229", features = ["derive"] }
