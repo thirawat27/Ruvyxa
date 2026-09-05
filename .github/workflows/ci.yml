@@ -197,7 +197,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest' || matrix.os == 'windows-latest'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: '1.4.0'
+          bun-version: '1.4.2'
       - name: Verify Bun JavaScript runtime parity
         if: matrix.os == 'ubuntu-latest' || matrix.os == 'windows-latest'
         shell: bash
@@ -213,7 +213,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest' || matrix.os == 'windows-latest'
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2
         with:
-          deno-version: '2.9.5'
+          deno-version: '2.9.6'
       - name: Verify Deno JavaScript runtime parity
         if: matrix.os == 'ubuntu-latest' || matrix.os == 'windows-latest'
         shell: bash

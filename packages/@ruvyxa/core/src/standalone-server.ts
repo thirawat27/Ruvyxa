@@ -1494,7 +1494,9 @@ function peerAddress(_request, info) {
 // 1.4.0, a sliced \`BunFile\` read through \`.text()\`, \`.bytes()\`, or as a
 // response body all give the window, while the same slice's \`.stream()\` served
 // by \`Bun.serve\` sends the whole file — a 206 whose body is the entire video,
-// which is what a seek would have played.
+// which is what a seek would have played. Bun fixed that by 1.4.2, where the
+// sliced stream delivers the window, but the floor this server is written
+// against is 1.1.26, so the file is still what gets handed over.
 //
 // Bun leaves a handler's own \`content-range\` and status alone, but only while
 // the handler answers the range. When it *declines* one — \`if-range\` naming a
@@ -1503,13 +1505,14 @@ function peerAddress(_request, info) {
 // file. That is exactly the corrupt resumed download \`if-range\` exists to
 // prevent, reintroduced one layer below the decision.
 //
-// Measured against Bun 1.4.0, a 200 carrying \`Range\`: a \`BunFile\` body is
-// ranged to 206, and so is that file's own \`.stream()\` — Bun recognises its
-// own file stream. A byte array is not ranged, but buffering the file is the
-// peak-memory failure the streaming path exists to prevent. A stream Bun does
-// not own is not ranged and still streams, so the file's stream is handed over
-// through an identity transform. Only requests that actually declined a range
-// pay for it; every other response keeps the sendfile path.
+// Measured against Bun 1.4.0 and still true on 1.4.2, a 200 carrying \`Range\`:
+// a \`BunFile\` body is ranged to 206, and so is that file's own \`.stream()\` —
+// Bun recognises its own file stream. A byte array is not ranged, but
+// buffering the file is the peak-memory failure the streaming path exists to
+// prevent. A stream Bun does not own is not ranged and still streams, so the
+// file's stream is handed over through an identity transform. Only requests
+// that actually declined a range pay for it; every other response keeps the
+// sendfile path.
 function openStaticBody(plan) {
   const file = Bun.file(plan.file);
   if (plan.declinedRange) return file.stream().pipeThrough(new TransformStream());

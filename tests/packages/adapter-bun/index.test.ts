@@ -47,7 +47,9 @@ describe('bun', () => {
     assert.match(source, /\.\.\.idleTimeout,/)
     // The slice is handed over as a file, not as its `.stream()`: measured
     // against Bun 1.4.0, a sliced `BunFile`'s stream served by `Bun.serve`
-    // sends the whole file, so a seek would have played the entire video.
+    // sends the whole file, so a seek would have played the entire video. Bun
+    // fixed that by 1.4.2, but MINIMUM_BUN_VERSION is 1.1.26, so the emitted
+    // server must keep handing over the file on every Bun it claims to support.
     assert.match(source, /file\.slice\(plan\.partial\.start, plan\.partial\.end \+ 1\)/)
     assert.doesNotMatch(source, /plan\.partial\.end \+ 1\)\.stream\(\)/)
 
