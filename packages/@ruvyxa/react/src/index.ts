@@ -3,7 +3,12 @@ export type { ErrorBoundaryProps, ErrorFallbackProps } from './error-boundary.js
 export { useRuvyxaLoader } from './use-loader.js'
 export type { UseLoaderOptions, UseLoaderResult } from './use-loader.js'
 export { hydrate, reportHydrationError } from './hydration.js'
-export type { HydrationOptions, HydrationErrorHandler } from './hydration.js'
+export type {
+  HydrationErrorContext,
+  HydrationErrorKind,
+  HydrationOptions,
+  HydrationErrorHandler,
+} from './hydration.js'
 export { DEFAULT_DEVICE_WIDTHS, Image, Picture } from './image.js'
 export type {
   ImageLoader,

@@ -23,6 +23,7 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::ValueEnum;
 use ruvyxa_dev_server::{JavaScriptRuntime, ServerConfig, find_runtime_script};
+use tracing::warn;
 
 use crate::*;
 
@@ -814,6 +815,20 @@ pub(crate) fn run_adapter_runner(
                 &config_failure_detail(result.message, result.stack, &stderr),
             )
         );
+    }
+    // The runner's stderr on the success path is a report, not noise. It is
+    // where `RUV2205` lands — the one line saying a claimed realtime/presence
+    // capability will be missing from this deployment because no build artifact
+    // holds a connection — and until it was forwarded here, a railway build of
+    // an app using `@ruvyxa/realtime` printed nothing and shipped
+    // `/__ruvyxa/realtime` as a 404. Stdout is the JSON protocol; stderr is for
+    // the operator, so every line of it reaches them.
+    for line in stderr
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+    {
+        warn!("{line}");
     }
     result
         .result

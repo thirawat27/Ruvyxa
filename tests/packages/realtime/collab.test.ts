@@ -87,10 +87,10 @@ function harness(options: Record<string, unknown> = {}) {
 }
 
 describe('collab()', () => {
-  it('claims the presence capability and rejects short-lived builds', async () => {
+  it('claims the presence capability and registers no deployment gate of its own', async () => {
     const plugin = collab({ path: '/rooms', heartbeatMs: 10_000 })
     const claims: Array<{ capability: string; options: unknown }> = []
-    let buildHook: ((context: any) => void | Promise<void>) | undefined
+    const buildHooks: unknown[] = []
     await plugin.register({
       environment: 'production',
       http: { onRequest() {}, onResponse() {}, route() {} },
@@ -99,8 +99,8 @@ describe('collab()', () => {
         onResolve() {},
         onLoad() {},
         onTransform() {},
-        onComplete(hook: (context: any) => void | Promise<void>) {
-          buildHook = hook
+        onComplete(hook: unknown) {
+          buildHooks.push(hook)
         },
       },
       dev: { onFileChange() {} },
@@ -115,15 +115,9 @@ describe('collab()', () => {
     assert.deepEqual(claims, [
       { capability: 'presence@1', options: { path: '/rooms', heartbeatMs: 10_000 } },
     ])
-    assert.doesNotThrow(() => buildHook?.({ manifest: { target: 'node', adapter: 'node' } }))
-    assert.throws(
-      () => buildHook?.({ manifest: { target: 'edge', adapter: 'cloudflare' } }),
-      /RUV3201.*long-lived/,
-    )
-    assert.throws(
-      () => buildHook?.({ manifest: { target: 'node', adapter: { name: 'vercel' } } }),
-      /RUV3201.*long-lived/,
-    )
+    // Same rule as `realtime()`: the host that serves the room decides whether
+    // a build can, and `adapter-runner.mjs` reports RUV2205 when it cannot.
+    assert.deepEqual(buildHooks, [])
   })
 
   it('rejects a room id the server would refuse', () => {

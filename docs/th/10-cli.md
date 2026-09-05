@@ -121,8 +121,8 @@ RUVYXA_DEMO_PASSWORD=replace-this-demo-password
 
 credentials provider ที่สร้างยอมรับเฉพาะ email/password ที่ตั้งข้างบน เป็นตัวอย่างที่รันได้ ไม่ใช่
 user database หรือระบบ hash password ก่อน production build ให้แทน in-memory auth/rate-limit store
-สำหรับ development ด้วย durable atomic implementation มิฉะนั้น auth package จะ fail closed ด้วย
-`RUV3105`
+สำหรับ development ด้วย `redisAuthStore`/`redisRateLimitStore` หรือ durable atomic implementation
+อื่น มิฉะนั้น auth package จะ fail closed ด้วย `RUV3105`
 
 ### Conflict และ `--force`
 

@@ -2005,10 +2005,10 @@ Realtime WebSocket handler:
 - Sends heartbeat pings at configured interval
 - Sends `{"version":1,"type":"resync","reason":"lagged"}` on channel lag
 
-The `@ruvyxa/realtime` deployment plugin enforces a separate production constraint: native WebSocket
-realtime requires a long-lived Node/Bun deployment. Serverless and static adapters, including Deno,
-are rejected with `RUV3201`; choose a Node or Bun self-hosted adapter when native realtime is
-required.
+The `@ruvyxa/realtime` plugin claims the capability and decides nothing about deployment. No build
+artifact serves the socket — not a serverless function, and not the standalone server the
+self-hosted adapters emit — so `adapter-runner.mjs` reports `RUV2205` for every adapter build, and a
+deployment that depends on native realtime runs `ruvyxa start` as its process.
 
 ---
 

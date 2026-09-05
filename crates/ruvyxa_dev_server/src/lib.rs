@@ -1372,7 +1372,7 @@ fn presence_runtime(plugin_runtime: Option<&Arc<PluginHost>>) -> Result<Option<P
 
 /// Capabilities this host serves that no deployed build can.
 ///
-/// `ruvyxa build` refuses them with `RUV3201` and `ruvyxa test:parity` reports
+/// `ruvyxa build` reports them with `RUV2205` and `ruvyxa test:parity` reports
 /// them, but both arrive after the application has been written around the
 /// transport — and replacing a transport is not a small change. Only `dev`
 /// says it: `ruvyxa start` is the long-lived host that *does* serve these, so
@@ -1402,7 +1402,7 @@ fn print_native_only_capabilities(notes: &[String]) {
     for note in notes {
         println!("{} {note} is served by this process only.", warn_text("!"));
         println!(
-            "  a serverless build is refused with RUV3201; a self-hosted build must stay long-lived"
+            "  no build artifact serves it; `ruvyxa build` reports RUV2205 and deployments need `ruvyxa start`"
         );
     }
     println!();

@@ -71,7 +71,9 @@ type มี `RuvyxaConfig`, `PageProps`, `GetStaticParams`, `RenderStrategy`, `A
 | Low-level integration | `getRouterInstance`, `resetInjectedScripts`, `NOT_FOUND_PROPERTY`                                                                      |
 
 `useRuvyxaLoader<T>(loader, { enabled?, deps? })` คืน `{ data, loading, error, refetch }`
-`hydrate({ root?, onError? })` dispatch hydration event และติดตั้ง reporting ที่เลือกได้
+`hydrate({ root?, onError? })` dispatch hydration event และติดตั้ง reporter ที่ entry
+ที่สร้างขึ้นส่ง `onRecoverableError`, `onCaughtError` และ `onUncaughtError` ของ React ให้; report
+ที่เกิดก่อนติดตั้งจะถูก เข้าคิวและส่งให้ตอนติดตั้ง และ `context.kind` บอกว่ามาจาก callback ไหน
 `notFound()` จาก package นี้ throw เสมอ จึงคืน `never` `<Script strategy>` มีค่าเป็น
 `beforeInteractive`, `afterInteractive` (ปริยาย) หรือ `lazyOnload` `RouteHref` เป็น `string`
 เว้นแต่เปิด `typedRoutes` และไฟล์ declaration ที่ generate อยู่ใน `include` ของ tsconfig;

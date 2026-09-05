@@ -89,7 +89,12 @@ describe('entry-templates route composition', () => {
       requestPathLiteral: '"/"',
       paramsLiteral: '{}',
     })
-    assert.match(source, /hydrateRoot\(document, __ruvyxaTreeElement\)/)
+    // Every root carries the options that route React's error callbacks to the
+    // reporter `hydrate({ onError })` installs; a mounted CSR shell reports the
+    // same way a hydrated document does.
+    assert.match(source, /hydrateRoot\(document, __ruvyxaTreeElement, __ruvyxaRootOptions\)/)
+    assert.match(source, /globalThis\.__RUVYXA_CSR__/)
+    assert.match(source, /createRoot\(document, __ruvyxaRootOptions\)/)
     assert.match(source, /globalThis\.__RUVYXA_ROOT__\.render\(__ruvyxaTreeElement\)/)
     assert.match(source, /\(globalThis\.__RUVYXA_ROUTES__ \|\|= \{\}\)\["\/"\] = __ruvyxaTree/)
   })

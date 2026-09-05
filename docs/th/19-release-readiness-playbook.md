@@ -29,7 +29,8 @@ rollback ของ platform ยังเป็นของ host ที่คุ�
 - ให้ private value ทุกตัวที่ `requireEnv([...])` ต้องการใน build environment
 - คง `build.map: false` ไว้ เว้นแต่นโยบาย release ของคุณอนุญาตให้เผยแพร่ source map ชัดเจน
 - ตั้ง `trustedProxyIps` เฉพาะ IP/CIDR ของ proxy ที่อยู่หน้า app จริง
-- เปลี่ยน auth memory store สำหรับ development เป็น durable store ก่อน deploy หลาย instance
+- เปลี่ยน auth memory store สำหรับ development เป็น `redisAuthStore`/`redisRateLimitStore` หรือ
+  durable store อื่นก่อน deploy หลาย instance
 
 ## 3. รัน release gate
 

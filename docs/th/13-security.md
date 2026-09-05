@@ -34,8 +34,9 @@ secret storage, upstream network control และ infrastructure policy ยั�
 - first-party `redirects` plugin validate destination ต่อ scheme-relative, backslash และ
   invalid-origin form ที่ไม่ปลอดภัย `securityHeaders` validate CSP directive map และให้ HSTS เป็น
   default
-- auth code มี signed/session/provider runtime และ rate-limit store contract แต่ durable storage และ
-  cookie/origin decision ที่ขึ้นกับ deployment เป็นงานของ application
+- auth code มี signed/session/provider runtime และ rate-limit store contract พร้อม Redis
+  implementation ของทั้งคู่ การเลือก store และ cookie/origin decision ที่ขึ้นกับ deployment
+  เป็นงานของ application
 
 ## Application checklist
 

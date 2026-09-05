@@ -203,6 +203,7 @@ globalThis.__RUVYXA_ROUTE_PATTERN__ = {route_pattern};
 {route_shell}
 
 {CLIENT_BOOTSTRAP_PRELUDE}
+{ROOT_OPTIONS_PRELUDE}
 
 const __ruvyxaCtx = {{
   // The registry is keyed by route pattern, so this bundle has no concrete
@@ -221,10 +222,10 @@ if (globalThis.__RUVYXA_ROOT__) {{
   // this tree into, so there is no markup to hydrate against and matching one
   // is a guaranteed mismatch — React discards the document and warns (#418).
   // Mounting is what the shell is for.
-  globalThis.__RUVYXA_ROOT__ = createRoot(document);
+  globalThis.__RUVYXA_ROOT__ = createRoot(document, __ruvyxaRootOptions);
   globalThis.__RUVYXA_ROOT__.render(__ruvyxaTreeElement);
 }} else {{
-  globalThis.__RUVYXA_ROOT__ = hydrateRoot(document, __ruvyxaTreeElement);
+  globalThis.__RUVYXA_ROOT__ = hydrateRoot(document, __ruvyxaTreeElement, __ruvyxaRootOptions);
 }}
 window.__RUVYXA_HYDRATED = true;
 "#
@@ -320,6 +321,42 @@ const CLIENT_BOOTSTRAP_PRELUDE: &str = r#"const __ruvyxaBootstrap = (() => {
 globalThis.__RUVYXA_ROUTE_PARAMS__ ??= __ruvyxaBootstrap.params
 globalThis.__RUVYXA_REQUEST_PATH__ ??= __ruvyxaBootstrap.path
 if (__ruvyxaBootstrap.csr === true) globalThis.__RUVYXA_CSR__ = true"#;
+
+/// The options every root the client entry creates is given.
+///
+/// `hydrateRoot(document, tree)` with no options left React's three error
+/// callbacks at their defaults, and `hydrate({ onError })` from `@ruvyxa/react`
+/// installed a handler nothing ever called. The entry cannot import that
+/// package, so the callbacks hand every report to a global the package's
+/// `hydrate()` fills in, and queue it until then — hydration runs before any
+/// application code can install anything, so the mismatches are exactly the
+/// reports that would otherwise be lost. React's own console output is kept on
+/// every path.
+///
+/// Mirrors `rootOptionsPrelude()` in
+/// `packages/ruvyxa/runtime/entry-templates.mjs`; held to the same bytes by
+/// `tests/packages/ruvyxa/entry-prelude-parity.test.mjs`, which also executes
+/// both copies.
+const ROOT_OPTIONS_PRELUDE: &str = r#"function __ruvyxaReportError(kind, error, info) {
+  const context = { kind, componentStack: info?.componentStack, digest: error?.digest }
+  const reporter = globalThis.__RUVYXA_HYDRATION_REPORTER__
+  if (typeof reporter === "function") {
+    try {
+      reporter(error, context)
+    } catch {}
+  } else {
+    const queue = (globalThis.__RUVYXA_HYDRATION_ERRORS__ ||= [])
+    if (queue.length < 100) queue.push({ error, context })
+  }
+  if (kind === "caught") console.error(error, context.componentStack ?? "")
+  else if (typeof reportError === "function") reportError(error)
+  else console.error(error)
+}
+const __ruvyxaRootOptions = {
+  onRecoverableError: (error, info) => __ruvyxaReportError("recoverable", error, info),
+  onCaughtError: (error, info) => __ruvyxaReportError("caught", error, info),
+  onUncaughtError: (error, info) => __ruvyxaReportError("uncaught", error, info),
+}"#;
 
 /// Inline error / not-found boundary class.
 ///
@@ -922,11 +959,17 @@ mod tests {
             "{source}"
         );
         assert!(source.contains("globalThis.__RUVYXA_CSR__"), "{source}");
-        assert!(source.contains("createRoot(document)"), "{source}");
+        // Both roots carry the same options: a mounted shell reports its
+        // render errors through the same reporter a hydrated document does.
         assert!(
-            source.contains("hydrateRoot(document, __ruvyxaTreeElement)"),
+            source.contains("createRoot(document, __ruvyxaRootOptions)"),
+            "{source}"
+        );
+        assert!(
+            source.contains("hydrateRoot(document, __ruvyxaTreeElement, __ruvyxaRootOptions)"),
             "a server-rendered document must still hydrate: {source}"
         );
+        assert!(source.contains(ROOT_OPTIONS_PRELUDE), "{source}");
     }
 
     #[test]

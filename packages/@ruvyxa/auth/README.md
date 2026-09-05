@@ -21,13 +21,22 @@
 ---
 
 ```ts
-import { createAuth, google } from '@ruvyxa/auth'
+import { createClient } from 'redis'
+import {
+  createAuth,
+  google,
+  nodeRedisCommandPort,
+  redisAuthStore,
+  redisRateLimitStore,
+} from '@ruvyxa/auth'
+
+const redis = nodeRedisCommandPort(await createClient({ url: process.env.REDIS_URL }).connect())
 
 export const auth = createAuth({
   secret: process.env.AUTH_SECRET!,
   origin: 'https://app.example.com',
-  store: redisAuthStore,
-  rateLimitStore: redisRateLimitStore,
+  store: redisAuthStore(redis),
+  rateLimitStore: redisRateLimitStore(redis),
   providers: {
     email: {
       type: 'credentials',
@@ -41,9 +50,11 @@ export const auth = createAuth({
 })
 ```
 
-Register `auth.plugin` in `ruvyxa.config.ts` for the self-hosted Node/Bun middleware path. On
-serverless/edge hosts, expose `auth.handle(request)` from an API route so authentication runs in the
-same platform request lifecycle. Both paths use the same endpoints under `/__ruvyxa/auth`.
+Register `auth.plugin` in `ruvyxa.config.ts`. The same plugin serves the endpoints under
+`/__ruvyxa/auth` on every host — `ruvyxa dev`/`start`, and every deployed build through the
+adapters' request handler — so nothing changes between a self-hosted process and a serverless
+function. `auth.handle(request)` is also exported for an application that wants to mount the
+endpoints itself.
 
 ```ts
 import { config } from 'ruvyxa/config'
@@ -56,11 +67,18 @@ The package exposes `@ruvyxa/auth/plugin` for integration authors who need `crea
 an explicit request/build bridge. Normal applications should use the `auth.plugin` value created by
 `createAuth()` so the handler, store validation, and plugin stay aligned.
 
+**Stores.** `AuthStore.take()` and `AuthRateLimitStore.consume()` must be atomic: a read-then-write
+in the application process lets two concurrent requests both claim one single-use token, or both
+pass one rate-limit slot. `redisAuthStore(port)` and `redisRateLimitStore(port)` run each as a
+single Lua script on the server, so several instances behind one load balancer share one truth. The
+package pins no Redis client: build the `port` with `nodeRedisCommandPort(client)` for node-redis or
+`ioredisCommandPort(client)` for ioredis, or hand in any object with `get`, `set`, `del`, and
+`eval`. The included memory stores are for tests and development, require `{ development: true }`,
+and are refused by production builds with `RUV3105`.
+
 The session cookie is opaque, HttpOnly, SameSite, and Secure on HTTPS. Session and one-time token
-keys are HMAC-derived. `AuthStore.take()` and `AuthRateLimitStore.consume()` must be atomic; the
-included memory implementations require `{ development: true }` and production builds reject them.
-OAuth state is additionally bound to an HttpOnly browser cookie, protocol parameters cannot be
-overridden, and non-local provider endpoints must use HTTPS.
+keys are HMAC-derived. OAuth state is additionally bound to an HttpOnly browser cookie, protocol
+parameters cannot be overridden, and non-local provider endpoints must use HTTPS.
 
 Account identity is `session.user.id` — `google:${sub}`, `github:${id}` — and never
 `session.user.email`. An address is a claim the identity provider may or may not stand behind, so

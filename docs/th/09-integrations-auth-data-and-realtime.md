@@ -6,10 +6,12 @@
 
 ## Authentication
 
-`@ruvyxa/auth` export `createAuth`, provider helper `google` และ `github`, memory store, type และ
-`AuthError` package export `@ruvyxa/auth/client` และ `@ruvyxa/auth/plugin` แยกกัน provider contract
-ที่รองรับมี credentials, OAuth, magic link และ WebAuthn memory store เป็น process-local; เลือก
-durable shared store ก่อน scale authentication แบบหลาย instance
+`@ruvyxa/auth` export `createAuth`, provider helper `google` และ `github`, memory store สำหรับ
+development เท่านั้น, Redis store `redisAuthStore` และ `redisRateLimitStore` พร้อม client adapter
+`nodeRedisCommandPort` และ `ioredisCommandPort`, type และ `AuthError` package export
+`@ruvyxa/auth/client` และ `@ruvyxa/auth/plugin` แยกกัน provider contract ที่รองรับมี credentials,
+OAuth, magic link และ WebAuthn memory store เป็น process-local และ production build จะปฏิเสธ; Redis
+store คือ durable shared implementation
 
 ```ts
 import { createAuth, memoryAuthStore, memoryRateLimitStore } from '@ruvyxa/auth'
@@ -37,9 +39,28 @@ const authClient = createAuthClient()
 
 auth path ปริยายคือ `/__ruvyxa/auth` client มี `login`, `logout`, `session` และ `oauth`;
 `createAuth` มี `handle`, `login`, `getSession` และ `logout` สำหรับ server-side integration memory
-store ต้องการ `{ development: true }` และตั้งใจให้ production build ล้มเหลวด้วย `RUV3105`; ให้ใช้
-durable implementation ของ `AuthStore` และ `AuthRateLimitStore` แทน `createAuthPlugin(bridge)`
-ใช้ได้เมื่อ ต้องมี custom bridge
+store ต้องการ `{ development: true }` และตั้งใจให้ production build ล้มเหลวด้วย `RUV3105` ให้ส่ง
+`redisAuthStore(port)` และ `redisRateLimitStore(port)` แทน โดย `port` คือ
+`nodeRedisCommandPort(client)` สำหรับ node-redis หรือ `ioredisCommandPort(client)` สำหรับ ioredis:
+`take` และ `consume` แต่ละตัวรันเป็น Lua script เดียว สอง instance หลัง load balancer จึงรับ magic
+link เดียวกันซ้ำหรือผ่าน rate-limit slot เดียวกันพร้อมกันไม่ได้ `AuthStore` และ `AuthRateLimitStore`
+อื่นที่ `take` และ `consume` เป็น atomic ก็ใช้ contract เดียวกันได้ `createAuthPlugin(bridge)`
+ใช้ได้เมื่อต้องมี custom bridge
+
+```ts
+import { createClient } from 'redis'
+import { createAuth, nodeRedisCommandPort, redisAuthStore, redisRateLimitStore } from '@ruvyxa/auth'
+
+const redis = nodeRedisCommandPort(await createClient({ url: process.env.REDIS_URL }).connect())
+
+export const auth = createAuth({
+  secret: process.env.AUTH_SECRET!,
+  origin: 'https://app.example.com',
+  store: redisAuthStore(redis),
+  rateLimitStore: redisRateLimitStore(redis),
+  providers: {},
+})
+```
 
 ## Database
 
@@ -66,22 +87,25 @@ framework ไม่มี database server, migration engine หรือ backup 
 ## Realtime และ adapter
 
 > **ตัดสินใจเรื่อง hosting ก่อนจะสร้างงานบนสิ่งนี้** ปลั๊กอิน realtime
-> ทั้งสองตัวต้องการโปรเซสที่อยู่ยาว เพื่อถือ WebSocket ไว้ จึงถูกให้บริการโดย `ruvyxa dev` และ
-> `ruvyxa start` เท่านั้น และไม่มี serverless build ตัวไหนให้บริการได้เลย `ruvyxa dev`
-> จะพิมพ์บรรทัดระบุ capability กับ path ของมัน, `ruvyxa build` ปฏิเสธ adapter ที่ไม่รองรับด้วย
-> `RUV3201` และ `ruvyxa test:parity` รายงานช่องว่างนี้ — แต่การเปลี่ยน transport
-> ทีหลังคือการเขียนแอปใหม่ ไม่ใช่การแก้ config
+> ทั้งสองตัวต้องการโปรเซสที่อยู่ยาว เพื่อถือ WebSocket ไว้ จึงถูกให้บริการโดย `ruvyxa dev`,
+> `ruvyxa start` และ `ruvyxa preview` เท่านั้น — และไม่มี build artifact ตัวไหนให้บริการได้เลย
+> ไม่ใช่ serverless function และไม่ใช่ standalone server ที่ adapter node, bun, deno, railway และ
+> render สร้างออกมา ซึ่งพูด HTTP ธรรมดาโดยไม่มีทาง upgrade `ruvyxa dev` จะพิมพ์บรรทัดระบุ capability
+> กับ path ของมัน, `ruvyxa build` รายงาน `RUV2205` ระบุ endpoint ที่ทุก adapter build จะไม่มี และ
+> `ruvyxa test:parity` รายงานช่องว่างนี้ — แต่การเปลี่ยน transport ทีหลังคือการเขียนแอปใหม่
+> ไม่ใช่การแก้ config
 
-`@ruvyxa/realtime/plugin` export `realtime()` ซึ่ง claim native realtime capability มันปฏิเสธ build
-ที่ไม่ใช่ long-lived Node/Bun output และปฏิเสธ adapter deno, aws, cloudflare, firebase, netlify,
-static และ vercel ด้วย `RUV3201` `@ruvyxa/realtime/client` export `createRealtimeClient`; จำกัด
-active channel ที่ 16 และ reconnect ด้วย bounded exponential backoff
+`@ruvyxa/realtime/plugin` export `realtime()` ซึ่ง claim native capability `realtime@1`
+และไม่ตัดสินอะไรเรื่อง deployment: target ไหนให้บริการ socket ได้เป็นเรื่องของ host ที่ให้บริการมัน
+ปลั๊กอินจึงไม่ปฏิเสธ build ใด deployment ที่พึ่ง socket นี้ต้องรัน `ruvyxa start` เป็นโปรเซสของมัน
+`@ruvyxa/realtime/client` export `createRealtimeClient`; จำกัด active channel ที่ 16 และ reconnect
+ด้วย bounded exponential backoff
 
 ## Real-time collaboration
 
 `@ruvyxa/realtime/plugin` export `collab()` ด้วย ซึ่ง claim native capability `presence@1` และ serve
-collaboration room แบบสองทางที่ `/__ruvyxa/collab` มันมีข้อจำกัดการ deploy เหมือน `realtime()` และ
-ปฏิเสธ build ชุดเดียวกันด้วย `RUV3201`
+collaboration room แบบสองทางที่ `/__ruvyxa/collab` มันมีรูปแบบการ deploy เหมือน `realtime()`:
+ให้บริการโดย Axum host และทุก adapter build รายงานเป็น `RUV2205`
 
 ```ts
 import { config } from 'ruvyxa/config'

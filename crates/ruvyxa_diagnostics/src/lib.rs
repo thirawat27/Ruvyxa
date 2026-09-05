@@ -403,7 +403,7 @@ const WINDOWS_VERBATIM_UNC_PREFIX: &str = "\\\\?\\UNC\\";
 /// the reported code as well produced two of them, the outer one naming nothing
 /// but which worker relayed it:
 ///
-/// - `RUV1700 RUV3201 native collaboration requires a long-lived Node/Bun build`
+/// - `RUV1700 RUV3105 production auth requires durable session/token and rate-limit stores`
 /// - `RUV2200 RUV2202 adapter static supports ssg, csr; unsupported routes: …`
 ///
 /// The inner code wins, because it is the one that names the decision and the
@@ -664,9 +664,9 @@ mod path_tests {
         assert_eq!(
             label_with_code(
                 "RUV1700",
-                "RUV3201 native collaboration requires a long-lived build"
+                "RUV3105 production auth requires durable session/token and rate-limit stores"
             ),
-            "RUV3201 native collaboration requires a long-lived build"
+            "RUV3105 production auth requires durable session/token and rate-limit stores"
         );
         assert_eq!(
             label_with_code("RUV2200", "RUV2202 adapter static supports ssg, csr"),
@@ -1240,10 +1240,10 @@ mod path_tests {
 
     #[test]
     fn a_code_alone_is_a_code() {
-        assert_eq!(label_with_code("RUV1700", "RUV3201"), "RUV3201");
+        assert_eq!(label_with_code("RUV1700", "RUV3105"), "RUV3105");
         assert_eq!(
-            label_with_code("RUV1700", "RUV3201: detail"),
-            "RUV3201: detail"
+            label_with_code("RUV1700", "RUV3105: detail"),
+            "RUV3105: detail"
         );
     }
 }

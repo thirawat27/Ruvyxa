@@ -30,7 +30,8 @@ Use the production configuration pattern in [Configuration](07-configuration.md)
 - Supply every private value required by `requireEnv([...])` in the build environment.
 - Keep `build.map: false` unless your release policy explicitly allows published source maps.
 - Set `trustedProxyIps` only to the IPs/CIDRs of proxies that actually sit in front of the app.
-- Replace development-only auth memory stores with durable stores before multi-instance deployment.
+- Replace development-only auth memory stores with `redisAuthStore`/`redisRateLimitStore` or another
+  durable store before multi-instance deployment.
 
 ## 3. Run the release gate
 

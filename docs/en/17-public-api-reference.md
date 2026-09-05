@@ -71,11 +71,13 @@ subtypes `SiteSitemapConfig`, `SiteSitemapEntry`, `SiteSitemapEntryDefaults`, `S
 | Low-level integration | `getRouterInstance`, `resetInjectedScripts`, `NOT_FOUND_PROPERTY`                                                                      |
 
 `useRuvyxaLoader<T>(loader, { enabled?, deps? })` returns `{ data, loading, error, refetch }`.
-`hydrate({ root?, onError? })` dispatches the hydration event and installs optional reporting.
-`notFound()` from this package always throws and therefore returns `never`. `<Script strategy>` is
-`beforeInteractive`, `afterInteractive` (default), or `lazyOnload`. `RouteHref` is `string` unless
-`typedRoutes` is enabled and the generated declaration file is in the tsconfig `include`;
-`route(href)` asserts a runtime string into it.
+`hydrate({ root?, onError? })` dispatches the hydration event and installs the reporter the
+generated entry hands React's `onRecoverableError`, `onCaughtError`, and `onUncaughtError` to;
+reports raised before it is installed are queued and delivered on install, and `context.kind` names
+the callback. `notFound()` from this package always throws and therefore returns `never`.
+`<Script strategy>` is `beforeInteractive`, `afterInteractive` (default), or `lazyOnload`.
+`RouteHref` is `string` unless `typedRoutes` is enabled and the generated declaration file is in the
+tsconfig `include`; `route(href)` asserts a runtime string into it.
 
 `useFlight<T>()` reads the public payload from the current soft navigation. It is `undefined` when
 the matched route has no `flight` export, or when the first server-rendered document did not include

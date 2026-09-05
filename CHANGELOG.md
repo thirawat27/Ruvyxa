@@ -2,6 +2,60 @@
 
 ## v1.1.5 (2026-09-05)
 
+### `@ruvyxa/realtime` claims; the host that serves decides
+
+`realtime()` and `collab()` refused six adapters with `RUV3201` and let node, bun, deno, railway,
+and render through, on the premise that process lifetime was what mattered. It was not: no build
+artifact serves the socket — the standalone server those five adapters emit speaks plain HTTP with
+no upgrade path, measured by launching a railway build of `examples/demo` and receiving the
+project's 404 page for `/__ruvyxa/realtime`. So `ruvyxa build --adapter vercel` failed outright
+while a railway build shipped a dead endpoint and the README called it production-ready — and the
+correct report, `RUV2205` from `adapter-runner.mjs`, written for every adapter, went to a captured
+stderr that `run_adapter_runner` surfaced only when the runner itself failed.
+
+- The plugins only claim the capability. `RUV3201` and `RealtimeDeploymentError` are gone; the
+  documentation and the troubleshooting table point at `RUV2205`, and the package tests assert that
+  neither plugin registers a build hook at all.
+- A successful adapter run's stderr is forwarded through `warn!`, so `ruvyxa build` prints `RUV2205`
+  naming the plugin, the capability, the path, and the adapter.
+- `ruvyxa dev`'s native-only note says what is true: no build artifact serves the socket, and a
+  deployment that depends on it runs `ruvyxa start`.
+
+### `@ruvyxa/auth` ships durable stores
+
+Production builds refused the memory stores with `RUV3105`, and the package shipped nothing else —
+its README example named a `redisAuthStore` that did not exist — so production meant hand-writing
+five methods with the atomicity the contract demands. `redisAuthStore(port)` and
+`redisRateLimitStore(port)` ship now with no new dependency: the client arrives as a
+`RedisCommandPort` built by `nodeRedisCommandPort()` or `ioredisCommandPort()`, because the two
+clients disagree on the `SET` and `EVAL` signatures and guessing sends a malformed command to the
+session store. `take` and `consume` are single Lua scripts — atomic, and `EVAL` has been there since
+2.6, so no `GETDEL` floor — and `consume` restores the window on a counter that lost its TTL rather
+than letting it lock a client out forever. The unit suite pins both scripts as text and by effect;
+`scripts/smoke-redis-stores.mjs` runs the shipped stores against a real Redis over RESP2 and races
+eight connections for one token; the `redis-stores` CI job runs it against `redis:8-alpine`.
+
+### `@ruvyxa/react`'s `hydrate({ onError })` hears the errors it was documented to report
+
+`hydrate()` stored the handler in a module variable that only `reportHydrationError()` read, and
+nothing in either bundler's generated entry called that: both created their root with
+`hydrateRoot(document, tree)` and no options, so React's `onRecoverableError` — the callback a
+hydration mismatch arrives through — kept its default, and the handler an application installed to
+send mismatches to its error tracker received nothing at all. The development log it promised was
+gated on a `__RUVYXA_DEV__` global nothing set.
+
+- Both entries now emit a root-options prelude and pass it to every `hydrateRoot` and `createRoot`.
+  The three React callbacks hand each report — with `kind`, `componentStack`, and `digest` — to
+  `globalThis.__RUVYXA_HYDRATION_REPORTER__`, or queue it (bounded) until `hydrate({ onError })`
+  installs one, because hydration runs before any application code can. React's own console output
+  is kept on every path, so a page that never calls `hydrate()` behaves exactly as before.
+- The two copies of the prelude are held to the same bytes and executed against the same stand-in
+  React by `entry-prelude-parity.test.mjs`, which also checks that no root on either side is created
+  without the options.
+- The Node entry gained the `createRoot` branch for a client-rendered shell that the Rust entry has
+  had since `__RUVYXA_CSR__` was introduced: the same route mounted under `ruvyxa start` and
+  reported a #418 mismatch under `ruvyxa dev`.
+
 ### `cache.handler` takes effect under `ruvyxa start` and `ruvyxa preview`
 
 The setting reached every deployed platform and neither host this repository serves. A deployed

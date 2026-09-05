@@ -31,11 +31,11 @@ class FakeSocket {
 }
 
 describe('@ruvyxa/realtime', () => {
-  it('registers one validated native transport and rejects unsupported builds', async () => {
+  it('claims the native transport and registers no deployment gate of its own', async () => {
     assert.equal(realtimeEntry, realtime)
     const plugin = realtimeEntry({ path: '/events', heartbeatMs: 10_000, capacity: 64 })
-    let registered: unknown
-    let buildHook: ((context: any) => void | Promise<void>) | undefined
+    const claims: Array<{ capability: string; options: unknown }> = []
+    const buildHooks: unknown[] = []
     await plugin.register({
       environment: 'production',
       http: { onRequest() {}, onResponse() {}, route() {} },
@@ -45,38 +45,26 @@ describe('@ruvyxa/realtime', () => {
         onLoad() {},
         onTransform() {},
         onComplete(value) {
-          buildHook = value
+          buildHooks.push(value)
         },
       },
       dev: { onFileChange() {} },
       diagnostics: { report() {} },
       native: {
-        claim(_capability, value) {
-          registered = value
+        claim(capability, value) {
+          claims.push({ capability, options: value })
         },
       },
     })
-    assert.deepEqual(registered, { path: '/events', heartbeatMs: 10_000, capacity: 64 })
-    await buildHook?.({ manifest: { target: 'node', adapter: 'node' } })
-    await buildHook?.({ manifest: { target: 'node', adapter: { name: 'bun' } } })
-    await buildHook?.({ manifest: { target: 'node', adapter: 'railway' } })
-    await buildHook?.({ manifest: { target: 'node', adapter: { name: 'render' } } })
-    await assert.rejects(
-      async () => buildHook?.({ manifest: { target: 'edge', adapter: 'cloudflare' } }),
-      /RUV3201.*long-lived/,
-    )
-    await assert.rejects(
-      async () => buildHook?.({ manifest: { target: 'node', adapter: 'firebase' } }),
-      /RUV3201.*long-lived/,
-    )
-    await assert.rejects(
-      async () => buildHook?.({ manifest: { target: 'node', adapter: 'aws' } }),
-      /RUV3201.*long-lived/,
-    )
-    await assert.rejects(
-      async () => buildHook?.({ manifest: { target: 'node', adapter: 'vercel' } }),
-      /RUV3201.*long-lived/,
-    )
+    assert.deepEqual(claims, [
+      { capability: 'realtime@1', options: { path: '/events', heartbeatMs: 10_000, capacity: 64 } },
+    ])
+    // Whether a target can serve the socket is decided where the socket is
+    // served — `adapter-runner.mjs` reports RUV2205 for every build artifact,
+    // because none of them holds a connection. A gate here was a second owner
+    // of that rule with the opposite premise: it refused vercel outright and
+    // let a railway build ship `/__ruvyxa/realtime` as a 404.
+    assert.deepEqual(buildHooks, [])
   })
 
   it('routes action events only to matching channel listeners', () => {

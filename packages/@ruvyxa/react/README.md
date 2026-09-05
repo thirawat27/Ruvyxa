@@ -61,6 +61,28 @@ navigation. It does not require React Canary's experimental `<ViewTransition>` c
 Ruvyxa targets React 19 and exercises the stable `useActionState` and `useFormStatus` APIs in its
 compatibility suite.
 
+## Hydration and runtime error reporting
+
+```tsx
+'use client'
+import { hydrate } from '@ruvyxa/react'
+
+hydrate({
+  onError: (error, { kind, componentStack, digest }) => {
+    errorTracker.captureException(error, { kind, componentStack, digest })
+  },
+})
+```
+
+The generated route entry passes React's `onRecoverableError`, `onCaughtError`, and
+`onUncaughtError` to every root it creates, and each report reaches the handler `hydrate()`
+installs. Reports raised before the handler exists — hydration mismatches happen before any
+application code runs — are queued and delivered when it is installed, so the first call sees them
+too. `kind` says which callback produced the report: `recoverable` is a hydration mismatch React
+rendered past, `caught` reached an error boundary, `uncaught` unmounted the root, and `manual` came
+from `reportHydrationError()`. React's own console output is unchanged; a page that never calls
+`hydrate()` behaves exactly as before.
+
 ## SEO, GEO, and AEO primitives
 
 ```tsx

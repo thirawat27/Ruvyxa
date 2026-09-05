@@ -7,10 +7,12 @@
 
 ## Authentication
 
-`@ruvyxa/auth` exports `createAuth`, provider helpers `google` and `github`, memory stores, types,
-and `AuthError`. Its package exports `@ruvyxa/auth/client` and `@ruvyxa/auth/plugin` separately.
-Supported provider contracts include credentials, OAuth, magic link, and WebAuthn. The memory stores
-are process-local; choose a durable shared store before horizontally scaling authentication.
+`@ruvyxa/auth` exports `createAuth`, provider helpers `google` and `github`, the development-only
+memory stores, the Redis stores `redisAuthStore` and `redisRateLimitStore` with their
+`nodeRedisCommandPort` and `ioredisCommandPort` client adapters, types, and `AuthError`. Its package
+exports `@ruvyxa/auth/client` and `@ruvyxa/auth/plugin` separately. Supported provider contracts
+include credentials, OAuth, magic link, and WebAuthn. The memory stores are process-local and
+refused by production builds; the Redis stores are the durable, shared implementation.
 
 ```ts
 import { createAuth, memoryAuthStore, memoryRateLimitStore } from '@ruvyxa/auth'
@@ -40,8 +42,27 @@ const authClient = createAuthClient()
 The default auth path is `/__ruvyxa/auth`. The client exposes `login`, `logout`, `session`, and
 `oauth`; `createAuth` also exposes `handle`, `login`, `getSession`, and `logout` for server-side
 integration. The memory stores require `{ development: true }` and deliberately fail the production
-build with `RUV3105`; provide durable `AuthStore` and `AuthRateLimitStore` implementations instead.
+build with `RUV3105`. Pass `redisAuthStore(port)` and `redisRateLimitStore(port)` instead, where
+`port` is `nodeRedisCommandPort(client)` for node-redis or `ioredisCommandPort(client)` for ioredis:
+`take` and `consume` each run as one Lua script, so two instances behind a load balancer cannot both
+accept one magic link or both pass one rate-limit slot. Any other `AuthStore` and
+`AuthRateLimitStore` whose `take` and `consume` are atomic satisfies the same contracts.
 `createAuthPlugin(bridge)` is available when a custom bridge is needed.
+
+```ts
+import { createClient } from 'redis'
+import { createAuth, nodeRedisCommandPort, redisAuthStore, redisRateLimitStore } from '@ruvyxa/auth'
+
+const redis = nodeRedisCommandPort(await createClient({ url: process.env.REDIS_URL }).connect())
+
+export const auth = createAuth({
+  secret: process.env.AUTH_SECRET!,
+  origin: 'https://app.example.com',
+  store: redisAuthStore(redis),
+  rateLimitStore: redisRateLimitStore(redis),
+  providers: {},
+})
+```
 
 ## Database
 
@@ -68,22 +89,24 @@ application/infrastructure responsibilities.
 ## Realtime and adapters
 
 > **Decide hosting before you build on this.** Both realtime plugins need a process that stays alive
-> to own the WebSocket, so they are served by `ruvyxa dev` and `ruvyxa start` and by no serverless
-> build at all. `ruvyxa dev` prints a line naming the capability and its path, `ruvyxa build`
-> refuses the unsupported adapters with `RUV3201`, and `ruvyxa test:parity` reports the gap — but
+> to own the WebSocket, so they are served by `ruvyxa dev`, `ruvyxa start`, and `ruvyxa preview` —
+> and by no build artifact at all: not a serverless function, and not the standalone server the
+> node, bun, deno, railway, and render adapters emit, which speaks plain HTTP with no upgrade path.
+> `ruvyxa dev` prints a line naming the capability and its path, `ruvyxa build` reports `RUV2205`
+> naming the endpoint every adapter build will lack, and `ruvyxa test:parity` reports the gap — but
 > replacing the transport afterwards is an application rewrite, not a configuration change.
 
-`@ruvyxa/realtime/plugin` exports `realtime()`, which claims native realtime capability. It rejects
-builds that are not long-lived Node/Bun output and explicitly rejects deno, aws, cloudflare,
-firebase, netlify, static, and vercel adapters with `RUV3201`. `@ruvyxa/realtime/client` exports
-`createRealtimeClient`; it caps active channels at 16 and reconnects with bounded exponential
-backoff.
+`@ruvyxa/realtime/plugin` exports `realtime()`, which claims the native `realtime@1` capability and
+decides nothing about deployment: whether a target can serve the socket is the business of the host
+that serves it, so the plugin refuses no build. A deployment that depends on the socket runs
+`ruvyxa start` as its process. `@ruvyxa/realtime/client` exports `createRealtimeClient`; it caps
+active channels at 16 and reconnects with bounded exponential backoff.
 
 ## Real-time collaboration
 
 `@ruvyxa/realtime/plugin` also exports `collab()`, which claims the native `presence@1` capability
 and serves bidirectional collaboration rooms at `/__ruvyxa/collab`. It carries the same deployment
-constraint as `realtime()` and fails the same builds with `RUV3201`.
+shape as `realtime()`: served by the Axum host, reported as `RUV2205` by every adapter build.
 
 ```ts
 import { config } from 'ruvyxa/config'

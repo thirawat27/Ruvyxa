@@ -120,8 +120,8 @@ RUVYXA_DEMO_PASSWORD=replace-this-demo-password
 
 The generated credentials provider accepts only the email/password values above. It is a runnable
 demonstration, not a user database or password-hashing system. Before a production build, replace
-the development-only memory auth and rate-limit stores with durable atomic implementations;
-otherwise the auth package fails closed with `RUV3105`.
+the development-only memory auth and rate-limit stores with `redisAuthStore`/`redisRateLimitStore`
+or another durable atomic implementation; otherwise the auth package fails closed with `RUV3105`.
 
 ### Conflicts and `--force`
 

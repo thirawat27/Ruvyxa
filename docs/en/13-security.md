@@ -35,8 +35,9 @@ secret storage, upstream network controls, and infrastructure policy remain your
 - The first-party `redirects` plugin validates destinations against unsafe scheme-relative,
   backslash, and invalid-origin forms. `securityHeaders` validates CSP directive maps and defaults
   HSTS.
-- Auth code defines a signed/session/provider runtime and rate-limit store contracts, but durable
-  storage and deployment-specific cookie/origin decisions are application work.
+- Auth code defines a signed/session/provider runtime and rate-limit store contracts and ships Redis
+  implementations of both; choosing the store and deployment-specific cookie/origin decisions are
+  application work.
 
 ## Application checklist
 

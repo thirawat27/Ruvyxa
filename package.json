@@ -29,7 +29,8 @@
     "test:full-flow": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-full-flow.ps1",
     "publish:dry-run": "pnpm -r --filter '{./packages/**}' --filter '!@ruvyxa/cli-*' publish --access public --dry-run",
     "check:silent-defaults": "node scripts/check-silent-defaults.mjs",
-    "check:cross-language-constants": "node scripts/check-cross-language-constants.mjs"
+    "check:cross-language-constants": "node scripts/check-cross-language-constants.mjs",
+    "smoke:redis": "node scripts/smoke-redis-stores.mjs"
   },
   "devDependencies": {
     "@types/node": "24.13.3",

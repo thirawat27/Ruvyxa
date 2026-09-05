@@ -81,6 +81,49 @@ if (__ruvyxaBootstrap.csr === true) globalThis.__RUVYXA_CSR__ = true`
 }
 
 /**
+ * The options every root this entry creates is given.
+ *
+ * `hydrateRoot(document, tree)` with no options meant React's three error
+ * callbacks kept their defaults, and `hydrate({ onError })` from
+ * `@ruvyxa/react` — documented as the way to hear about a hydration mismatch —
+ * installed a handler nothing ever called. The entry cannot import that
+ * package, so the callbacks hand every report to a global the package's
+ * `hydrate()` fills in, and queue it until then: hydration runs before any
+ * application code can install anything, so without the queue the mismatches
+ * are exactly the reports that would be lost.
+ *
+ * React's own console output is preserved on every path. A page with no
+ * reporter therefore looks as it always did, and a page with one gets the
+ * same errors a second time, structured.
+ *
+ * Mirrored by `ROOT_OPTIONS_PRELUDE` in `crates/ruvyxa_bundler/src/output.rs`
+ * and held to the same bytes by
+ * `tests/packages/ruvyxa/entry-prelude-parity.test.mjs`.
+ */
+export function rootOptionsPrelude() {
+  return `function __ruvyxaReportError(kind, error, info) {
+  const context = { kind, componentStack: info?.componentStack, digest: error?.digest }
+  const reporter = globalThis.__RUVYXA_HYDRATION_REPORTER__
+  if (typeof reporter === "function") {
+    try {
+      reporter(error, context)
+    } catch {}
+  } else {
+    const queue = (globalThis.__RUVYXA_HYDRATION_ERRORS__ ||= [])
+    if (queue.length < 100) queue.push({ error, context })
+  }
+  if (kind === "caught") console.error(error, context.componentStack ?? "")
+  else if (typeof reportError === "function") reportError(error)
+  else console.error(error)
+}
+const __ruvyxaRootOptions = {
+  onRecoverableError: (error, info) => __ruvyxaReportError("recoverable", error, info),
+  onCaughtError: (error, info) => __ruvyxaReportError("caught", error, info),
+  onUncaughtError: (error, info) => __ruvyxaReportError("uncaught", error, info),
+}`
+}
+
+/**
  * Emit the document writers a deployed function needs, as source text.
  *
  * Every other writer of these blocks is Rust: `client_hydration_script` for a
@@ -1234,7 +1277,7 @@ export function clientEntrySource({
   const slotResolver = intercepts.length > 0 ? `\n${ROUTE_SLOT_PRELUDE}` : ''
   const interceptRegistry = interceptRegistryStatement(routePath, intercepts)
   return `import React from "react"
-import { hydrateRoot } from "react-dom/client"
+import { createRoot, hydrateRoot } from "react-dom/client"
 ${imports.join('\n')}
 
 ${routeContextPrelude()}
@@ -1245,6 +1288,7 @@ ${interceptRegistry}
 ${shell}
 
 ${clientBootstrapPrelude()}
+${rootOptionsPrelude()}
 
 const __ruvyxaCtx = {
   path: globalThis.__RUVYXA_REQUEST_PATH__ ?? ${requestPathLiteral},
@@ -1254,8 +1298,17 @@ const __ruvyxaTreeElement = __ruvyxaTree(__ruvyxaCtx)
 
 if (globalThis.__RUVYXA_ROOT__) {
   globalThis.__RUVYXA_ROOT__.render(__ruvyxaTreeElement)
+} else if (globalThis.__RUVYXA_CSR__) {
+  // A client-rendered route is served as a shell the server never rendered
+  // this tree into, so there is no markup to hydrate against and matching one
+  // is a guaranteed mismatch — React discards the document and warns (#418).
+  // Mounting is what the shell is for. The Rust entry had this branch and this
+  // one did not, so the same route mounted under \`ruvyxa start\` and mismatched
+  // under \`ruvyxa dev\`.
+  globalThis.__RUVYXA_ROOT__ = createRoot(document, __ruvyxaRootOptions)
+  globalThis.__RUVYXA_ROOT__.render(__ruvyxaTreeElement)
 } else {
-  globalThis.__RUVYXA_ROOT__ = hydrateRoot(document, __ruvyxaTreeElement)
+  globalThis.__RUVYXA_ROOT__ = hydrateRoot(document, __ruvyxaTreeElement, __ruvyxaRootOptions)
 }
 window.__RUVYXA_HYDRATED = true
 `
@@ -1622,6 +1675,7 @@ ${routeContextPrelude()}
 ${routeBoundaryPrelude()}
 
 ${clientBootstrapPrelude()}
+${rootOptionsPrelude()}
 
 // One decode per payload. React's decoder consumes the stream it is given, so
 // calling it again for a re-render would hand React a reader that is already
@@ -1698,7 +1752,7 @@ if (__ruvyxaPayload !== null) {
   if (globalThis.__RUVYXA_ROOT__) {
     globalThis.__RUVYXA_ROOT__.render(__ruvyxaElement)
   } else {
-    globalThis.__RUVYXA_ROOT__ = hydrateRoot(document, __ruvyxaElement)
+    globalThis.__RUVYXA_ROOT__ = hydrateRoot(document, __ruvyxaElement, __ruvyxaRootOptions)
   }
   window.__RUVYXA_HYDRATED = true
 }

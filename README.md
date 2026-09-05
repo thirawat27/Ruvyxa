@@ -803,7 +803,7 @@ as a deployment entrypoint.
 | [`create-ruvyxa`](packages/create-ruvyxa)                           | Minimal app scaffolder (4 starters)                                        |
 | [`@ruvyxa/core`](packages/@ruvyxa/core)                             | Typed config, server APIs, cache helpers, responses, and adapter contracts |
 | [`@ruvyxa/react`](packages/@ruvyxa/react)                           | React components, hooks, SEO, error boundary, hydration                    |
-| [`@ruvyxa/auth`](packages/@ruvyxa/auth)                             | Provider-driven authentication (GitHub, Google, Discord, magic link)       |
+| [`@ruvyxa/auth`](packages/@ruvyxa/auth)                             | Provider-driven authentication (credentials, GitHub, Google, magic link)   |
 | [`@ruvyxa/database`](packages/@ruvyxa/database)                     | Typed database adapter facade (Prisma, DynamoDB)                           |
 | [`@ruvyxa/realtime`](packages/@ruvyxa/realtime)                     | WebSocket transport for opted-in server actions                            |
 | [`@ruvyxa/testing`](packages/@ruvyxa/testing)                       | Dependency-free loader, action, and cache test doubles                     |

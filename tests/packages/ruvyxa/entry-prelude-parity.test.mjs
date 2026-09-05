@@ -23,6 +23,7 @@ import { describe, it } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 import {
+  rootOptionsPrelude,
   routeBoundaryPrelude,
   routeContextPrelude,
   routeMetaPrelude,
@@ -91,6 +92,157 @@ const HOSTS = {
     metaWithLang: rustRawLiteral('META_PRELUDE') + rustRawLiteral('META_LANG_PRELUDE'),
   },
 }
+
+/**
+ * The root-options prelude: what React's error callbacks do with a report.
+ *
+ * Executed rather than matched, with `globalThis`, `reportError`, and `console`
+ * bound to recording stand-ins. The two copies are additionally required to be
+ * the same bytes, because unlike the boundary they contain no formatting either
+ * side owns — and a queue bound or a callback name that differed between the
+ * bundlers would report errors on one half of the deployments only.
+ */
+describe('root options prelude', () => {
+  const nodeSource = rootOptionsPrelude()
+  const rustSource = rustRawLiteral('ROOT_OPTIONS_PRELUDE')
+
+  it('is mirrored byte-for-byte by the Rust bundler', () => {
+    assert.equal(rustSource, nodeSource)
+  })
+
+  function run(source, globals) {
+    const reported = []
+    const logged = []
+    const options = new Function(
+      'globalThis',
+      'reportError',
+      'console',
+      `${source}\nreturn __ruvyxaRootOptions`,
+    )(globals, (error) => reported.push(error), { error: (...args) => logged.push(args) })
+    return { options, reported, logged }
+  }
+
+  for (const [host, source] of [
+    ['the Node entry templates', nodeSource],
+    ['the Rust bundler', rustSource],
+  ]) {
+    describe(`emitted by ${host}`, () => {
+      it('hands every React callback to the installed reporter with its kind', () => {
+        const seen = []
+        const globals = {
+          __RUVYXA_HYDRATION_REPORTER__: (error, context) => seen.push([error, context]),
+        }
+        const { options } = run(source, globals)
+        const mismatch = Object.assign(new Error('mismatch'), { digest: 'd1' })
+        options.onRecoverableError(mismatch, { componentStack: 'stack-a' })
+        options.onCaughtError(new Error('caught'), { componentStack: 'stack-b' })
+        options.onUncaughtError(new Error('uncaught'), {})
+        assert.deepEqual(
+          seen.map(([error, context]) => [error.message, context]),
+          [
+            ['mismatch', { kind: 'recoverable', componentStack: 'stack-a', digest: 'd1' }],
+            ['caught', { kind: 'caught', componentStack: 'stack-b', digest: undefined }],
+            ['uncaught', { kind: 'uncaught', componentStack: undefined, digest: undefined }],
+          ],
+        )
+        assert.equal(
+          globals.__RUVYXA_HYDRATION_ERRORS__,
+          undefined,
+          'nothing is queued once a reporter exists',
+        )
+      })
+
+      it('queues a report raised before any reporter exists, with a bound', () => {
+        const globals = {}
+        const { options } = run(source, globals)
+        options.onRecoverableError(new Error('early'), { componentStack: 's' })
+        assert.equal(globals.__RUVYXA_HYDRATION_ERRORS__.length, 1)
+        assert.equal(globals.__RUVYXA_HYDRATION_ERRORS__[0].error.message, 'early')
+        assert.deepEqual(globals.__RUVYXA_HYDRATION_ERRORS__[0].context, {
+          kind: 'recoverable',
+          componentStack: 's',
+          digest: undefined,
+        })
+        for (let index = 0; index < 500; index += 1) {
+          options.onUncaughtError(new Error(`flood ${index}`), {})
+        }
+        assert.equal(
+          globals.__RUVYXA_HYDRATION_ERRORS__.length,
+          100,
+          'a page in a render loop must not grow the queue without bound',
+        )
+      })
+
+      it("keeps React's own console output whether or not a reporter is installed", () => {
+        const withReporter = run(source, { __RUVYXA_HYDRATION_REPORTER__: () => {} })
+        withReporter.options.onRecoverableError(new Error('r'), {})
+        withReporter.options.onUncaughtError(new Error('u'), {})
+        withReporter.options.onCaughtError(new Error('c'), { componentStack: 'stack' })
+        assert.deepEqual(
+          withReporter.reported.map((error) => error.message),
+          ['r', 'u'],
+          'recoverable and uncaught errors go through reportError, as React does by default',
+        )
+        assert.deepEqual(
+          withReporter.logged.map(([error]) => error.message),
+          ['c'],
+        )
+
+        const without = run(source, {})
+        without.options.onRecoverableError(new Error('r'), {})
+        assert.deepEqual(
+          without.reported.map((error) => error.message),
+          ['r'],
+        )
+      })
+
+      it('falls back to console.error where reportError is missing', () => {
+        const logged = []
+        const options = new Function(
+          'globalThis',
+          'reportError',
+          'console',
+          `${source}\nreturn __ruvyxaRootOptions`,
+        )({}, undefined, { error: (...args) => logged.push(args) })
+        options.onUncaughtError(new Error('no reportError'), {})
+        assert.equal(logged.length, 1)
+      })
+
+      it('survives a reporter that throws', () => {
+        const { options, reported } = run(source, {
+          __RUVYXA_HYDRATION_REPORTER__: () => {
+            throw new Error('reporter down')
+          },
+        })
+        assert.doesNotThrow(() => options.onRecoverableError(new Error('still logged'), {}))
+        assert.equal(reported.length, 1)
+      })
+    })
+  }
+
+  it('is passed to every root both bundlers create', () => {
+    // Text-level, because the entries are format strings around these
+    // preludes: what matters is that no `hydrateRoot`/`createRoot` call is left
+    // without the options, on either side.
+    const templates = readFileSync(
+      path.join(workspaceRoot, 'packages/ruvyxa/runtime/entry-templates.mjs'),
+      'utf8',
+    )
+    for (const [name, text] of [
+      ['entry-templates.mjs', templates],
+      ['output.rs', outputRs],
+    ]) {
+      // Only the assignments are calls; the same names also appear in the
+      // comments explaining them. Every root either bundler creates is stored
+      // on `__RUVYXA_ROOT__`, which is what the router renders through.
+      const roots = text.match(/__RUVYXA_ROOT__ = (?:hydrateRoot|createRoot)\([^\n]*/g) ?? []
+      assert.ok(roots.length >= 2, `${name} creates fewer roots than expected: ${roots.length}`)
+      for (const call of roots) {
+        assert.match(call, /__ruvyxaRootOptions\)/, `${name}: ${call}`)
+      }
+    }
+  })
+})
 
 for (const [host, preludes] of Object.entries(HOSTS)) {
   describe(`route context prelude emitted by ${host}`, () => {
