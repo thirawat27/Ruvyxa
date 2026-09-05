@@ -163,6 +163,7 @@ describe('createRuvyxaApp', () => {
         'app/layout.tsx',
         'app/page.tsx',
         'package.json',
+        'postcss.config.ts',
         'public/ruvyxa.png',
         'ruvyxa.config.ts',
         'tsconfig.json',
@@ -172,6 +173,13 @@ describe('createRuvyxaApp', () => {
       assert.deepEqual(packageJson.scripts, starterScripts)
       assert.equal(packageJson.dependencies.ruvyxa, `^${frameworkVersion}`)
       assert.equal(packageJson.dependencies['@ruvyxa/react'], `^${frameworkVersion}`)
+      // Tailwind CSS v4 ships with the starter: the config above names the
+      // plugin, and these three are what the plugin chain resolves from the
+      // project's own node_modules. A starter that lost one would scaffold a
+      // stylesheet whose `@import 'tailwindcss'` fails the first build.
+      for (const name of ['@tailwindcss/postcss', 'postcss', 'tailwindcss']) {
+        assert.ok(packageJson.devDependencies[name], `the starter must declare ${name}`)
+      }
     } finally {
       await rm(tempRoot, { recursive: true, force: true })
     }
@@ -313,6 +321,7 @@ async function readPackageJson(root: string): Promise<{
   name: string
   scripts: Record<string, string>
   dependencies: Record<string, string>
+  devDependencies: Record<string, string>
 }> {
   return JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
 }

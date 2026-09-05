@@ -139,6 +139,16 @@ took the `forced` flag at all. `platformDocumentStoreSource` in `@ruvyxa/core` e
 adapter that must reach its platform's cache on a forced write names the purge as `onForcedWrite`,
 and the contract test asserts both halves rather than a parameter list.
 
+### The `minimal`, `blog`, and `crud` starters ship Tailwind CSS v4
+
+Each carries `tailwindcss`, `@tailwindcss/postcss`, and `postcss` as development dependencies, a
+`postcss.config.ts` declaring the one plugin, and `@import 'tailwindcss'` at the top of
+`app/globals.css`, so a project scaffolded by `create-ruvyxa` can use utility classes on its first
+page. Nothing in the framework changed: the PostCSS stage already ran whatever a project's config
+declared, on one code path for `dev` and `build`. The starters' own stylesheets are kept as they
+were and declared after the import, so Preflight resets nothing they set. The `api` starter renders
+no page and is unchanged; so is `plugin`, which has no application.
+
 ### Smaller repairs
 
 - The two Axum mutation endpoints share one rate-limit gate, `action_rate_limit_refusal`, rather

@@ -22,5 +22,11 @@
       "~/*": ["./*"]
     }
   },
-  "include": ["app", "ruvyxa.config.ts", ".ruvyxa/types/**/*.d.ts", "app/layout.tsx"]
+  "include": [
+    "app",
+    "ruvyxa.config.ts",
+    "postcss.config.ts",
+    ".ruvyxa/types/**/*.d.ts",
+    "app/layout.tsx"
+  ]
 }

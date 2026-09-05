@@ -189,6 +189,11 @@ export default { plugins: { '@tailwindcss/postcss': {} } }
 npm install -D postcss tailwindcss @tailwindcss/postcss
 ```
 
+The `minimal`, `blog`, and `crud` starters ship exactly this — the three packages, a
+`postcss.config.ts`, and the import at the top of `app/globals.css` — so a project scaffolded by
+`create-ruvyxa` can use utility classes on its first page. The `api` starter renders no page and
+does not.
+
 Details worth knowing:
 
 - **Plugins run per stylesheet entry, after local `@import`s are inlined.** A partial pulled in with

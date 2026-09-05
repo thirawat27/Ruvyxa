@@ -184,6 +184,10 @@ export default { plugins: { '@tailwindcss/postcss': {} } }
 npm install -D postcss tailwindcss @tailwindcss/postcss
 ```
 
+starter `minimal`, `blog` และ `crud` มาพร้อมชุดนี้ครบแล้ว — ทั้งสามแพ็กเกจ, `postcss.config.ts` และ
+`@import` ที่บรรทัดแรกของ `app/globals.css` — โปรเจกต์ที่ scaffold ด้วย `create-ruvyxa` จึงใช้
+utility class ได้ตั้งแต่หน้าแรก ส่วน starter `api` ไม่ render หน้าใดจึงไม่มี
+
 รายละเอียดที่ควรรู้:
 
 - **plugin รันต่อหนึ่ง stylesheet entry หลังจาก `@import` ภายในโปรเจกต์ถูก inline แล้ว** partial ที่

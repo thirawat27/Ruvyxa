@@ -160,9 +160,9 @@
     "@ruvyxa/core": "workspace:^",
     "@ruvyxa/react": "workspace:^",
     "babel-plugin-react-compiler": "^1.0.0",
-    "oxc-transform": "0.147.0",
+    "oxc-transform": "0.148.0",
     "remark-gfm": "^4.0.1",
-    "sass": "^1.103.1",
+    "sass": "^1.104.0",
     "yaml": "^2.9.0"
   },
   "peerDependencies": {
