@@ -26,8 +26,8 @@
     "@parcel/watcher": false
   },
   "dependencies": {
-    "@ruvyxa/react": "^1.1.4",
-    "ruvyxa": "^1.1.4",
+    "@ruvyxa/react": "^1.1.5",
+    "ruvyxa": "^1.1.5",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },

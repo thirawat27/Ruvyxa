@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/adapter-aws",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "description": "Deploy full-stack Ruvyxa applications to AWS Amplify Hosting with native static and Node compute deployment output.",
   "license": "Apache-2.0",
   "type": "module",

@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/realtime",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "description": "Native WebSocket realtime and collaboration rooms for self-hosted Ruvyxa applications.",
   "license": "Apache-2.0",
   "type": "module",
