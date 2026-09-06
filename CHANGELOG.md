@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.1.5 (2026-09-06)
 
 ### The plugin system is gone; the config object, file conventions, and route handlers replace it
 
@@ -63,8 +63,6 @@ why they ship with static and hybrid adapters.
 guide, `README.md`, `ARCHITECTURE.md`, `AGENTS.md`, and `CONTRIBUTING.md` were rewritten off the
 plugin vocabulary, and the documentation no longer names another framework to explain a Ruvyxa
 convention.
-
-## v1.1.5 (2026-09-05)
 
 ### `@ruvyxa/realtime` claims; the host that serves decides
 
