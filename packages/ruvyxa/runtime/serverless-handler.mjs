@@ -36,6 +36,17 @@ import {
   usedRequestContext,
 } from './request-context.mjs'
 import { canonicalRoutePath, createCanonicalRouteMatcher } from './route-match.mjs'
+import {
+  applyHeaderRules,
+  compileMatcher,
+  compileRouteRules,
+  hasRouteRules,
+  matchRedirect,
+  matchRewrite,
+  matcherMatches,
+  normalizeMatcher,
+  ruleRequestFromUrl,
+} from './route-rules.mjs'
 import { encodeFlightPayload, publicFlightError } from './flight.mjs'
 // The same two cross-site checks `action-runtime.mjs` applies to
 // `/__ruvyxa/action`, read straight from the shared policy so `/__ruvyxa/rsc`
@@ -70,25 +81,6 @@ const ACTION_PATH = '/__ruvyxa/action'
 const FLIGHT_PATH = '/__ruvyxa/flight'
 const RSC_PATH = '/__ruvyxa/rsc'
 const IMAGE_PATH = '/__ruvyxa/image'
-
-/**
- * The paths this host answers itself, decided before the plugin stage runs.
- *
- * The four `dispatch` rows of
- * `tests/fixtures/framework-endpoint-conformance.json`, and the ordering half of
- * a divergence: on the native host these are axum routes and the plugin-bearing
- * handler is the fallback, so a reserved path never reaches
- * `apply_request_plugins`. This host wrapped the plugin stage around everything,
- * so an `http.onRequest({ match: ['*'] })` auth hook guarded
- * `POST /__ruvyxa/action` when deployed and did not guard it under
- * `dev`/`start` — the direction that matters, because the guard is then never
- * exercised where it is being written.
- *
- * A subset of `RESERVED_FRAMEWORK_PATHS` in `plugin-http.mjs`, which is the
- * registration-time half of the same rule: the paths there include the ones only
- * the native host serves, and a plugin may not claim any of them on either host.
- */
-const FRAMEWORK_ENDPOINT_PATHS = Object.freeze([ACTION_PATH, FLIGHT_PATH, RSC_PATH, IMAGE_PATH])
 
 /**
  * The header that keeps {@link RSC_PATH} out of reach of a cross-origin page,
@@ -160,10 +152,6 @@ const MAX_IMAGE_WIDTH = 8192
  *   when the project declares no server actions; `POST /__ruvyxa/action` then
  *   answers 501 rather than 404, so a misconfigured deploy is distinguishable
  *   from a project that simply has no actions.
- * @property {(request: Request, next: (request: Request) => Promise<Response>) => Promise<Response>} [pluginHttp]
- *   Project plugin HTTP hooks, compiled into the function bundle by
- *   `adapter-runner.mjs`. Runs between the built-in middleware and routing,
- *   the same position `apply_request_plugins` holds in the native server.
  * @property {{apiLimit?: number, actionLimit?: number, headers?: boolean, sameOrigin?: boolean, fetchMeta?: boolean, trustedProxyIps?: string[], actionRateLimit?: {max?: number, window?: number}}} [security]
  *   The validated `security` block from `build.json`. Before this existed the
  *   deployed runtimes ignored it entirely: a function had no request body cap
@@ -216,6 +204,9 @@ const MAX_IMAGE_WIDTH = 8192
 export const HANDLER_RUNTIME_FILES = Object.freeze([
   'serverless-handler.mjs',
   'route-match.mjs',
+  // `headers()`, `redirects()`, `rewrites()`: the same table the native host
+  // evaluates, so a rule cannot hold under `ruvyxa start` and not once deployed.
+  'route-rules.mjs',
   'request-context.mjs',
   'action-runtime.mjs',
   // `action-runtime.mjs` imports this for its two cross-site checks.
@@ -266,9 +257,8 @@ export const DOCUMENT_VALIDATOR_STRATEGIES = Object.freeze(['ssg', 'csr', 'isr']
 /**
  * Marker a stored document leaves the strategy layer with.
  *
- * The validator cannot be computed where the document is read, because a plugin
- * `http.onResponse` hook may still replace the body — the first-party `pwa`
- * plugin does exactly that, injecting into every HTML response. An ETag written
+ * The validator cannot be computed where the document is read, because the
+ * built-in middleware may still change the body on the way out. An ETag written
  * before that runs would describe bytes nobody received, and a validator that is
  * wrong is worse than none: it answers `304` for a document that changed.
  *
@@ -434,7 +424,6 @@ export function createHandler(options) {
     importPage,
     importApi,
     importAction,
-    pluginHttp,
     security,
     readPrerendered,
     writePrerendered,
@@ -442,6 +431,10 @@ export function createHandler(options) {
     deleteData,
     supportedStrategies = ['ssr', 'ssg', 'csr', 'isr', 'ppr', 'api'],
     middleware,
+    headers: headerRules,
+    redirects: redirectRules,
+    rewrites: rewriteRules,
+    proxy,
     i18n,
     optimizeImage,
     imageQuality,
@@ -595,56 +588,139 @@ export function createHandler(options) {
   // the canonical-input entry point and never decodes a segment twice.
   const matchRoute = createCanonicalRouteMatcher(routes)
 
+  // `headers()`, `redirects()`, `rewrites()` from `ruvyxa.config.ts`, compiled
+  // once. Their order is the documented one, which the native host also
+  // applies: headers are decided on the request as it arrived, redirects come
+  // before any route, `beforeFiles` rewrites before files and pages,
+  // `afterFiles` before dynamic routes, and `fallback` just before the 404.
+  const routeRules = compileRouteRules({
+    headers: headerRules,
+    redirects: redirectRules,
+    rewrites: rewriteRules,
+  })
+  const routeRulesEnabled = hasRouteRules(routeRules)
+
+  // `proxy` from `ruvyxa.config.ts`: the handler is a function this module
+  // received through the compiled config; its matcher is compiled once here,
+  // and an absent matcher means every request that is not a framework endpoint.
+  const proxyEnabled = typeof proxy?.handler === 'function'
+  const proxyMatcher =
+    proxyEnabled && proxy.matcher !== undefined
+      ? compileMatcher(normalizeMatcher(proxy.matcher) ?? [])
+      : null
+
   return async function handle(request, runtimeContext = {}) {
     const response = await fetchMiddleware(request, () =>
       limitThenDispatch(request, runtimeContext),
     )
     // Last, because this is the first point at which the body is the body: the
-    // plugin response stage and the built-in middleware have both run.
+    // built-in middleware has run.
     const validated = await withDocumentValidator(request, response)
-    return securityHeaders ? withDefaultSecurityHeaders(validated) : validated
+    const ruled = routeRulesEnabled ? withRuleHeaders(request, validated) : validated
+    return securityHeaders ? withDefaultSecurityHeaders(ruled) : ruled
+  }
+
+  /** The `headers()` rules that match the request as it arrived, set on the response. */
+  function withRuleHeaders(request, response) {
+    const ruleRequest = ruleRequestForRoutes(request)
+    if (!ruleRequest) return response
+    const entries = applyHeaderRules(routeRules.headers, ruleRequest)
+    if (entries.length === 0) return response
+    const headers = new Headers(response.headers)
+    for (const [name, value] of entries) headers.set(name, value)
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    })
   }
 
   /**
-   * Apply the request body limit, then run plugin hooks, then route.
+   * The request as the route rules read it, or `null` for a request the rules
+   * never see: a malformed path, a path outside the base path, or a framework
+   * endpoint, which no rule may redirect or rewrite.
+   */
+  function ruleRequestForRoutes(request) {
+    const url = new URL(request.url)
+    let canonical
+    try {
+      canonical = canonicalRequestPath(url.pathname)
+    } catch {
+      return null
+    }
+    const pathname = stripBasePath(canonical, basePath)
+    if (pathname === null || pathname.startsWith('/__ruvyxa/')) return null
+    return ruleRequestFromUrl(url, request.headers, pathname)
+  }
+
+  /**
+   * Serve `target` in place of the request.
+   *
+   * An absolute `http(s)` destination is fetched and its response returned —
+   * the "rewrite to an external URL" every migration guide leans on. Anything
+   * else is a path on this application, dispatched again with the rules
+   * skipped: a rewrite is checked once, never against its own result.
+   */
+  async function rewriteTo(target, request, runtimeContext) {
+    if (/^https?:\/\//i.test(target)) {
+      return fetch(new Request(target, request))
+    }
+    const url = new URL(target, request.url)
+    return dispatch(new Request(url, request), runtimeContext, { rewritten: true })
+  }
+
+  /**
+   * Apply the request body limit, then the route rules and `proxy.handler`,
+   * then route.
    *
    * The order is the native server's: built-in middleware wraps the router,
    * `handle_request` caps the body with `to_bytes(api_body_limit_bytes)`, and
-   * only then does `apply_request_plugins` run. Capping after the plugin stage
-   * instead would hand an `http.onRequest` hook — the socket `@ruvyxa/auth` and
-   * every project middleware is built on — a body no limit applied to, which is
-   * the one caller most likely to read it into memory.
+   * only then does `proxy.handler` run. Capping after the proxy stage instead
+   * would hand the handler a body no limit applied to, which is the one caller
+   * most likely to read it into memory.
    */
   async function limitThenDispatch(request, runtimeContext) {
     const ingress = limitRequestBody(request)
     if (ingress.response) return ingress.response
     try {
-      // The framework's own endpoints are decided here rather than inside the
-      // plugin stage, which is what the native router's route-before-fallback
-      // ordering does. A plugin can no longer shadow one, hook one, or 404 one
-      // at its discretion — and `withDefaultSecurityHeaders` still runs on the
-      // way out, which is the coverage a response hook was being used for.
-      if (typeof pluginHttp !== 'function' || ownedByFramework(ingress.request)) {
-        return await dispatch(ingress.request, runtimeContext)
+      // `redirects()` first, then the proxy, then everything else — the
+      // documented order, which the native host also applies. Both are decided on the
+      // request as it arrived; a framework endpoint reaches neither.
+      const ruleRequest = ruleRequestForRoutes(ingress.request)
+      if (ruleRequest && routeRulesEnabled) {
+        const redirect = matchRedirect(routeRules.redirects, ruleRequest)
+        if (redirect) {
+          return new Response(null, {
+            status: redirect.status,
+            headers: { location: redirect.location },
+          })
+        }
       }
-      return await pluginHttp(ingress.request, async (forwarded) => {
-        const candidate = forwarded ?? ingress.request
-        if (candidate === ingress.request) return dispatch(candidate, runtimeContext)
-
-        // A plugin may forward a newly constructed Request. Reapply the same
-        // endpoint-aware boundary because that body never passed through the
-        // ingress stream above; native plugins can only forward the already
-        // bounded body serialized by the host.
-        const guarded = limitRequestBody(candidate)
-        return guarded.response ?? dispatch(guarded.request, runtimeContext)
-      })
+      let current = ingress.request
+      if (
+        proxyEnabled &&
+        ruleRequest &&
+        (proxyMatcher === null || matcherMatches(proxyMatcher, ruleRequest))
+      ) {
+        const result = await proxy.handler(current)
+        if (result instanceof Response) return result
+        if (result instanceof Request && result !== current) {
+          // The handler built a new Request: a different URL rewrites, different
+          // headers are forwarded. Its body never passed the ingress stream
+          // above, so the same endpoint-aware boundary applies again.
+          const guarded = limitRequestBody(result)
+          if (guarded.response) return guarded.response
+          current = guarded.request
+        }
+      }
+      return await dispatch(current, runtimeContext)
     } catch (error) {
-      // A plugin that read past the cap surfaces the stream error here rather
-      // than inside `dispatch`, so the same 413 has to be produced on both
-      // paths. Anything else is a plugin fault and is reported as such.
+      // A `proxy.handler` that read past the cap surfaces the stream error here
+      // rather than inside `dispatch`, so the same 413 is produced on both
+      // paths. Anything else is the handler's fault and is reported as such.
       if (isBodyLimitError(error)) return textResponse(413, ingress.message)
       const message = error instanceof Error ? error.message : String(error)
-      console.error('[ruvyxa] Plugin HTTP middleware failed:', logValue(message))
+      console.error('[ruvyxa] proxy handler failed:', logValue(message))
       return textResponse(500, 'Internal Server Error')
     }
   }
@@ -674,12 +750,6 @@ export function createHandler(options) {
     }
   }
 
-  /** Whether this host answers the request itself, ahead of any plugin. */
-  function ownedByFramework(request) {
-    const pathname = endpointPathname(request)
-    return pathname !== null && FRAMEWORK_ENDPOINT_PATHS.includes(pathname)
-  }
-
   /**
    * Select the same body owner as the native router. Actions have their own
    * Axum body layer and do not pass through the generic API fallback limit.
@@ -700,7 +770,62 @@ export function createHandler(options) {
     return { limit: apiBodyLimit, message: 'Request body is too large' }
   }
 
-  async function dispatch(request, runtimeContext = {}) {
+  /**
+   * The paths this host answers itself, decided before routing.
+   *
+   * The four `dispatch` rows of
+   * `tests/fixtures/framework-endpoint-conformance.json`. On the native host
+   * these are axum routes and the page handler is the fallback, so a reserved
+   * path never reaches `proxy.handler`; this host keeps the same order. The
+   * request boundary has already decoded and normalized the path using the
+   * same segment rules as the Rust development server.
+   *
+   * A subset of `RESERVED_FRAMEWORK_PATHS` in `framework-paths.mjs`, which is
+   * the config-time half of the same rule: the paths there include the ones
+   * only the native host serves, and a configured transport may not take any
+   * of them.
+   *
+   * @returns the response promise, or `null` when the path is not one of them.
+   */
+  function frameworkEndpoint(pathname, request, url, runtimeContext) {
+    if (pathname === IMAGE_PATH) {
+      return handleDynamicImage(
+        request,
+        runtimeContext.optimizeImage ?? optimizeImage,
+        defaultImageQuality,
+      )
+    }
+    if (pathname === ACTION_PATH) return handleServerAction(request, url)
+    if (pathname === FLIGHT_PATH) return handleFlight(request, url)
+    // A soft navigation into a server-components route. The generated registry
+    // carries a payload-only renderer for each one now, so this answers rather
+    // than reporting 501 and making the browser fall back to a document load.
+    if (pathname === RSC_PATH) return handleRscPayload(request, url)
+    return null
+  }
+
+  /**
+   * The rewrite phases that run after the file and page lookup.
+   *
+   * `afterFiles` runs once static files (which the platform has already checked
+   * before invoking this function) and static pages have had their chance, but
+   * before a dynamic route captures the path; `fallback` runs when nothing at
+   * all matched. Both are checked against the request as it arrived, and
+   * neither against its own result.
+   *
+   * @returns the rewrite destination, or `null` when no phase matched.
+   */
+  function rewriteAfterFiles(ruleRequest, match) {
+    if (!ruleRequest) return null
+    if (!match || hasDynamicSegment(match.route.path)) {
+      const target = matchRewrite(routeRules.rewrites.afterFiles, ruleRequest)
+      if (target !== null) return target
+    }
+    if (!match) return matchRewrite(routeRules.rewrites.fallback, ruleRequest)
+    return null
+  }
+
+  async function dispatch(request, runtimeContext = {}, { rewritten = false } = {}) {
     const url = new URL(request.url)
     const rawPathname = url.pathname
     let canonicalPathname
@@ -722,32 +847,25 @@ export function createHandler(options) {
       return new Response('Not Found', { status: 404 })
     }
 
-    // The request boundary above already decoded and normalized the path using
-    // the same segment rules as the Rust development server.
-    if (pathname === IMAGE_PATH) {
-      return handleDynamicImage(
-        request,
-        runtimeContext.optimizeImage ?? optimizeImage,
-        defaultImageQuality,
-      )
+    // `beforeFiles` rewrites, ahead of every endpoint and route — after the
+    // proxy, which may have changed the path this reads. Framework endpoints
+    // are exempt on both hosts: a rule that rewrote `/__ruvyxa/action` would
+    // break every server action on the site.
+    const ruleRequest =
+      routeRulesEnabled && !rewritten && !pathname.startsWith('/__ruvyxa/')
+        ? ruleRequestFromUrl(url, request.headers, pathname)
+        : null
+    if (ruleRequest) {
+      const target = matchRewrite(routeRules.rewrites.beforeFiles, ruleRequest)
+      if (target !== null) return rewriteTo(target, request, runtimeContext)
     }
 
-    if (pathname === ACTION_PATH) {
-      return handleServerAction(request, url)
-    }
+    const framework = frameworkEndpoint(pathname, request, url, runtimeContext)
+    if (framework) return framework
 
-    if (pathname === FLIGHT_PATH) {
-      return handleFlight(request, url)
-    }
-
-    // A soft navigation into a server-components route. The generated registry
-    // carries a payload-only renderer for each one now, so this answers rather
-    // than reporting 501 and making the browser fall back to a document load.
-    if (pathname === RSC_PATH) {
-      return handleRscPayload(request, url)
-    }
-
-    const match = matchRoute(pathname)
+    let match = matchRoute(pathname)
+    const afterTarget = rewriteAfterFiles(ruleRequest, match)
+    if (afterTarget !== null) return rewriteTo(afterTarget, request, runtimeContext)
     if (!match) {
       const redirect = localeRedirect(request, pathname, url.search, basePath, matchRoute, i18n)
       // The path alone, never an origin. `Response.redirect()` demands an

@@ -56,7 +56,7 @@ in a `RUVYXA_PUBLIC_` variable: that prefix is deliberately exposed to browser c
 ## Build one working vertical slice
 
 Create these files after installing the dependencies. This is deliberately small: it proves page
-routing, a layout, and an API route before you introduce database, auth, or plugins.
+routing, a layout, and an API route before you introduce database, auth, or route rules.
 
 ```text
 app/
@@ -135,7 +135,6 @@ npm run clean
 npm run trace -- /
 npm run bench
 npm run test:parity
-npm run plugin -- create my-plugin
 ```
 
 These are the user-facing scripts provided by every starter. `start` and `preview` operate on an

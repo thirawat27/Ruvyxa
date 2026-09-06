@@ -60,10 +60,10 @@ const NODE_HANDLER = new Set(['vercel', 'firebase'])
  * The transports below are the same whatever is deployed; what a check *asks
  * for* is not. `deploy-smoke` is five routes chosen for the emitted server's own
  * decisions, and it is the only fixture every adapter can build. `demo` is the
- * broad feature fixture — 31 routes with plugins, every render strategy, and a
- * streamed document — and nothing had ever deployed it and asked it anything,
- * which is why the plugin lane could answer 500 for every 204 in a deployed
- * build with every check still green.
+ * broad feature fixture — 31 routes with route rules and a proxy, every render
+ * strategy, and a streamed document — and nothing had ever deployed it and asked
+ * it anything, which is why a deployed build could buffer every render with
+ * every check still green.
  */
 const APPS = ['deploy-smoke', 'demo']
 const appIndex = process.argv.indexOf('--app')
@@ -889,41 +889,47 @@ const checks = [
  * What `examples/demo` adds, which is everything the small fixture has no way
  * to reach.
  *
- * `deploy-smoke` is five routes and no plugins, so the whole plugin lane, every
- * render strategy but two, and a streamed document were deployed by nobody and
- * asked by nothing. A response hook that turned every 204 into a 500 lived in
- * that gap; so did a deployed build that never streamed. These checks are
- * chosen for what a deployment carries *from the application* rather than from
- * the framework.
+ * `deploy-smoke` is five routes and no route rules, so the config-declared
+ * request pipeline, every render strategy but two, and a streamed document were
+ * deployed by nobody and asked by nothing. A deployed build that never streamed
+ * lived in that gap. These checks are chosen for what a deployment carries
+ * *from the application* rather than from the framework.
  */
 const DEMO_CHECKS = [
   {
-    // Both demo plugins are `http.onResponse` registrations that rebuild the
-    // response to add a header — the pattern the documentation shows and the
-    // one that used to make a null-body status a 500. Nothing had ever run a
-    // plugin inside a deployed function.
-    name: 'a plugin response hook runs in the deployed function',
-    path: '/plugin-lab',
+    // `headers()` from `ruvyxa.config.ts`, evaluated by the deployed handler
+    // from the same table the native host reads.
+    name: 'a headers() rule applies in the deployed function',
+    path: '/proxy-lab',
     assert: (response) => {
       if (response.status !== 200) return `status ${response.status}`
-      if (response.headers.get('x-demo-plugin-response') !== 'active') {
-        return `x-demo-plugin-response ${response.headers.get('x-demo-plugin-response')}`
-      }
-      if (response.headers.get('x-demo-plugin-route') !== '/plugin-lab') {
-        return `x-demo-plugin-route ${response.headers.get('x-demo-plugin-route')}`
+      if (response.headers.get('x-demo-headers-rule') !== 'active') {
+        return `x-demo-headers-rule ${response.headers.get('x-demo-headers-rule')}`
       }
       return null
     },
   },
   {
-    // The other half of a `match` list, and the half a hook that ran on
+    // `proxy.handler` runs ahead of routing and may answer a request itself.
+    name: 'proxy.handler answers before any route',
+    path: '/proxy-lab/blocked',
+    assert: (response) => {
+      if (response.status !== 403) return `status ${response.status}`
+      if (response.headers.get('x-demo-proxy') !== 'answered') {
+        return `x-demo-proxy ${response.headers.get('x-demo-proxy')}`
+      }
+      return null
+    },
+  },
+  {
+    // The other half of a `source` pattern, and the half a rule that ran on
     // everything would pass silently.
-    name: 'a plugin hook stays off the routes it does not match',
+    name: 'a headers() rule stays off the paths it does not match',
     path: '/about',
     assert: (response) => {
       if (response.status !== 200) return `status ${response.status}`
-      const header = response.headers.get('x-demo-plugin-response')
-      if (header !== null) return `x-demo-plugin-response leaked as ${header}`
+      const header = response.headers.get('x-demo-headers-rule')
+      if (header !== null) return `x-demo-headers-rule leaked as ${header}`
       return null
     },
   },
@@ -935,9 +941,9 @@ const DEMO_CHECKS = [
     ['/ppr-page', 'ppr'],
   ].map(([path, mode]) => ({
     // One page per render strategy, each answered by a different branch of the
-    // handler, and each carrying a header only a plugin could have added — so
-    // this asserts the strategy *and* that the plugin lane runs on all of them.
-    name: `${path} renders as ${mode} with its plugin badge`,
+    // handler, and each carrying a header a `headers()` rule added — so this
+    // asserts the strategy *and* that the rules run on all of them.
+    name: `${path} renders as ${mode} with its header rule`,
     path,
     assert: (response) => {
       if (response.status !== 200) return `status ${response.status}`
@@ -1390,7 +1396,7 @@ try {
     // fixture already covers on every adapter.
     await checkEveryPageAsset([
       '/',
-      '/plugin-lab',
+      '/proxy-lab',
       '/server-components',
       '/streaming',
       '/gallery',

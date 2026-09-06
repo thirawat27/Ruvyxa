@@ -895,6 +895,15 @@ impl BuildReport<'_> {
             "images": image_report,
             "runtime": {
                 "middleware": config.middleware,
+                // Route rules travel already resolved: the deployed handler
+                // evaluates them from `runtimeBuildPolicy` exactly as the
+                // native host does from the config, through one shared table.
+                "headers": config.headers,
+                "redirects": config.redirects,
+                "rewrites": config.rewrites,
+                "proxy": config.proxy,
+                "realtime": config.realtime,
+                "collab": config.collab,
                 "i18n": manifest.i18n,
                 "image": {
                     "onDemand": config.images.on_demand.enabled(),
@@ -913,7 +922,6 @@ impl BuildReport<'_> {
             "security": {
                 "actionLimit": config.security.action_body_limit_bytes.unwrap_or(1024 * 1024),
                 "apiLimit": config.security.api_body_limit_bytes.unwrap_or(10 * 1024 * 1024),
-                "pluginLimit": config.security.plugin_response_body_limit_bytes.unwrap_or(32 * 1024 * 1024),
                 "actionRateLimit": {
                     "max": config.security.action_rate_limit.as_ref().and_then(|value| value.max).unwrap_or(600),
                     "window": config.security.action_rate_limit.as_ref().and_then(|value| value.window).unwrap_or(60)
@@ -1014,7 +1022,7 @@ pub(crate) async fn build_with_cache_override(
     // dominated by a JavaScript runtime coming up and neither needs anything
     // the phases in between produce, so run in sequence they were three of the
     // largest steps of a warm build and overlapped they cost the slowest one.
-    // Spawned rather than joined, so the plugin host's blocking start below
+    // Spawned rather than joined, so the project worker's blocking start below
     // does not hold them.
     let rsc_entries_task = spawn_server_component_entry_collection(
         &args,
@@ -1024,14 +1032,11 @@ pub(crate) async fn build_with_cache_override(
         &build_cache_directory,
     );
     let static_params_pool_task = spawn_static_params_worker_pool(&args, &config, &manifest);
-    let plugin_session = TypeScriptPluginBuildSession::new(
+    let worker_session = BuildWorkerSession::new(
         &args.root,
-        &config.plugins,
         config.javascript_runtime(),
-        config.markdown_enabled(),
-        config.react_compiler.unwrap_or(false),
+        config.worker_options(),
     )?;
-    plugin_session.run_start(&out_dir)?;
     let staging = BuildStagingLayout::create(&out_dir, &build_cache_directory)?;
     let _staging_cleanup = BuildStagingCleanup::new(staging.root.clone());
     let BuildStagingLayout {
@@ -1101,12 +1106,11 @@ pub(crate) async fn build_with_cache_override(
                     &manifest,
                     &client_dir,
                     &config.build,
-                    &config.plugins,
                     RuvyxaBuildCache {
                         dependency_hash: &config.build_dependency_hash,
                         directory: &build_cache_directory,
                     },
-                    &plugin_session,
+                    &worker_session,
                     &rsc_entries,
                 )
             };
@@ -1168,20 +1172,6 @@ pub(crate) async fn build_with_cache_override(
         write_render_manifests(&staging_dir, &manifest, &client_manifest)?;
     }
 
-    // A plugin rewrote a module the server is about to render unchanged.
-    //
-    // Checked here because this is the first moment both halves are known: the
-    // browser compile has run and recorded what it rewrote, and the route graph
-    // says which routes render on the server and hydrate. Neither half can see
-    // the problem alone — each is internally consistent — and the deployed
-    // symptom is a flicker, not an error.
-    report_plugin_transform_divergence(
-        &plugin_session,
-        &manifest,
-        &build_cache_directory,
-        &config.build_dependency_hash,
-    );
-
     // A package the browser graph asked for and could not find.
     //
     // Reported here rather than where it is decided, because the linker is five
@@ -1222,7 +1212,6 @@ pub(crate) async fn build_with_cache_override(
     // function bundle bakes its own copy from. Three readers of one value, so a
     // head contribution cannot reach some documents and not others.
     let document_head = prerender_head(
-        &config,
         &assets_dir,
         style_asset.as_deref(),
         &style_collection.css,
@@ -1389,7 +1378,6 @@ pub(crate) async fn build_with_cache_override(
             base_path: String::new(),
             document_head: crate::deploy_manifest::DocumentHeadDefaults {
                 asset_links: &document_head.asset_links,
-                plugin_head: &document_head.plugin_head,
             },
             adapter: args
                 .adapter
@@ -1408,10 +1396,10 @@ pub(crate) async fn build_with_cache_override(
         .await
         .context("build output commit task panicked")?
         .with_context(|| format!("failed to commit build output into {}", out_dir.display()))?;
-    plugin_session.run_complete(&out_dir, &build_info)?;
-    // Adapters must snapshot the committed output after build-complete hooks:
-    // first-party and application plugins can add public artifacts such as a
-    // sitemap or service worker that must be present in static deploy output.
+    worker_session.write_content_artifacts(&out_dir)?;
+    // Adapters must snapshot the committed output after the content engine has
+    // written its artifacts: `/content.json`, the feed, and the sitemap are
+    // public files that must be present in static deploy output.
     // Only a route the platform is asked to hold can go stale behind a
     // `revalidatePath()` it cannot deliver.
     let revalidating_routes = manifest.routes.iter().any(|route| {
@@ -1477,7 +1465,6 @@ struct ValidatedRoutes {
 /// only. `prerender_html_includes_the_document_head_the_live_renderer_composes`
 /// holds that correspondence.
 pub(crate) fn prerender_head(
-    config: &ProjectConfig,
     assets_dir: &Path,
     style_asset: Option<&str>,
     css: &str,
@@ -1488,10 +1475,6 @@ pub(crate) fn prerender_head(
         // server publishes — not from the project's `public/`, which still
         // holds an original the build converted away.
         asset_links: ruvyxa_dev_server::public_asset_links(assets_dir).into(),
-        plugin_head: ruvyxa_dev_server::render_plugin_head(
-            &crate::client_bundle::collect_plugin_head(&config.plugins),
-        )
-        .into(),
         styles: ruvyxa_dev_server::style_head_tag(style_asset, css).into(),
         shell,
     }
@@ -1499,7 +1482,7 @@ pub(crate) fn prerender_head(
 
 /// Discover the project's routes and refuse the build if they do not validate.
 ///
-/// Everything here happens before the plugin session starts and before any
+/// Everything here happens before the worker session starts and before any
 /// staging directory exists, which is the property that matters: a build
 /// rejected on a route error leaves the previous output and the project
 /// untouched.
@@ -1865,22 +1848,6 @@ pub(crate) fn styled_render_symbol(strategy: RenderStrategy) -> String {
     }
 }
 
-/// Warn when a plugin transform makes the two documents disagree.
-///
-/// Both compilers run `build.onTransform`, so an ordinary hook rewrites the
-/// browser bundle and the server render alike and there is nothing to report.
-/// A hook that branches on `environment` can still rewrite one lane only — a
-/// legitimate thing to do, and the demo plugin does exactly that — but on a
-/// route that renders on the server *and* hydrates it means the document is
-/// built from one text and hydrated against another. React throws the server
-/// markup away and re-renders (#418): the page ends up correct, nothing fails,
-/// and the only evidence is a flash of the wrong content.
-///
-/// Both halves of the condition are checked rather than assumed. The plugin is
-/// asked whether it really produces different text for `client` and `server`,
-/// and the route graph is asked whether anything that both renders and hydrates
-/// reaches the module. A client-only transform behind a `'use client'` route,
-/// which is what the demo pairs it with, satisfies neither.
 /// Name the packages a browser bundle could not resolve.
 ///
 /// The linker replaces such an import with a binding that throws `RUV1611` when
@@ -1930,44 +1897,6 @@ fn report_unresolved_client_imports() {
         );
     }
 }
-
-fn report_plugin_transform_divergence(
-    plugin_session: &TypeScriptPluginBuildSession,
-    manifest: &RouteManifest,
-    cache_dir: &Path,
-    dependency_hash: &str,
-) {
-    let divergent = plugin_session.lane_divergent_modules(cache_dir, dependency_hash);
-    let at_risk = ruvyxa_graph::hydrated_routes_reaching(manifest, &divergent);
-    let Some(((route, module), rest)) = at_risk.split_first() else {
-        return;
-    };
-    let module = module
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| module.display().to_string());
-    let more = match rest.len() {
-        0 => String::new(),
-        count => format!(" and {count} more"),
-    };
-    warn!(
-        route = %route,
-        module = %module,
-        "a plugin transform differs between the browser and the server"
-    );
-    println!(
-        "  {} {}",
-        warn_text("warn"),
-        dim(format!(
-            "a build.onTransform hook rewrites {module} differently for the browser than for the server, and \
-             {route}{more} both renders it on the server and hydrates it. The two documents will differ and \
-             React will discard the server markup (#418). Drop the `environment` branch so both compiles \
-             agree, or move the value behind a `'use client'` route, which has no server document to \
-             disagree with."
-        ))
-    );
-}
-
 /// Name the server-components routes whose `error.tsx` only runs on the server.
 ///
 /// On such a route the browser bundle contains client components and nothing
@@ -2064,8 +1993,8 @@ fn report_inert_hydration(routes: &[String]) {
 /// `/__ruvyxa/client/` into it, and every static deployment copies the whole
 /// directory to the CDN. This file is not a browser asset — it is a build
 /// report carrying absolute source paths from the build machine, the module
-/// graph of every shared chunk and route, the bundler cache location, the
-/// plugin list, and per-route byte counts. It sat beside the lean
+/// graph of every shared chunk and route, the bundler cache location, and
+/// per-route byte counts. It sat beside the lean
 /// `route-manifest.json` that exists precisely so none of that has to ship, and
 /// was served at `/__ruvyxa/client/manifest.json` by all three hosts.
 ///

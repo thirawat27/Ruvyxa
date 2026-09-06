@@ -256,8 +256,8 @@ can be: there is no way to say "any string without a slash". So:
 <Link href="/blog/a/b">Post</Link>           // accepted, though `[slug]` is one segment
 ```
 
-The last line is the known limitation, and it is the same one Next.js has. What the check reliably
-catches is the common mistake: a wrong static part of a path.
+The last line is the known limitation of any typed-route check. What the check reliably catches is
+the common mistake: a wrong static part of a path.
 
 ### URLs built at runtime
 

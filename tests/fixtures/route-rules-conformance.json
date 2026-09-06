@@ -1,0 +1,463 @@
+{
+  "$comment": [
+    "Shared route-rules conformance table.",
+    "",
+    "`headers()`, `redirects()`, `rewrites()`, and `proxy.matcher` in",
+    "`ruvyxa.config.ts` all describe request paths with the common",
+    "path-to-regexp dialect: `/blog/:slug`, modifiers `* + ?`, an inline",
+    "regex after a parameter, unnamed groups, and `\\\\`-escaped specials — plus",
+    "`has`/`missing` conditions on headers, cookies, query, and host. Two hosts",
+    "evaluate them and cannot share code: the Axum server",
+    "(crates/ruvyxa_middleware/src/route_rules.rs) and every JavaScript host",
+    "(packages/@ruvyxa/core/src/route-rules.ts, copied into runtime/ for the",
+    "deployed handler). A rule that redirects under `ruvyxa start` and not once",
+    "deployed is the defect this file exists to make impossible.",
+    "",
+    "Every implementation replays this file:",
+    "  - crates/ruvyxa_middleware/src/route_rules.rs      (Rust test)",
+    "  - tests/packages/core/route-rules.test.ts           (JavaScript test)",
+    "",
+    "Semantics, so the cases below are not the only statement of them:",
+    "  - A source matches the *canonical* request path (decoded, no trailing",
+    "    slash, `/` for the root), whole and case-insensitively, anchored at",
+    "    both ends, with path-to-regexp's optional trailing slash so an",
+    "    all-optional source such as `/:path*` matches the root.",
+    "  - `:name` captures one segment. `:name*` zero or more segments, `:name+`",
+    "    one or more, `:name?` zero or one; a multi-segment capture is the joined",
+    "    remainder (`a/b/c`). An absent optional capture is not a parameter.",
+    "  - `:name(regex)` replaces the segment class with the regex; `(regex)` alone",
+    "    is an unnamed capture named by its position from 0.",
+    "  - `\\\\(` and friends are literal. A source that does not start with `/`,",
+    "    or whose regex does not compile, is refused at config time.",
+    "  - Substitution replaces `:name` (with an optional trailing modifier) in a",
+    "    destination or header key/value; an absent parameter substitutes ``.",
+    "  - `has`/`missing`: every `has` entry must match and no `missing` entry may.",
+    "    `value` is a whole-value regex; named captures become parameters. Header",
+    "    keys are case-insensitive; `host` needs no key.",
+    "  - Redirect status: `statusCode` if given, else 308 for `permanent: true`,",
+    "    else 307. A destination with no query inherits the request's query.",
+    "  - Rewrite: parameters the destination does not use are appended to its",
+    "    query, unless the destination uses any parameter at all.",
+    "  - Headers: rules apply in order; a later rule's key overrides an earlier.",
+    "  - Matcher: a string, an array of strings, or entries with `source`,",
+    "    `has`, `missing`; the request matches when any entry does."
+  ],
+
+  "sources": [
+    {
+      "source": "/about",
+      "cases": {
+        "/about": {},
+        "/About": {},
+        "/about/team": null,
+        "/blog/about": null
+      }
+    },
+    {
+      "source": "/blog/:slug",
+      "cases": {
+        "/blog/first-post": { "slug": "first-post" },
+        "/blog/a/b": null,
+        "/blog": null,
+        "/archive/blog/first-post": null
+      }
+    },
+    {
+      "source": "/blog/:slug*",
+      "cases": {
+        "/blog": {},
+        "/blog/a": { "slug": "a" },
+        "/blog/a/b/c": { "slug": "a/b/c" }
+      }
+    },
+    {
+      "source": "/docs/:path+",
+      "cases": {
+        "/docs": null,
+        "/docs/intro": { "path": "intro" },
+        "/docs/intro/setup": { "path": "intro/setup" }
+      }
+    },
+    {
+      "source": "/shop/:category?",
+      "cases": {
+        "/shop": {},
+        "/shop/books": { "category": "books" },
+        "/shop/books/new": null
+      }
+    },
+    {
+      "source": "/post/:id(\\d{1,})",
+      "cases": {
+        "/post/123": { "id": "123" },
+        "/post/abc": null
+      }
+    },
+    {
+      "source": "/english\\(default\\)/:slug",
+      "cases": {
+        "/english(default)/something": { "slug": "something" },
+        "/english/something": null
+      }
+    },
+    {
+      "source": "/legacy/(.*)",
+      "cases": {
+        "/legacy/a/b": { "0": "a/b" },
+        "/legacy": null
+      }
+    },
+    {
+      "source": "/((?!api|_next|static).*)",
+      "cases": {
+        "/dashboard/settings": { "0": "dashboard/settings" },
+        "/api/users": null,
+        "/static/app.js": null
+      }
+    },
+    {
+      "source": "/users/:id/posts/:postId",
+      "cases": {
+        "/users/7/posts/9": { "id": "7", "postId": "9" },
+        "/users/7/posts": null
+      }
+    },
+    {
+      "source": "/ทดสอบ/:slug",
+      "cases": {
+        "/ทดสอบ/หนึ่ง": { "slug": "หนึ่ง" }
+      }
+    },
+    {
+      "source": "/",
+      "cases": {
+        "/": {},
+        "/about": null
+      }
+    },
+    {
+      "$why": "the catch-all covers the root: an all-optional pattern matches the bare `/`",
+      "source": "/:path*",
+      "cases": {
+        "/": {},
+        "/a": { "path": "a" },
+        "/a/b": { "path": "a/b" }
+      }
+    }
+  ],
+
+  "invalidSources": ["about", "", "/post/:id(", "/a/:b(*)"],
+
+  "$requestComment": [
+    "A request as every case below sees it: canonical path, the raw query",
+    "string without `?`, headers as written by the client, and the host."
+  ],
+
+  "conditions": [
+    {
+      "$why": "a present header with no value constraint",
+      "has": [{ "type": "header", "key": "x-add-header" }],
+      "request": { "path": "/", "headers": { "X-Add-Header": "anything" } },
+      "result": {}
+    },
+    {
+      "$why": "a header value regex must match the whole value",
+      "has": [{ "type": "header", "key": "x-authorized", "value": "(?<authorized>yes|true)" }],
+      "request": { "path": "/", "headers": { "x-authorized": "true" } },
+      "result": { "authorized": "true" }
+    },
+    {
+      "$why": "a partial match of the whole-value regex is a miss",
+      "has": [{ "type": "header", "key": "x-authorized", "value": "yes|true" }],
+      "request": { "path": "/", "headers": { "x-authorized": "true-ish" } },
+      "result": null
+    },
+    {
+      "$why": "query and cookie together, both required",
+      "has": [
+        { "type": "query", "key": "page", "value": "home" },
+        { "type": "cookie", "key": "authorized", "value": "true" }
+      ],
+      "request": {
+        "path": "/",
+        "query": "page=home&x=1",
+        "headers": { "cookie": "theme=dark; authorized=true" }
+      },
+      "result": {}
+    },
+    {
+      "$why": "one failing has entry fails the rule",
+      "has": [
+        { "type": "query", "key": "page", "value": "home" },
+        { "type": "cookie", "key": "authorized", "value": "true" }
+      ],
+      "request": { "path": "/", "query": "page=home", "headers": {} },
+      "result": null
+    },
+    {
+      "$why": "missing passes when the header is absent",
+      "missing": [{ "type": "header", "key": "x-do-not-redirect" }],
+      "request": { "path": "/", "headers": {} },
+      "result": {}
+    },
+    {
+      "$why": "missing fails when the header is present",
+      "missing": [{ "type": "header", "key": "x-do-not-redirect" }],
+      "request": { "path": "/", "headers": { "x-do-not-redirect": "1" } },
+      "result": null
+    },
+    {
+      "$why": "host takes no key",
+      "has": [{ "type": "host", "value": "example.com" }],
+      "request": { "path": "/", "host": "example.com" },
+      "result": {}
+    },
+    {
+      "$why": "a host mismatch is a miss",
+      "has": [{ "type": "host", "value": "example.com" }],
+      "request": { "path": "/", "host": "other.example" },
+      "result": null
+    },
+    {
+      "$why": "a percent-encoded query value is compared decoded",
+      "has": [{ "type": "query", "key": "q", "value": "a b" }],
+      "request": { "path": "/", "query": "q=a%20b" },
+      "result": {}
+    }
+  ],
+
+  "headers": [
+    {
+      "$why": "a later rule overrides an earlier one for the same key",
+      "rules": [
+        { "source": "/:path*", "headers": [{ "key": "x-hello", "value": "there" }] },
+        { "source": "/hello", "headers": [{ "key": "x-hello", "value": "world" }] }
+      ],
+      "request": { "path": "/hello" },
+      "result": [["x-hello", "world"]]
+    },
+    {
+      "$why": "only the catch-all applies elsewhere",
+      "rules": [
+        { "source": "/:path*", "headers": [{ "key": "x-hello", "value": "there" }] },
+        { "source": "/hello", "headers": [{ "key": "x-hello", "value": "world" }] }
+      ],
+      "request": { "path": "/other" },
+      "result": [["x-hello", "there"]]
+    },
+    {
+      "$why": "the catch-all applies to the root path itself",
+      "rules": [{ "source": "/:path*", "headers": [{ "key": "x-hello", "value": "there" }] }],
+      "request": { "path": "/" },
+      "result": [["x-hello", "there"]]
+    },
+    {
+      "$why": "parameters substitute into both key and value",
+      "rules": [
+        {
+          "source": "/blog/:slug",
+          "headers": [
+            { "key": "x-slug", "value": ":slug" },
+            { "key": "x-slug-:slug", "value": "my other custom header value" }
+          ]
+        }
+      ],
+      "request": { "path": "/blog/first-post" },
+      "result": [
+        ["x-slug", "first-post"],
+        ["x-slug-first-post", "my other custom header value"]
+      ]
+    },
+    {
+      "$why": "a wildcard substitutes the joined remainder",
+      "rules": [{ "source": "/blog/:slug*", "headers": [{ "key": "x-slug", "value": ":slug*" }] }],
+      "request": { "path": "/blog/a/b/c" },
+      "result": [["x-slug", "a/b/c"]]
+    },
+    {
+      "$why": "a has-captured value substitutes too",
+      "rules": [
+        {
+          "source": "/:path*",
+          "has": [{ "type": "header", "key": "x-authorized", "value": "(?<authorized>yes|true)" }],
+          "headers": [{ "key": "x-another-header", "value": ":authorized" }]
+        }
+      ],
+      "request": { "path": "/anything", "headers": { "x-authorized": "yes" } },
+      "result": [["x-another-header", "yes"]]
+    },
+    {
+      "$why": "a rule whose condition fails contributes nothing",
+      "rules": [
+        {
+          "source": "/:path*",
+          "missing": [{ "type": "header", "key": "x-no-header" }],
+          "headers": [{ "key": "x-another-header", "value": "hello" }]
+        }
+      ],
+      "request": { "path": "/anything", "headers": { "x-no-header": "1" } },
+      "result": []
+    }
+  ],
+
+  "redirects": [
+    {
+      "$why": "permanent is 308",
+      "rules": [{ "source": "/about", "destination": "/", "permanent": true }],
+      "request": { "path": "/about" },
+      "result": { "location": "/", "status": 308 }
+    },
+    {
+      "$why": "temporary is 307",
+      "rules": [{ "source": "/about", "destination": "/", "permanent": false }],
+      "request": { "path": "/about" },
+      "result": { "location": "/", "status": 307 }
+    },
+    {
+      "$why": "an explicit status code wins",
+      "rules": [{ "source": "/about", "destination": "/", "statusCode": 301 }],
+      "request": { "path": "/about" },
+      "result": { "location": "/", "status": 301 }
+    },
+    {
+      "$why": "parameters substitute and the request query is carried",
+      "rules": [
+        { "source": "/old-blog/:path*", "destination": "/blog/:path*", "permanent": false }
+      ],
+      "request": { "path": "/old-blog/post-1", "query": "hello=world" },
+      "result": { "location": "/blog/post-1?hello=world", "status": 307 }
+    },
+    {
+      "$why": "a destination with its own query keeps it",
+      "rules": [
+        {
+          "source": "/",
+          "has": [{ "type": "header", "key": "x-authorized", "value": "(?<authorized>yes|true)" }],
+          "destination": "/home?authorized=:authorized",
+          "permanent": false
+        }
+      ],
+      "request": { "path": "/", "query": "ignored=1", "headers": { "x-authorized": "yes" } },
+      "result": { "location": "/home?authorized=yes", "status": 307 }
+    },
+    {
+      "$why": "an external destination is allowed",
+      "rules": [
+        {
+          "source": "/docs/:path*",
+          "destination": "https://docs.example.com/:path*",
+          "permanent": true
+        }
+      ],
+      "request": { "path": "/docs/a/b" },
+      "result": { "location": "https://docs.example.com/a/b", "status": 308 }
+    },
+    {
+      "$why": "the first matching rule wins",
+      "rules": [
+        { "source": "/a", "destination": "/first", "permanent": false },
+        { "source": "/a", "destination": "/second", "permanent": false }
+      ],
+      "request": { "path": "/a" },
+      "result": { "location": "/first", "status": 307 }
+    },
+    {
+      "$why": "no rule matches",
+      "rules": [{ "source": "/a", "destination": "/b", "permanent": false }],
+      "request": { "path": "/c" },
+      "result": null
+    }
+  ],
+
+  "rewrites": [
+    {
+      "$why": "a plain rewrite",
+      "rules": [{ "source": "/about", "destination": "/" }],
+      "request": { "path": "/about" },
+      "result": "/"
+    },
+    {
+      "$why": "unused parameters go to the query when the destination uses none",
+      "rules": [{ "source": "/old-about/:path*", "destination": "/about" }],
+      "request": { "path": "/old-about/team/x" },
+      "result": "/about?path=team%2Fx"
+    },
+    {
+      "$why": "a destination that uses a parameter appends nothing",
+      "rules": [{ "source": "/docs/:path*", "destination": "/:path*" }],
+      "request": { "path": "/docs/a/b" },
+      "result": "/a/b"
+    },
+    {
+      "$why": "the request query is preserved on a rewrite",
+      "rules": [{ "source": "/about", "destination": "/" }],
+      "request": { "path": "/about", "query": "x=1" },
+      "result": "/?x=1"
+    },
+    {
+      "$why": "an explicit destination query is merged with the request query",
+      "rules": [{ "source": "/:first/:second", "destination": "/:first?second=:second" }],
+      "request": { "path": "/a/b", "query": "x=1" },
+      "result": "/a?second=b&x=1"
+    },
+    {
+      "$why": "an external destination is allowed",
+      "rules": [{ "source": "/blog/:slug", "destination": "https://example.com/blog/:slug" }],
+      "request": { "path": "/blog/hello" },
+      "result": "https://example.com/blog/hello"
+    },
+    {
+      "$why": "no rule matches",
+      "rules": [{ "source": "/a", "destination": "/b" }],
+      "request": { "path": "/c" },
+      "result": null
+    }
+  ],
+
+  "matcher": [
+    { "matcher": "/about/:path*", "request": { "path": "/about/a/b" }, "result": true },
+    { "matcher": "/about/:path*", "request": { "path": "/blog" }, "result": false },
+    { "matcher": ["/about", "/contact"], "request": { "path": "/contact" }, "result": true },
+    {
+      "matcher": "/((?!api|_ruvyxa|static|.*\\.png$).*)",
+      "request": { "path": "/dashboard" },
+      "result": true
+    },
+    {
+      "matcher": "/((?!api|_ruvyxa|static|.*\\.png$).*)",
+      "request": { "path": "/api/users" },
+      "result": false
+    },
+    {
+      "matcher": "/((?!api|_ruvyxa|static|.*\\.png$).*)",
+      "request": { "path": "/images/logo.png" },
+      "result": false
+    },
+    {
+      "matcher": [
+        {
+          "source": "/api/:path*",
+          "has": [{ "type": "header", "key": "authorization", "value": "Bearer .*" }],
+          "missing": [{ "type": "cookie", "key": "session", "value": "active" }]
+        }
+      ],
+      "request": { "path": "/api/x", "headers": { "authorization": "Bearer token" } },
+      "result": true
+    },
+    {
+      "matcher": [
+        {
+          "source": "/api/:path*",
+          "has": [{ "type": "header", "key": "authorization", "value": "Bearer .*" }],
+          "missing": [{ "type": "cookie", "key": "session", "value": "active" }]
+        }
+      ],
+      "request": {
+        "path": "/api/x",
+        "headers": { "authorization": "Bearer token", "cookie": "session=active" }
+      },
+      "result": false
+    },
+    { "matcher": [], "request": { "path": "/anything" }, "result": false }
+  ]
+}

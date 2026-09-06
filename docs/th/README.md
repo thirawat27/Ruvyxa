@@ -18,7 +18,7 @@ TypeScript ทำงานร่วมกันเพื่อค้นหา ro
 - ผู้พัฒนา full-stack: อ่านต่อ [ข้อมูล, action และ API route](05-data-actions-api.md),
   [UI, navigation, metadata และ asset](06-ui-navigation-metadata-and-assets.md), และ
   [Configuration](07-configuration.md)
-- ผู้พัฒนา plugin หรือ integration: อ่าน [Plugin และ middleware](08-plugins-middleware.md),
+- ผู้พัฒนา integration: อ่าน [Request pipeline](08-request-pipeline.md),
   [การเชื่อมต่อ](09-integrations-auth-data-and-realtime.md), และ
   [Public API reference](17-public-api-reference.md)
 - ผู้ดูแลระบบ: เริ่ม [CLI](10-cli.md), แล้วอ่าน [Security](13-security.md),
@@ -36,7 +36,7 @@ TypeScript ทำงานร่วมกันเพื่อค้นหา ro
 5. [ข้อมูล, action และ API route](05-data-actions-api.md)
 6. [UI, navigation, metadata และ asset](06-ui-navigation-metadata-and-assets.md)
 7. [Configuration และ environment](07-configuration.md)
-8. [Plugin และ middleware](08-plugins-middleware.md)
+8. [Request pipeline](08-request-pipeline.md)
 9. [การเชื่อมต่อ: authentication, data, realtime, adapter และ testing](09-integrations-auth-data-and-realtime.md)
 10. [CLI reference](10-cli.md)
 11. [Architecture](11-architecture.md)

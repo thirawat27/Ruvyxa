@@ -34,6 +34,7 @@
 // declaration, so a `///` inside a macro body or a raw string is not read as a
 // doc comment, and a file whose attribute brackets do not balance is skipped
 // rather than guessed at.
+import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -56,6 +57,8 @@ const files = execFileSync(
   .split('\n')
   .map((file) => file.trim())
   .filter(Boolean)
+  // Deleted in the working tree but not yet staged is still listed.
+  .filter((file) => existsSync(join(repoRoot, file)))
 
 /**
  * Find every doc block in one file that an attribute stands inside.

@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::discovery::resolve_layout_file;
 use crate::graph::{ModuleCache, collect_relative_graph, private_env_reads};
-use crate::manifest::{RenderStrategy, RouteKind, RouteManifest, RuntimeTarget};
+use crate::manifest::{RouteKind, RouteManifest, RuntimeTarget};
 use crate::render::edge_forbidden_builtin;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -35,58 +35,6 @@ impl ValidationReport {
     pub fn is_ok(&self) -> bool {
         self.diagnostics.is_empty()
     }
-}
-
-/// Routes that would render one of `modules` on the server *and* hydrate it in
-/// the browser, paired with the module they reach.
-///
-/// The question a plugin transform raises. `build.onTransform` is applied by
-/// the browser compile and by nothing else: the server render reads the same
-/// file through `runtime/compiler.mjs`, which runs no plugin hooks. For a route
-/// that only runs in the browser that is harmless, and for a route that ships
-/// no client bundle it never comes up — but a route that does both renders the
-/// original text into the document and then hydrates against the rewritten one.
-/// React discards the server markup and re-renders (#418), which looks like a
-/// flicker rather than like a build problem.
-///
-/// Answers the pairs so a caller can name both halves; empty when nothing is at
-/// risk, which is the common case and costs one graph walk.
-pub fn hydrated_routes_reaching(
-    manifest: &RouteManifest,
-    modules: &BTreeSet<PathBuf>,
-) -> Vec<(String, PathBuf)> {
-    if modules.is_empty() {
-        return Vec::new();
-    }
-    let mut cache = ModuleCache::in_root(&manifest.app_dir);
-    let mut found = Vec::new();
-    for route in &manifest.routes {
-        if route.kind != RouteKind::Page
-            || route.render.strategy == RenderStrategy::Csr
-            || !route.render.ships_client_bundle()
-        {
-            continue;
-        }
-        let mut entries = vec![route.file.clone()];
-        for layout in &route.layout_chain {
-            entries.extend(resolve_layout_file(&manifest.app_dir, layout));
-        }
-        for template in &route.template_chain {
-            entries.extend(resolve_layout_file(&manifest.app_dir, template));
-        }
-        entries.extend(route.client_modules.iter().map(PathBuf::from));
-
-        for entry in entries {
-            for module in collect_relative_graph(&entry, &mut cache) {
-                if modules.contains(&module) {
-                    found.push((route.path.clone(), module));
-                }
-            }
-        }
-    }
-    found.sort();
-    found.dedup();
-    found
 }
 
 /// Every project module the routes reach that does **not** live in `app/`.

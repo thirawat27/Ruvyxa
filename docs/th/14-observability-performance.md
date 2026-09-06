@@ -6,27 +6,22 @@
 
 ## Observability
 
-ใช้ first-party plugin `observability()` เพื่อเพิ่ม request identifier, W3C `traceparent`,
-`Server-Timing` และ structured record ต่อ response request-id header ปริยายคือ `x-request-id`; trace
-context, server timing และ logging เปิดโดยปริยาย scope ได้กับ exact/trailing-star route และส่ง
-custom logger ได้
+middleware ในตัวเพิ่ม request identifier กับ timing header และบันทึก structured record
+หนึ่งรายการต่อ response: `middleware.builtin.log` บันทึก method, path, status และ duration ใต้
+`x-request-id` ที่รับจาก incoming header หรือสร้างขึ้น; `middleware.builtin.timing` เพิ่ม
+`Server-Timing` ทั้งคู่รันบนทุก host
 
 ```ts
 import { config } from 'ruvyxa/config'
-import { observability } from 'ruvyxa/plugins'
 
 export default config({
-  plugins: [
-    observability({ routes: ['/api/*'], logger: (entry) => console.info(JSON.stringify(entry)) }),
-  ],
+  middleware: { builtin: { log: true, timing: true } },
 })
 ```
 
-record มี `requestId`, `traceparent`, `method`, `pathname`, `status` และ `durationMs` logger
-ที่ล้มเหลวถูก isolate จึงไม่ทำให้ response ที่ปกติกลายเป็น HTTP failure ให้มองว่านี่คือฐานสำหรับ
-telemetry sink ของคุณ ไม่ใช่ metrics/tracing backend ที่สมบูรณ์ ใน generated application ให้ใช้
-`npm run analyze:html` สำหรับ local build/route analysis page และ `npm run trace -- /` เพื่อตรวจ
-route manifest entry
+ให้มองว่านี่คือฐานสำหรับ telemetry sink ของคุณ ไม่ใช่ metrics/tracing backend ที่สมบูรณ์ ใน
+generated application ให้ใช้ `npm run analyze:html` สำหรับ local build/route analysis page และ
+`npm run trace -- /` เพื่อตรวจ route manifest entry
 
 สำหรับ correlated trace ระหว่างพัฒนา ให้เปิด `debug.traces` แล้วรัน `ruvyxa dev` response เดิมจาก
 `/__ruvyxa/trace?path=/docs` ยังใช้ตรวจ route หนึ่งรายการ ส่วน `/__ruvyxa/trace?kind=edits`
@@ -39,9 +34,8 @@ same-origin, จำกัดขนาด และเปิดเฉพาะเ
 ## `instrumentation.ts`
 
 ไฟล์ชื่อ `instrumentation.ts` (หรือ `.js`/`.mjs`) ที่รากโปรเจกต์จะถูกรันหนึ่งครั้งต่อหนึ่ง process
-ของเซิร์ฟเวอร์ ก่อนให้บริการคำขอแรก นี่คือที่ติดตั้ง observability SDK ระดับ process — plugin
-`observability()` ข้างบนจัดรูป response แต่ละตัว ส่วนไฟล์นี้รันการตั้งค่าที่ SDK
-ต้องมีก่อนจะจัดรูปอะไรได้
+ของเซิร์ฟเวอร์ ก่อนให้บริการคำขอแรก นี่คือที่ติดตั้ง observability SDK ระดับ process — middleware
+ในตัวข้างบนจัดรูป response แต่ละตัว ส่วนไฟล์นี้รันการตั้งค่าที่ SDK ต้องมีก่อนจะจัดรูปอะไรได้
 
 ```ts
 // instrumentation.ts
@@ -107,9 +101,9 @@ speculative warmup เพิ่มด้วย key ที่มี active build 
 ## ข้อควรระวังเรื่อง cache และ concurrency
 
 core cache ป้องกัน growth ไม่จำกัดที่ 1024 entry และคืน stale value ได้ขณะที่มี background refresh
-หนึ่งงาน stale producer error จะเก็บ stale data เมื่อมี; cold failure ยัง throw plugin middleware
-worker ไม่ share module state realtime reconnect เป็น client-side และ serverless adapter ไม่ host
-native WebSocket realtime ข้อจำกัดเหล่านี้สำคัญเมื่อ scale เกิน process เดียว
+หนึ่งงาน stale producer error จะเก็บ stale data เมื่อมี; cold failure ยัง throw project worker ไม่
+share module state realtime reconnect เป็น client-side และ serverless adapter ไม่ host native
+WebSocket realtime ข้อจำกัดเหล่านี้สำคัญเมื่อ scale เกิน process เดียว
 
 **ก่อนหน้า:** [Security](13-security.md) · **ถัดไป:**
 [Deploy, run และ operate ใน production](15-deploy-run-and-operate.md)

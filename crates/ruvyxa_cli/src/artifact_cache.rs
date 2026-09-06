@@ -43,7 +43,6 @@ const WORKER_RUNTIME_FILES: &[&str] = &[
     // them out of a hashed file would otherwise have taken them out of cache
     // identity: the rule could change while every hash above stayed equal.
     "origin-policy.mjs",
-    "plugin-registration.mjs",
     // Which exported function answers a method, and what a 405 has to say. A
     // route that starts answering HEAD renders differently from one that
     // refused it, so prerendered output built against the old rule is stale.
@@ -74,18 +73,11 @@ const WORKER_RUNTIME_FILES: &[&str] = &[
     "rsc-client-install.mjs",
     "flight.mjs",
     "react-compiler.mjs",
-    // The project's own `build.onTransform` hooks, which `compiler.mjs` runs
-    // over every module it reads. A plugin that rewrites source changes what a
-    // pre-rendered page was built from, and the registry that dispatches those
-    // hooks lives here — so a change to the dispatch changes rendered output
-    // exactly like a change to the compiler does.
-    "plugin-http.mjs",
-    // Reached through `plugin-http.mjs`, which scopes every HTTP hook by the
-    // path this module canonicalises — there is one answer to "what is this
-    // request's path" and both the router and the plugin stage read it here.
-    // Nothing the worker runs asks it anything, so this is the list being wider
-    // than the closure needs, which `the_worker_runtime_list_covers_everything_the_worker_imports`
-    // permits and a narrower list would not.
+    // Canonicalises the request path both the router and the deployed handler
+    // read. Nothing the worker runs asks it anything, so this is the list being
+    // wider than the closure needs, which
+    // `the_worker_runtime_list_covers_everything_the_worker_imports` permits and
+    // a narrower list would not.
     "route-match.mjs",
 ];
 
@@ -186,10 +178,6 @@ pub(crate) fn prerender_context_hash(
         // every pre-rendered document, so publishing or removing the file one
         // names changes what a cached page would serve.
         "assetLinks": content_hash(&head.asset_links),
-        // Same reason: a plugin's head entries are written into every baked
-        // page, so adding, removing, or editing one has to invalidate the
-        // pages that were baked without it.
-        "pluginHead": content_hash(&head.plugin_head),
         "clientAssets": client_assets,
         "jsx": build.jsx_runtime.as_deref().unwrap_or("automatic"),
         // `build.target` decides what the transform emits, so a change to it

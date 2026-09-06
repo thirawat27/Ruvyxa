@@ -26,7 +26,6 @@ describe('demo command contract', () => {
       trace: `${command} trace --root .`,
       bench: `${command} bench --root .`,
       'test:parity': `${command} test:parity --root .`,
-      plugin: `${command} plugin`,
     }
 
     assert.deepEqual(

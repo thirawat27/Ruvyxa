@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { collab } from '../../../packages/@ruvyxa/realtime/dist/index.js'
 import { createCollabClient } from '../../../packages/@ruvyxa/realtime/dist/collab.js'
 
 class FakeSocket {
@@ -87,39 +86,6 @@ function harness(options: Record<string, unknown> = {}) {
 }
 
 describe('collab()', () => {
-  it('claims the presence capability and registers no deployment gate of its own', async () => {
-    const plugin = collab({ path: '/rooms', heartbeatMs: 10_000 })
-    const claims: Array<{ capability: string; options: unknown }> = []
-    const buildHooks: unknown[] = []
-    await plugin.register({
-      environment: 'production',
-      http: { onRequest() {}, onResponse() {}, route() {} },
-      build: {
-        onStart() {},
-        onResolve() {},
-        onLoad() {},
-        onTransform() {},
-        onComplete(hook: unknown) {
-          buildHooks.push(hook)
-        },
-      },
-      dev: { onFileChange() {} },
-      diagnostics: { report() {} },
-      native: {
-        claim(capability: string, options: unknown) {
-          claims.push({ capability, options })
-        },
-      },
-    } as never)
-
-    assert.deepEqual(claims, [
-      { capability: 'presence@1', options: { path: '/rooms', heartbeatMs: 10_000 } },
-    ])
-    // Same rule as `realtime()`: the host that serves the room decides whether
-    // a build can, and `adapter-runner.mjs` reports RUV2205 when it cannot.
-    assert.deepEqual(buildHooks, [])
-  })
-
   it('rejects a room id the server would refuse', () => {
     assert.throws(() => createCollabClient({ room: '' } as never), /1-128 letters/)
     assert.throws(() => createCollabClient({ room: 'doc 1' } as never), /1-128 letters/)

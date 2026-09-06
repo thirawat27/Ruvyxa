@@ -194,15 +194,12 @@ pub(crate) fn emit_client_bundles(
     manifest: &RouteManifest,
     client_dir: &Path,
     build: &BuildConfigOptions,
-    plugins: &[BuildPluginConfig],
     cache: RuvyxaBuildCache<'_>,
 ) -> anyhow::Result<serde_json::Value> {
-    let plugin_session = TypeScriptPluginBuildSession::new(
+    let worker_session = BuildWorkerSession::new(
         root,
-        plugins,
         ruvyxa_dev_server::JavaScriptRuntime::Node,
-        false,
-        false,
+        WorkerOptions::default(),
     )?;
     emit_client_bundles_with_session(
         root,
@@ -210,9 +207,8 @@ pub(crate) fn emit_client_bundles(
         manifest,
         client_dir,
         build,
-        plugins,
         cache,
-        &plugin_session,
+        &worker_session,
         // The analyzer path has no worker, so no server-components entries.
         &ServerComponentEntries::default(),
     )
@@ -225,9 +221,8 @@ pub(crate) fn emit_client_bundles_with_session(
     manifest: &RouteManifest,
     client_dir: &Path,
     build: &BuildConfigOptions,
-    plugins: &[BuildPluginConfig],
     cache: RuvyxaBuildCache<'_>,
-    plugin_session: &TypeScriptPluginBuildSession,
+    worker_session: &BuildWorkerSession,
     rsc_entries: &ServerComponentEntries,
 ) -> anyhow::Result<serde_json::Value> {
     // A server-components route's browser bundle holds the `'use client'`
@@ -245,7 +240,7 @@ pub(crate) fn emit_client_bundles_with_session(
         bundle_context: bundle_context_for_build(
             cache.dependency_hash,
             cache.directory,
-            plugin_session,
+            worker_session,
             &rsc_entries.server_references,
         )?,
         artifact_cache_dir: cache.directory.to_path_buf(),
@@ -286,7 +281,6 @@ pub(crate) fn emit_client_bundles_with_session(
 
     Ok(client_bundle_report(
         build,
-        plugins,
         pass.parallelism,
         &written.totals,
         routes,
@@ -799,7 +793,6 @@ fn write_chunk_manifest(
 /// already decided, apart from the cache-budget sweep it triggers.
 fn client_bundle_report(
     build: &BuildConfigOptions,
-    plugins: &[BuildPluginConfig],
     parallelism: usize,
     totals: &ClientBundleTotals,
     routes: Vec<serde_json::Value>,
@@ -825,7 +818,6 @@ fn client_bundle_report(
         "cacheHits": totals.cache_hits,
         "treeShakenModules": totals.tree_shaken_modules,
         "budget": bundle_budget,
-        "plugins": build_plugin_manifest(plugins),
         "sharedRouteChunks": shared_route_chunks
             .iter()
             .map(shared_route_chunk_manifest)
@@ -994,28 +986,6 @@ pub(crate) fn prerender_cpu_budget(configured: Option<usize>) -> usize {
                 .unwrap_or(1)
                 .min(MAX_PRERENDER_PARALLELISM)
         })
-}
-
-/// Flatten every plugin's declared head elements in configuration order.
-///
-/// Order is the order plugins are listed, so a project controls which entry
-/// wins when two plugins contribute the same tag.
-pub(crate) fn collect_plugin_head(
-    plugins: &[BuildPluginConfig],
-) -> Vec<ruvyxa_dev_server::PluginHeadEntry> {
-    plugins
-        .iter()
-        .flat_map(|plugin| plugin.head.iter().cloned())
-        .collect()
-}
-
-pub(crate) fn build_plugin_manifest(plugins: &[BuildPluginConfig]) -> serde_json::Value {
-    serde_json::Value::Array(
-        plugins
-            .iter()
-            .map(|plugin| serde_json::json!({ "name": plugin.name }))
-            .collect(),
-    )
 }
 
 /// Bundle a client route using Ruvyxa Bundler (`ruvyxa_bundler`).

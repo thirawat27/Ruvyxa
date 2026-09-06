@@ -100,7 +100,6 @@ const MAXIMAL = {
   security: {
     actionLimit: 1024,
     apiLimit: 2048,
-    pluginLimit: 4096,
     actionRateLimit: { max: 10, window: 60 },
     sameOrigin: true,
     fetchMeta: true,
@@ -193,8 +192,54 @@ const MAXIMAL = {
     workers: 2,
     timeoutMs: 5000,
   },
+  // Route rules in the object form the renderer reduces every spelling to.
+  headers: [
+    {
+      source: '/blog/:slug',
+      headers: [{ key: 'x-slug', value: ':slug' }],
+      has: [{ type: 'header', key: 'x-add', value: '1' }],
+      missing: [{ type: 'cookie', key: 'skip', value: '1' }],
+    },
+  ],
+  redirects: [
+    {
+      source: '/old/:path*',
+      destination: '/new/:path*',
+      permanent: true,
+      statusCode: 308,
+      has: [{ type: 'query', key: 'go', value: 'yes' }],
+      missing: [{ type: 'header', key: 'x-staging', value: '1' }],
+    },
+  ],
+  rewrites: {
+    beforeFiles: [
+      {
+        source: '/docs/:path*',
+        destination: '/help/:path*',
+        has: [{ type: 'header', key: 'x-docs', value: '1' }],
+        missing: [{ type: 'header', key: 'x-skip', value: '1' }],
+      },
+    ],
+    afterFiles: [
+      {
+        source: '/legacy/:path*',
+        destination: '/:path*',
+        has: [{ type: 'header', key: 'x-legacy', value: '1' }],
+        missing: [{ type: 'header', key: 'x-skip', value: '1' }],
+      },
+    ],
+    fallback: [
+      {
+        source: '/:path*',
+        destination: 'https://old.example.com/:path*',
+        has: [{ type: 'header', key: 'x-old', value: '1' }],
+        missing: [{ type: 'header', key: 'x-skip', value: '1' }],
+      },
+    ],
+  },
+  realtime: { path: '/__ruvyxa/realtime', heartbeatMs: 25_000, capacity: 256 },
+  collab: { path: '/__ruvyxa/collab', heartbeatMs: 25_000 },
   adapterOptions: { some: 'value' },
-  plugins: [],
 }
 
 /**
@@ -203,10 +248,14 @@ const MAXIMAL = {
  * `adapter` has to be a live object with a `build(context)` function — the
  * renderer refuses anything else — so it cannot travel in the data literal
  * above. It is still a declared key and still has to be emitted, so it is
- * covered here rather than exempted.
+ * covered here rather than exempted. `proxy` carries its `handler` function
+ * the same way; the renderer emits the matcher and `handler: true`.
  */
 const SOURCE_ONLY = {
   adapter: "{ name: 'node', build() { return { name: 'node', target: 'node' } } }",
+  proxy:
+    "{ matcher: [{ source: '/dashboard/:path*', has: [{ type: 'cookie', key: 'session', value: '.+' }], " +
+    "missing: [{ type: 'header', key: 'x-bypass', value: '1' }] }], handler() {} }",
 }
 
 /**
@@ -267,6 +316,9 @@ describe('the config renderer emits every key it accepts', () => {
   it('sets every declared key in the maximal config', () => {
     const missing = []
     for (const [schemaPath, declared] of Object.entries(CONFIG_KEY_SCHEMA)) {
+      // A source-only section is written in `SOURCE_ONLY`, not in the literal;
+      // the rendered sweep below is what proves its keys.
+      if (schemaPath.split('.')[1] in SOURCE_ONLY) continue
       const section = resolveSchemaPath(MAXIMAL, schemaPath)
       if (section === undefined) {
         missing.push(`${schemaPath} (whole section)`)

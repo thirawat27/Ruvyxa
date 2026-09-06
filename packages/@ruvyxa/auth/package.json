@@ -60,14 +60,7 @@
     "./client": {
       "types": "./dist/client.d.ts",
       "default": "./dist/client.js"
-    },
-    "./plugin": {
-      "types": "./dist/plugin.d.ts",
-      "default": "./dist/plugin.js"
     }
-  },
-  "dependencies": {
-    "@ruvyxa/core": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "24.13.3"

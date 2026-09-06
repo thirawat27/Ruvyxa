@@ -115,7 +115,6 @@ const authored: RuvyxaConfig = {
   security: {
     actionLimit: 1048576,
     apiLimit: 10485760,
-    pluginLimit: 33554432,
     actionRateLimit: { max: 600, window: 60 },
     sameOrigin: true,
     fetchMeta: true,
@@ -208,6 +207,66 @@ const authored: RuvyxaConfig = {
       headers: { 'x-example': '1' },
     },
   },
+  // Route rules, in the object form the renderer reduces every spelling to; a
+  // `has`/`missing` condition of each kind appears once so its keys are walked.
+  headers: [
+    {
+      source: '/blog/:slug',
+      headers: [{ key: 'x-slug', value: ':slug' }],
+      has: [{ type: 'header', key: 'x-add', value: '1' }],
+      missing: [{ type: 'cookie', key: 'skip', value: '1' }],
+    },
+  ],
+  redirects: [
+    {
+      source: '/old/:path*',
+      destination: '/new/:path*',
+      permanent: true,
+      statusCode: 308,
+      has: [{ type: 'query', key: 'go', value: 'yes' }],
+      // `host` conditions take no key; the inventory needs every key once, so
+      // this entry is a header condition.
+      missing: [{ type: 'header', key: 'x-staging', value: '1' }],
+    },
+  ],
+  rewrites: {
+    beforeFiles: [
+      {
+        source: '/docs/:path*',
+        destination: '/help/:path*',
+        has: [{ type: 'header', key: 'x-docs', value: '1' }],
+        missing: [{ type: 'header', key: 'x-skip', value: '1' }],
+      },
+    ],
+    afterFiles: [
+      {
+        source: '/legacy/:path*',
+        destination: '/:path*',
+        has: [{ type: 'header', key: 'x-legacy', value: '1' }],
+        missing: [{ type: 'header', key: 'x-skip', value: '1' }],
+      },
+    ],
+    fallback: [
+      {
+        source: '/:path*',
+        destination: 'https://old.example.com/:path*',
+        has: [{ type: 'header', key: 'x-old', value: '1' }],
+        missing: [{ type: 'header', key: 'x-skip', value: '1' }],
+      },
+    ],
+  },
+  proxy: {
+    matcher: [
+      {
+        source: '/dashboard/:path*',
+        has: [{ type: 'cookie', key: 'session', value: '.+' }],
+        missing: [{ type: 'header', key: 'x-bypass', value: '1' }],
+      },
+    ],
+    handler: () => undefined,
+  },
+  realtime: { path: '/__ruvyxa/realtime', heartbeatMs: 25_000, capacity: 256 },
+  collab: { path: '/__ruvyxa/collab', heartbeatMs: 25_000 },
   // An inventory of every key, not a runnable config: the build refuses
   // `adapter` and `adapterOptions` together, and nothing here is ever loaded.
   adapter: {
@@ -217,7 +276,6 @@ const authored: RuvyxaConfig = {
     build: () => ({ name: 'fixture', target: 'node', entry: 'entry', assetsDir: 'assets' }),
   },
   adapterOptions: { serviceName: 'example' },
-  plugins: [],
 }
 
 /**

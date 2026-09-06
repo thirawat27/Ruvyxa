@@ -5,9 +5,10 @@
 > meets the requirements, then continue to chapter 2.
 
 Ruvyxa is intended for React applications that need file-system routes, server rendering, static
-output, server actions, API routes, plugins, and a native build/dev pipeline without hiding the
-deployment target. The public npm entry point is `ruvyxa`; React helpers live in `@ruvyxa/react`;
-framework primitives live in `@ruvyxa/core` and are re-exported by `ruvyxa`.
+output, server actions, API routes, a config-declared request pipeline, and a native build/dev
+pipeline without hiding the deployment target. The public npm entry point is `ruvyxa`; React helpers
+live in `@ruvyxa/react`; framework primitives live in `@ruvyxa/core` and are re-exported by
+`ruvyxa`.
 
 ## What is implemented
 
@@ -51,8 +52,8 @@ To **work on the framework itself** you additionally need a Rust toolchain (edit
 
 > **Scope note:** the framework supports `node`, `bun`, and `deno` runtime options in its
 > CLI/config. Node remains the declared package prerequisite; install Bun or Deno only when
-> selecting that runtime. Deno local tooling runs trusted project configuration and plugins with the
-> required permissions (`-A --no-prompt`).
+> selecting that runtime. Deno local tooling runs trusted project configuration with the required
+> permissions (`-A --no-prompt`).
 
 ## Minimal outcome
 

@@ -50,15 +50,22 @@ const SYNCED_MODULES = [
       'deployed handler can resolve the same URL to different routes.',
   },
   {
-    specifier: '@ruvyxa/core/plugin-registration',
-    source: 'packages/@ruvyxa/core/src/plugin-registration.ts',
-    file: 'plugin-registration.mjs',
+    specifier: '@ruvyxa/core/route-rules',
+    source: 'packages/@ruvyxa/core/src/route-rules.ts',
+    file: 'route-rules.mjs',
     why:
-      'It is the copy of @ruvyxa/core/plugin-registration that ships inside\n' +
-      'serverless function bundles. Letting it drift means a plugin passes the\n' +
-      'harness that validates it and is refused by the server that runs it --\n' +
-      'which had already happened: the harness accepted an http.route() on a\n' +
-      'reserved framework path that the runtime rejects.',
+      'It is the copy of @ruvyxa/core/route-rules that ships inside serverless\n' +
+      'function bundles. Letting it drift means a header, redirect, rewrite, or\n' +
+      'proxy matcher applies under ruvyxa start and not once deployed.',
+  },
+  {
+    specifier: '@ruvyxa/core/framework-paths',
+    source: 'packages/@ruvyxa/core/src/framework-paths.ts',
+    file: 'framework-paths.mjs',
+    why:
+      'It is the copy of @ruvyxa/core/framework-paths the config renderer and\n' +
+      'the adapter runner read. Letting it drift means a transport path the\n' +
+      'config accepts is one the native server panics on.',
   },
   {
     specifier: '@ruvyxa/core/origin-policy',

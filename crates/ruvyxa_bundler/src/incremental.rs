@@ -8,7 +8,7 @@
 //! - Its resolved dependency edges (list of paths)
 //! - The specifier-to-path alias map those edges were resolved through
 //!
-//! On subsequent plugin-free client builds, the resolver reuses dependency
+//! On subsequent hook-free client builds, the resolver reuses dependency
 //! edges whose source content is unchanged. Compilation remains independently
 //! content-addressed by `CompileCache`.
 //!
@@ -68,7 +68,7 @@ pub struct CachedModuleEntry {
     ///
     /// Stored alongside the paths because the linker resolves a specifier
     /// through this map first and only then falls back to matching by path
-    /// suffix. A tsconfig or plugin alias (`~/components/Button`) shares no
+    /// suffix. A tsconfig alias (`~/components/Button`) shares no
     /// suffix with its target, so a reused entry without the map would hand the
     /// linker a different resolution input than a cold build produced.
     ///

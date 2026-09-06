@@ -434,9 +434,8 @@ pub(crate) fn action_origin_is_cross_site(
 /// the caller. That split is what lets this be held to
 /// `tests/fixtures/origin-policy-conformance.json` together with
 /// `packages/@ruvyxa/core/src/origin-policy.ts`: a deployed function has no
-/// transport peer to weigh `X-Forwarded-Proto` against, and the `originGuard`
-/// plugin has no trust policy at all, so the three hosts legitimately differ on
-/// that one input and on nothing after it.
+/// transport peer to weigh `X-Forwarded-Proto` against, so the two hosts
+/// legitimately differ on that one input and on nothing after it.
 ///
 /// Three ports of these rules used to be kept in step by a comment saying they
 /// mirrored each other — the arrangement that let `STATIC_CONTENT_TYPES` and
@@ -618,9 +617,9 @@ mod tests {
     /// Both languages replay `tests/fixtures/origin-policy-conformance.json`.
     ///
     /// The JavaScript side is `tests/packages/core/origin-policy-contract.test.ts`
-    /// over `@ruvyxa/core/origin-policy`, which the action endpoint and the
-    /// `originGuard` plugin both read. Three ports of this decision used to be
-    /// kept in step by a comment saying they mirrored each other.
+    /// over `@ruvyxa/core/origin-policy`, which the action endpoint reads. The
+    /// ports of this decision used to be kept in step by a comment saying they
+    /// mirrored each other.
     #[test]
     fn origin_policy_matches_the_shared_conformance_table() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(

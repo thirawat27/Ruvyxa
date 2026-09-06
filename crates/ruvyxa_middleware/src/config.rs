@@ -6,15 +6,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-/// Largest configurable TypeScript plugin middleware worker pool.
-pub const MAX_PLUGIN_MIDDLEWARE_WORKERS: usize = 8;
+/// Largest configurable project worker pool.
+pub const MAX_WORKER_PROCESSES: usize = 8;
 
-/// Default upper bound for one TypeScript plugin middleware hook.
-pub const DEFAULT_PLUGIN_HOOK_TIMEOUT_MS: u64 = 30_000;
+/// Default upper bound for one project worker call (`proxy.handler`, a content
+/// artifact, a Markdown compile).
+pub const DEFAULT_WORKER_CALL_TIMEOUT_MS: u64 = 30_000;
 
-/// Largest configurable hook timeout, preventing accidental effectively
+/// Largest configurable call timeout, preventing accidental effectively
 /// unbounded recovery windows.
-pub const MAX_PLUGIN_HOOK_TIMEOUT_MS: u64 = 300_000;
+pub const MAX_WORKER_CALL_TIMEOUT_MS: u64 = 300_000;
 
 /// Top-level middleware configuration block.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -24,39 +25,39 @@ pub struct MiddlewareConfig {
     #[serde(default)]
     pub builtin: BuiltinMiddlewareConfig,
 
-    /// TypeScript plugin middleware worker processes. Workers do not share
-    /// module-level plugin state, so the default stays at one process.
+    /// Project worker processes that run `proxy.handler`. Workers do not
+    /// share module-level state, so the default stays at one process.
     #[serde(default)]
     pub workers: Option<usize>,
 
-    /// Maximum duration of one TypeScript plugin middleware hook.
+    /// Maximum duration of one project worker call.
     #[serde(default)]
     pub timeout_ms: Option<u64>,
 }
 
 impl MiddlewareConfig {
-    /// Validated plugin middleware pool size.
-    pub fn plugin_workers(&self) -> Result<usize, String> {
+    /// Validated project worker pool size.
+    pub fn worker_processes(&self) -> Result<usize, String> {
         match self.workers {
             None => Ok(1),
-            Some(workers) if (1..=MAX_PLUGIN_MIDDLEWARE_WORKERS).contains(&workers) => Ok(workers),
+            Some(workers) if (1..=MAX_WORKER_PROCESSES).contains(&workers) => Ok(workers),
             Some(workers) => Err(format!(
                 "RUV1602 config field `middleware.workers` must be between 1 and \
-                 {MAX_PLUGIN_MIDDLEWARE_WORKERS}, got {workers}"
+                 {MAX_WORKER_PROCESSES}, got {workers}"
             )),
         }
     }
 
-    /// Validated timeout for one plugin middleware hook.
-    pub fn plugin_timeout(&self) -> Result<Duration, String> {
+    /// Validated timeout for one project worker call.
+    pub fn worker_timeout(&self) -> Result<Duration, String> {
         match self.timeout_ms {
-            None => Ok(Duration::from_millis(DEFAULT_PLUGIN_HOOK_TIMEOUT_MS)),
-            Some(timeout_ms) if (1..=MAX_PLUGIN_HOOK_TIMEOUT_MS).contains(&timeout_ms) => {
+            None => Ok(Duration::from_millis(DEFAULT_WORKER_CALL_TIMEOUT_MS)),
+            Some(timeout_ms) if (1..=MAX_WORKER_CALL_TIMEOUT_MS).contains(&timeout_ms) => {
                 Ok(Duration::from_millis(timeout_ms))
             }
             Some(timeout_ms) => Err(format!(
                 "RUV1602 config field `middleware.timeoutMs` must be between 1 and \
-                 {MAX_PLUGIN_HOOK_TIMEOUT_MS}, got {timeout_ms}"
+                 {MAX_WORKER_CALL_TIMEOUT_MS}, got {timeout_ms}"
             )),
         }
     }
@@ -172,38 +173,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plugin_workers_defaults_to_one_and_rejects_out_of_range_values() {
+    fn worker_processes_default_to_one_and_reject_out_of_range_values() {
         let config = MiddlewareConfig::default();
-        assert_eq!(config.plugin_workers(), Ok(1));
+        assert_eq!(config.worker_processes(), Ok(1));
 
         let config: MiddlewareConfig =
             serde_json::from_value(serde_json::json!({ "workers": 4 })).unwrap();
-        assert_eq!(config.plugin_workers(), Ok(4));
+        assert_eq!(config.worker_processes(), Ok(4));
 
-        for workers in [0usize, MAX_PLUGIN_MIDDLEWARE_WORKERS + 1] {
+        for workers in [0usize, MAX_WORKER_PROCESSES + 1] {
             let config: MiddlewareConfig =
                 serde_json::from_value(serde_json::json!({ "workers": workers })).unwrap();
-            let error = config.plugin_workers().unwrap_err();
+            let error = config.worker_processes().unwrap_err();
             assert!(error.contains("middleware.workers"), "{error}");
         }
     }
 
     #[test]
-    fn plugin_timeout_defaults_to_thirty_seconds_and_rejects_out_of_range_values() {
+    fn worker_timeout_defaults_to_thirty_seconds_and_rejects_out_of_range_values() {
         let config = MiddlewareConfig::default();
         assert_eq!(
-            config.plugin_timeout(),
-            Ok(Duration::from_millis(DEFAULT_PLUGIN_HOOK_TIMEOUT_MS))
+            config.worker_timeout(),
+            Ok(Duration::from_millis(DEFAULT_WORKER_CALL_TIMEOUT_MS))
         );
 
         let config: MiddlewareConfig =
             serde_json::from_value(serde_json::json!({ "timeoutMs": 15_000 })).unwrap();
-        assert_eq!(config.plugin_timeout(), Ok(Duration::from_millis(15_000)));
+        assert_eq!(config.worker_timeout(), Ok(Duration::from_millis(15_000)));
 
-        for timeout_ms in [0_u64, MAX_PLUGIN_HOOK_TIMEOUT_MS + 1] {
+        for timeout_ms in [0_u64, MAX_WORKER_CALL_TIMEOUT_MS + 1] {
             let config: MiddlewareConfig =
                 serde_json::from_value(serde_json::json!({ "timeoutMs": timeout_ms })).unwrap();
-            let error = config.plugin_timeout().unwrap_err();
+            let error = config.worker_timeout().unwrap_err();
             assert!(error.contains("middleware.timeoutMs"), "{error}");
         }
     }

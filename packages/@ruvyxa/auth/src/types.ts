@@ -1,5 +1,3 @@
-import type { RuvyxaPlugin } from '@ruvyxa/core/plugin'
-
 export interface AuthUser {
   id: string
   email?: string
@@ -158,9 +156,23 @@ export interface AuthResult {
   headers: Headers
 }
 
+/**
+ * The route handlers that mount the auth endpoints.
+ *
+ * Re-export them from `app/<basePath>/[...path]/route.ts`:
+ * `export const { GET, POST } = auth.handlers`. A path under `basePath` the
+ * runtime does not serve answers 404 from here rather than falling through to
+ * the application's not-found page.
+ */
+export interface AuthRouteHandlers {
+  GET(context: { request: Request }): Promise<Response>
+  POST(context: { request: Request }): Promise<Response>
+}
+
 export interface AuthRuntime {
-  readonly plugin: RuvyxaPlugin
   readonly basePath: string
+  /** Route handlers for `app/<basePath>/[...path]/route.ts`. */
+  readonly handlers: AuthRouteHandlers
   handle(request: Request): Promise<Response | undefined>
   login(provider: string, input: Record<string, unknown>, request?: Request): Promise<AuthResult>
   getSession(request: Request): Promise<AuthSession | null>

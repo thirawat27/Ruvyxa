@@ -1,7 +1,7 @@
 //! # Ruvyxa Middleware
 //!
 //! A composable middleware system built on Tower's `Service` and `Layer` traits,
-//! with TypeScript plugin middleware executed by Ruvyxa's selected JavaScript runtime.
+//! plus the bridge to the project worker that runs `proxy.handler` from `ruvyxa.config.ts`.
 //!
 //! ## Architecture
 //!
@@ -9,10 +9,11 @@
 //!   custom headers — all configurable via `ruvyxa.config.ts`.
 //! - **Tower Layer stack**: Middleware is applied as standard Tower layers, composable
 //!   with any axum/tower ecosystem middleware.
-//! - **TypeScript plugin host**: The native server validates and applies request/response
-//!   results from the unified Node/Bun plugin registry.
+//! - **Project worker**: `proxy.handler`, the Markdown pipeline, and the content engine are
+//!   code in `ruvyxa.config.ts`; the native server runs them in a persistent JavaScript
+//!   worker and validates what comes back.
 //!
-//! ## Rate limiting: five limiters, one contract
+//! ## Rate limiting: four limiters, one contract
 //!
 //! Ruvyxa refuses excess traffic in five places, and they do not share an
 //! algorithm. That is deliberate — each guards a different shape of traffic and
@@ -38,8 +39,7 @@
 //!   would accept the replay it exists to refuse.
 //! - **One identity per bucket.** Who the client is comes from
 //!   [`client_ip()`], which believes a forwarded header only from a peer that is
-//!   loopback or listed in `security.trustedProxyIps` — except in the plugin
-//!   limiter, which has no peer to weigh and takes a resolver from the project.
+//!   loopback or listed in `security.trustedProxyIps`.
 //!
 //! Where they differ, and why:
 //!
@@ -49,22 +49,7 @@
 //! | `ruvyxa_dev_server::action_security::ActionRateLimiter` | server actions | sliding-window counter (previous window weighted by overlap) | a fixed 8192-slot array; hash collisions merge two clients, which can only refuse more |
 //! | `ruvyxa_dev_server::collab::FrameRateLimiter` | collab cursor frames | fixed one-second window | one counter per connection |
 //! | `packages/ruvyxa/runtime/serverless-handler.mjs` | every request in a deployed build | fixed window, mirrors `RateLimitLayer` | same cap, same bound, same eviction |
-//! | `consumeFixedWindow` in `packages/ruvyxa/src/plugins/shared.ts` | the `webVitals` beacon collector | fixed window, mirrors the deployed host | same cap, same bound, same eviction |
 //!
-//! The last row is the newest and reached neither of the two above it: the
-//! native ones are Rust, and the deployed one lives in the module every adapter
-//! copies verbatim into a function bundle, which a plugin barrel loaded by
-//! `ruvyxa.config.ts` has no business importing. It is a separate copy of the
-//! same algorithm, and it replays `tests/fixtures/rate-limit-conformance.json`
-//! for the same reason the other two do. Its identity comes from a resolver the
-//! project supplies rather than from [`client_ip()`]: a plugin sees a `Request`
-//! and no transport peer, so only the deployment knows whether a forwarded
-//! header can be believed. Where no resolver is configured there is no
-//! per-client bucket at all, and an endpoint-wide ceiling is what remains.
-//! Falling back to a shared per-caller literal instead — the user agent, say —
-//! is what the one-identity-per-bucket rule above forbids: requests nothing identified
-//! are not the *same* client, and bucketing them together turns the limiter
-//! into the outage it exists to prevent.
 //!
 //! The serverless row is a claim about another language, and it was false for as
 //! long as nothing checked it: the capacity refusal and the unbounded key were
@@ -89,23 +74,25 @@
 //!
 //! - `RUV2000`: Middleware configuration error
 //! - `RUV2001`: Middleware execution failed
-//! - `RUV1700`: TypeScript plugin execution failed
-//! - `RUV1701`: TypeScript plugin protocol error
+//! - `RUV1700`: project worker call failed
+//! - `RUV1701`: project worker protocol error
 
 pub mod builtin;
 pub mod client_ip;
 pub mod config;
-pub mod plugin_host;
+pub mod route_rules;
 pub mod stack;
+pub mod worker_host;
 
 pub use client_ip::{
     IpPrefix, TrustedProxies, client_ip, forwarded_client_ip, is_trusted_proxy_ip, unmap_v4,
 };
 pub use config::MiddlewareConfig;
-pub use plugin_host::{
-    NativeCapabilityDescriptor, PluginBuildDescriptor, PluginDevDescriptor,
-    PluginDiagnosticDescriptor, PluginEnvironment, PluginHost, PluginHttpDescriptor,
-    PluginHttpRequest, PluginHttpRequestResult, PluginHttpResponse, PluginRegistryDescriptor,
-    RealtimeDescriptor,
+pub use route_rules::{
+    CompiledProxy, HeaderRule, MatcherEntry, ProxyConfig, RedirectRule, RewritePhases, RewriteRule,
+    RouteCondition, RouteRules, RuleRequest,
 };
 pub use stack::MiddlewareStack;
+pub use worker_host::{
+    ContentArtifact, WireRequest, WireRequestResult, WireResponse, WorkerDescriptor, WorkerHost,
+};

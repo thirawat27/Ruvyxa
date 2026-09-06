@@ -1,6 +1,4 @@
 import { config, type RuvyxaConfig } from 'ruvyxa/config'
-import { realtime } from '@ruvyxa/realtime/plugin'
-import { demoPlugins } from './plugins'
 
 const settings: RuvyxaConfig = {
   appDir: 'app',
@@ -68,7 +66,36 @@ const settings: RuvyxaConfig = {
     workers: 2,
   },
 
-  plugins: [...demoPlugins, realtime()],
+  realtime: true,
+
+  // Response headers by path, evaluated natively on every host. One header per
+  // render strategy labels which branch of the server answered.
+  headers: [
+    { source: '/static-page', headers: [{ key: 'x-demo-render-mode', value: 'static' }] },
+    { source: '/ssg-blog/:path*', headers: [{ key: 'x-demo-render-mode', value: 'ssg' }] },
+    { source: '/isr-page', headers: [{ key: 'x-demo-render-mode', value: 'isr' }] },
+    { source: '/csr-page', headers: [{ key: 'x-demo-render-mode', value: 'csr' }] },
+    { source: '/ppr-page', headers: [{ key: 'x-demo-render-mode', value: 'ppr' }] },
+    { source: '/proxy-lab/:path*', headers: [{ key: 'x-demo-headers-rule', value: 'active' }] },
+  ],
+
+  // Code ahead of every matching route, kept in this file. A `Response`
+  // answers; a `Request` continues with new headers.
+  proxy: {
+    matcher: '/proxy-lab/:path*',
+    handler(request) {
+      const url = new URL(request.url)
+      if (url.pathname === '/proxy-lab/blocked') {
+        return new Response('blocked by proxy', {
+          status: 403,
+          headers: { 'x-demo-proxy': 'answered' },
+        })
+      }
+      const headers = new Headers(request.headers)
+      headers.set('x-demo-proxy-request', 'active')
+      return new Request(request, { headers })
+    },
+  },
 }
 
 export default config(settings)

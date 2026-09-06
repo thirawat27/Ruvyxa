@@ -35,15 +35,14 @@ import {
   clientRegistrySource,
   mergeServerReferences,
 } from './client-references.mjs'
-import { createPluginRegistry } from './plugin-http.mjs'
+import { normalizeCollabConfig, normalizeRealtimeConfig } from './framework-paths.mjs'
 import { HANDLER_RUNTIME_FILES, prerenderRelativePath } from './serverless-handler.mjs'
 import { actionReferenceId } from './action-runtime.mjs'
 
 // Declared above the top-level `await` this file runs, not beside the function
 // that reads them: a `const` below a top-level await is in its temporal dead
 // zone while that await is pending, so reading one from the build path threw
-// `Cannot access before initialization` — the same trap `isNullBodyStatus` in
-// plugin-runtime.mjs documents.
+// `Cannot access before initialization`.
 /** The key the deployment description occupies in `manifest.json`. */
 const DEPLOY_MANIFEST_KEY = 'deploy'
 
@@ -61,8 +60,7 @@ const NOT_FOUND_DOCUMENT_FILE = '404.html'
  *
  * `client/` is public by contract, and this file is a build report: absolute
  * source paths from the build machine, the module graph of every shared chunk
- * and route, the bundler cache location, the plugin list, and per-route byte
- * counts. It sat beside the lean `route-manifest.json` that exists so none of
+ * and route, the bundler cache location, and per-route byte counts. It sat beside the lean `route-manifest.json` that exists so none of
  * that has to ship, and was published at `/__ruvyxa/client/manifest.json` by
  * every host. Named `CLIENT_BUILD_REPORT_FILE` in `crates/ruvyxa_cli/src/build.rs`,
  * which writes it.
@@ -163,12 +161,12 @@ const PROJECT_CONFIG_FILE = /^ruvyxa\.config\.(?:ts|mts|js|mjs)$/
 
 try {
   // The config is loaded even when `--adapter <name>` names the deploy target,
-  // because it is also where `plugins` live and those have to be compiled into
-  // the function bundle. Selecting an adapter on the command line overrides
+  // because it is also where `proxy.handler` lives and that has to be compiled
+  // into the function bundle. Selecting an adapter on the command line overrides
   // `config.adapter`; it no longer skips the rest of the config.
   const config = await loadConfig(projectRoot)
   // Kept at module scope so the function materializer, several calls deep in
-  // `materializeArtifacts`, can compile the project's plugins into the bundle
+  // `materializeArtifacts`, can compile the project's proxy into the bundle
   // without threading the config through every artifact kind.
   projectConfig = config
   const adapter = adapterNameArg
@@ -325,7 +323,7 @@ async function assertCapabilitiesSupported(adapter, buildDir, config) {
 
   // Everything below answers "can this target run the code this project
   // actually wrote?", which nothing used to ask. A project could declare
-  // server actions, plugin HTTP routes, or a realtime transport, build cleanly
+  // server actions, a proxy handler, or a realtime transport, build cleanly
   // against any adapter, and then answer 404 on every one of them in
   // production. Deciding it here turns a silent runtime hole into a build
   // failure that names the feature and the target.
@@ -351,22 +349,6 @@ async function assertCapabilitiesSupported(adapter, buildDir, config) {
     )
   }
 
-  const registry = await loadProjectPluginRegistry(config)
-  if (!registry) return
-  const pluginRoutes = registry.httpRequest.filter((entry) => entry.kind === 'route')
-  const hooks = registry.httpRequest.length + registry.httpResponse.length
-  if (hooks > 0 && !dynamic) {
-    const detail =
-      pluginRoutes.length > 0
-        ? `routes ${pluginRoutes.map((entry) => entry.path).join(', ')}`
-        : 'request/response hooks'
-    throw new Error(
-      `RUV2204 adapter ${adapterName} publishes a static site and cannot run plugin HTTP ` +
-        `behavior, but ${registry.plugins.join(', ')} registered ${detail}. ` +
-        'Remove the plugin, or build with an adapter that runs a server.',
-    )
-  }
-
   // A native transport is a persistent connection. `ruvyxa start` upgrades the
   // socket itself; nothing a build emits can — not a serverless function, and
   // not the generated standalone server, which serves plain HTTP with no
@@ -378,39 +360,26 @@ async function assertCapabilitiesSupported(adapter, buildDir, config) {
   // legitimate thing to ship when realtime is only used in development. The
   // client retries a missing endpoint indefinitely and says nothing, so the
   // absence still has to be stated somewhere — here, at build time, once.
-  for (const transport of registry.capabilities.values()) {
+  for (const [key, transport] of [
+    ['realtime', normalizeRealtimeConfig(config?.realtime)],
+    ['collab', normalizeCollabConfig(config?.collab)],
+  ]) {
+    if (!transport) continue
     console.error(
-      `[ruvyxa] RUV2205 plugin ${transport.plugin} claims ${transport.id}, which needs a ` +
-        `persistent connection at ${transport.path}. Adapter ${adapterName} emits a build ` +
-        `artifact, which cannot hold one, so ${transport.path} will not exist in this ` +
-        'deployment. Serve the project with `ruvyxa start` if clients depend on it.',
+      `[ruvyxa] RUV2205 config.${key} needs a persistent connection at ${transport.path}. ` +
+        `Adapter ${adapterName} emits a build artifact, which cannot hold one, so ` +
+        `${transport.path} will not exist in this deployment. Serve the project with ` +
+        '`ruvyxa start` if clients depend on it.',
     )
   }
-}
 
-/**
- * Build the project's plugin registry at build time.
- *
- * Doubles as validation: a plugin with a malformed hook, a duplicate name, or a
- * route that collides with a framework endpoint now fails `ruvyxa build`
- * rather than the first production request.
- *
- * The content engine is deliberately absent, unlike in `plugin-runtime.mjs`.
- * Its HTTP hook answers `/content.json` and `/search-index.json`, and the build
- * already writes both as public files, so a deployed site serves them from the
- * CDN. Registering it here would pull the whole content pipeline into every
- * function bundle to answer requests that never reach the function.
- */
-function projectPlugins(config) {
-  return Array.isArray(config?.plugins) ? config.plugins : []
-}
-
-function loadProjectPluginRegistry(config) {
-  return createPluginRegistry({
-    root: projectRoot,
-    plugins: projectPlugins(config),
-    environment: 'production',
-  })
+  if (typeof config?.proxy?.handler === 'function' && !dynamic) {
+    throw new Error(
+      `RUV2204 adapter ${adapterName} publishes a static site and cannot run ` +
+        'proxy.handler from ruvyxa.config.ts. Remove the proxy, or build with an adapter ' +
+        'that runs a server.',
+    )
+  }
 }
 
 /**
@@ -979,15 +948,14 @@ async function styleHeadTag(buildDir) {
 /**
  * The head fragments a request-time render on a deployed build has to add.
  *
- * The build resolved both — the icon link from what it published, the plugin
- * entries from `ruvyxa.config.ts` — and recorded them in the deploy manifest,
- * because a deployed function has neither a `public/` directory to stat nor a
- * config to load. Read from the same `manifest.json` every adapter already
- * reads rather than recomputed here: `public_asset_links` and
- * `render_plugin_head` stay the only implementations of either rule.
+ * The build resolved the icon link from what it published and recorded it in
+ * the deploy manifest, because a deployed function has no `public/` directory
+ * to stat. Read from the same `manifest.json` every adapter already reads
+ * rather than recomputed here, so `public_asset_links` stays the only
+ * implementation of the rule.
  *
- * An older build has no such section, and the empty pair is exactly what this
- * path did before it existed.
+ * An older build has no such section, and the empty value is exactly what
+ * this path did before it existed.
  */
 async function documentHeadDefaults(buildDir) {
   try {
@@ -995,10 +963,9 @@ async function documentHeadDefaults(buildDir) {
     const head = manifest?.[DEPLOY_MANIFEST_KEY]?.documentHead
     return {
       assetLinks: typeof head?.assetLinks === 'string' ? head.assetLinks : '',
-      pluginHead: typeof head?.pluginHead === 'string' ? head.pluginHead : '',
     }
   } catch {
-    return { assetLinks: '', pluginHead: '' }
+    return { assetLinks: '' }
   }
 }
 
@@ -1329,8 +1296,8 @@ async function materializeRouteModules(manifest, destination, target, buildDir) 
     }
   }
 
-  const plugins = pluginRegistrySource()
-  const buildSource = (pluginPart) => `${[...imports, ...pluginPart.imports].join('\n')}
+  const proxy = proxySource()
+  const buildSource = (proxyPart) => `${[...imports, ...proxyPart.imports].join('\n')}
 
 ${instrumentationPrelude()}
 ${documentCacheHandlerPrelude()}
@@ -1362,7 +1329,7 @@ export async function loadActionModule(routeId) {
   return actionModules[routeId] ?? null
 }
 
-${pluginPart.definition}
+${proxyPart.definition}
 `
   const outfile = path.join(destination, 'route-modules.mjs')
   // Every pre-linked server-components artifact, copied beside the registry and
@@ -1380,31 +1347,30 @@ ${pluginPart.definition}
       rscExternals.push(specifier)
     }
   }
-  await compileRegistry(buildSource(plugins), outfile, target, rscExternals)
+  await compileRegistry(buildSource(proxy), outfile, target, rscExternals)
 
-  // An edge runtime has no Node built-ins. Compiling the plugin registry into
-  // the bundle brings `ruvyxa.config` and everything it imports with it, and
-  // `ruvyxa/plugins` reaches `node:fs`, `node:path`, and `node:crypto` — so a
-  // Worker built this way would throw on module load and answer nothing, which
-  // is worse than the 404s this change set out to remove. Prove the plugins are
-  // the cause by rebuilding without them before blaming them, then refuse the
-  // build rather than emitting the artifact.
-  if (target === 'edge' && plugins.imports.length > 0) {
+  // An edge runtime has no Node built-ins. Compiling `proxy.handler` into the
+  // bundle brings `ruvyxa.config` and everything it imports with it, so a
+  // config that reaches `node:fs` would make a Worker throw on module load and
+  // answer nothing — worse than any 404. Prove the config is the cause by
+  // rebuilding without it before blaming it, then refuse the build rather than
+  // emitting the artifact.
+  if (target === 'edge' && proxy.imports.length > 0) {
     const builtins = nodeBuiltinImports(await readFile(outfile, 'utf8'))
     if (builtins.length > 0) {
-      const withoutPlugins = { imports: [], definition: 'export const applyPluginHttp = undefined' }
-      await compileRegistry(buildSource(withoutPlugins), outfile, target, rscExternals)
+      const withoutProxy = { imports: [], definition: inertProxy() }
+      await compileRegistry(buildSource(withoutProxy), outfile, target, rscExternals)
       if (nodeBuiltinImports(await readFile(outfile, 'utf8')).length === 0) {
         throw new Error(
-          `RUV2206 the project's plugins reach ${builtins.join(', ')}, which an edge runtime ` +
-            'does not provide, so plugin HTTP hooks cannot be compiled into this function. ' +
-            'Build for a Node or Bun target, or remove the plugin from ruvyxa.config.',
+          `RUV2206 ruvyxa.config.ts reaches ${builtins.join(', ')}, which an edge runtime ` +
+            'does not provide, so proxy.handler cannot be compiled into this function. ' +
+            'Build for a Node or Bun target, or keep the config free of Node built-ins.',
         )
       }
       // The routes themselves reach a Node built-in. That is the pre-existing
       // shape of this project against an edge target and is not this step's to
-      // decide, so the registry is restored with its plugins intact.
-      await compileRegistry(buildSource(plugins), outfile, target, rscExternals)
+      // decide, so the registry is restored with the proxy intact.
+      await compileRegistry(buildSource(proxy), outfile, target, rscExternals)
     }
   }
 }
@@ -1448,62 +1414,38 @@ async function compileRegistry(entrySource, outfile, target, external = []) {
 }
 
 /**
- * Source that runs the project's plugin HTTP hooks inside a function bundle.
+ * Source that hands the deployed handler the project's `proxy` block.
  *
- * The plugins themselves are imported from `ruvyxa.config`, so they are
- * compiled into the bundle by the same pass that compiles the routes — the
- * only way to reach them, since a deployed function cannot spawn
- * `plugin-runtime.mjs` and could not resolve its bare specifiers if it tried.
+ * `proxy.handler` is a function in `ruvyxa.config.ts`, so the config module is
+ * imported and compiled into the bundle by the same pass that compiles the
+ * routes — the only way to reach it, since a deployed function cannot spawn the
+ * project worker. `projectConfig` here is the compiled config module, so the
+ * handler is the function itself; the renderer's JSON, which other readers see,
+ * carries `true`.
  *
- * The registry is built lazily and memoized rather than at module scope: a
- * `register()` hook may be async, and a cold start that throws while building
- * the registry must surface on the request that triggered it rather than
- * breaking the module import for every route.
- *
- * Emitted as an inert stub when the project declares no plugins, so the common
- * case ships no extra code and the handler skips the pipeline entirely.
+ * Emitted as an inert stub when the config declares no proxy, so the common
+ * case ships no extra code and the handler skips the stage entirely.
  */
-function pluginRegistrySource() {
+function proxySource() {
   const configFile = findConfig(projectRoot)
-  if (!configFile || projectPlugins(projectConfig).length === 0) {
-    return { imports: [], definition: 'export const applyPluginHttp = undefined' }
-  }
-
-  const pluginHttpModule = path.join(runtimeDir, 'plugin-http.mjs')
+  const proxyHandler = projectConfig?.proxy?.handler
+  const hasProxy =
+    Boolean(configFile) && (typeof proxyHandler === 'function' || proxyHandler === true)
+  if (!hasProxy) return { imports: [], definition: inertProxy() }
   return {
-    imports: [
-      `import __ruvyxaConfig from ${JSON.stringify(toImportPath(configFile))}`,
-      'import {' +
-        ' createPluginRegistry as __ruvyxaCreatePluginRegistry,' +
-        ' dispatchPluginRequest as __ruvyxaDispatchPluginRequest,' +
-        ' dispatchPluginResponse as __ruvyxaDispatchPluginResponse,' +
-        ' hasPluginHttp as __ruvyxaHasPluginHttp' +
-        `} from ${JSON.stringify(toImportPath(pluginHttpModule))}`,
-    ],
-    definition: `let __ruvyxaPluginRegistry
-
-function __ruvyxaPluginRegistryReady() {
-  __ruvyxaPluginRegistry ??= __ruvyxaCreatePluginRegistry({
-    root: ${JSON.stringify(projectRoot)},
-    plugins: Array.isArray(__ruvyxaConfig?.plugins) ? __ruvyxaConfig.plugins : [],
-    // A deployed function only ever serves production traffic.
-    environment: 'production',
-  })
-  return __ruvyxaPluginRegistry
+    imports: [`import __ruvyxaConfig from ${JSON.stringify(toImportPath(configFile))}`],
+    definition: 'export const projectProxy = __ruvyxaConfig?.proxy',
+  }
 }
 
-export async function applyPluginHttp(request, next) {
-  const registry = await __ruvyxaPluginRegistryReady()
-  if (!__ruvyxaHasPluginHttp(registry)) return next(request)
-  const outcome = await __ruvyxaDispatchPluginRequest(registry, request)
-  // A short-circuiting hook returns its response directly, without the
-  // response hooks running over it. That is what the native server does, where
-  // \`apply_request_plugins\` returning a response returns from the handler.
-  if (outcome.kind === 'response') return outcome.response
-  const response = await next(outcome.request)
-  return __ruvyxaDispatchPluginResponse(registry, outcome.request, response)
-}`,
-  }
+/**
+ * What the registry exports when the config declares no proxy. A function
+ * rather than a `const`: the build runs at module top level, above this point,
+ * and a `const` declared below it is in its temporal dead zone when the first
+ * artifact is emitted.
+ */
+function inertProxy() {
+  return 'export const projectProxy = undefined'
 }
 
 /**

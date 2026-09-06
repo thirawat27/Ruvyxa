@@ -36,13 +36,13 @@ mod host_resources;
 mod image_optimizer;
 mod image_usage;
 mod output_audit;
-mod plugins;
 mod prerender;
 mod route_types;
 mod runtime_config;
 mod server_references;
 mod site_discovery;
 mod ui;
+mod worker;
 
 // Re-exported crate-wide, not merely imported here: the modules below refer to
 // each other through `crate::*`, and a plain `use` would keep those names
@@ -63,12 +63,12 @@ pub(crate) use image_optimizer::{
     ImageOptimizationOptions, ImageOptimizationReport, optimize_public_images,
 };
 pub(crate) use image_usage::scan_raw_image_usage;
-pub(crate) use plugins::*;
 pub(crate) use prerender::*;
 pub(crate) use route_types::*;
 pub(crate) use runtime_config::*;
 pub(crate) use site_discovery::{SiteConfigOptions, resolve_site_url, write_discovery_files};
 pub(crate) use ui::*;
+pub(crate) use worker::*;
 
 const ASSET_HASH_ALGORITHM: &str = "blake3-256";
 
@@ -139,8 +139,6 @@ enum Command {
         about = "Compare dev/prod routes and smoke-render page routes"
     )]
     TestParity(ProjectArgs),
-    #[command(about = "Create a publishable plugin package")]
-    Plugin(PluginArgs),
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -414,31 +412,6 @@ struct BenchArgs {
     baseline: bool,
 }
 
-#[derive(Debug, Parser)]
-struct PluginArgs {
-    #[command(subcommand)]
-    command: PluginCommand,
-}
-
-#[derive(Debug, Subcommand)]
-enum PluginCommand {
-    #[command(about = "Create a publishable plugin package")]
-    Create(PluginCreateArgs),
-}
-
-#[derive(Debug, Parser)]
-struct PluginCreateArgs {
-    name: String,
-
-    #[arg(long, default_value = ".")]
-    root: PathBuf,
-
-    /// Directory to scaffold the plugin package into, relative to --root.
-    /// Defaults to `<name>`.
-    #[arg(long)]
-    dir: Option<PathBuf>,
-}
-
 /// End quietly when the reader of our output goes away.
 ///
 /// `ruvyxa routes | head -3` is an ordinary thing to type, and it used to end in
@@ -527,7 +500,6 @@ async fn main() -> anyhow::Result<()> {
         Command::Trace(args) => trace(args).context("trace failed")?,
         Command::Bench(args) => bench(args).await.context("benchmark failed")?,
         Command::TestParity(args) => test_parity(args).await.context("parity test failed")?,
-        Command::Plugin(args) => plugin(args).context("plugin command failed")?,
     }
 
     Ok(())

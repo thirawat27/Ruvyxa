@@ -7,9 +7,8 @@ work in the repository.
 
 - `crates/` contains the Rust workspace.
 - `crates/ruvyxa_cli` owns the Ruvyxa CLI commands: `dev`, `build`, `check`, `start`, `preview`,
-  `routes`, `analyze`, `adds`, `doctor`, `clean`, `trace`, `bench`, `test:parity`, and
-  `plugin create`. The `Command` enum in `crates/ruvyxa_cli/src/main.rs` is the list; nothing else
-  enumerates them.
+  `routes`, `analyze`, `adds`, `doctor`, `clean`, `trace`, `bench`, and `test:parity`. The `Command`
+  enum in `crates/ruvyxa_cli/src/main.rs` is the list; nothing else enumerates them.
 - `crates/ruvyxa_bundler` owns TypeScript/JSX compilation, module resolution, linking, minification,
   source maps, and server/client boundary checks.
 - `crates/ruvyxa_dev_server` owns Axum serving, HMR, render cache, router, worker pool, style
@@ -23,7 +22,8 @@ work in the repository.
   and route manifests. It depends on `ruvyxa_bundler` for one reason: route validation reuses the
   bundler's source scanner rather than running a second text scan that could disagree.
 - `crates/ruvyxa_middleware` owns the Tower layer stack — CORS, rate limiting, request logging,
-  response timing, custom headers, client-IP resolution — and the TypeScript plugin host. Its crate
+  response timing, custom headers, client-IP resolution — the route-rule evaluator behind
+  `headers()`/`redirects()`/`rewrites()`/`proxy.matcher`, and the project worker host. Its crate
   docs carry the contract shared by every rate limiter in the workspace; read it before adding a
   fifth.
 - `crates/ruvyxa_diagnostics` owns error codes, `Result`, and the path helpers every other crate
@@ -34,9 +34,9 @@ work in the repository.
   is the only way to see the animated ones without rebuilding an application.
 - `packages/` contains the npm packages:
   - `ruvyxa` — the framework package. `runtime/*.mjs` are the modules the Rust CLI resolves by path
-    and spawns or imports; `src/plugins/` is the first-party plugin API behind the `plugins.ts`
-    barrel; `packages/ruvyxa/scripts/sync-shared-runtime.mjs` regenerates the committed copies of
-    shared modules.
+    and spawns or imports; `src/content-engine/` is the content engine behind
+    `ruvyxa/content-engine`; `packages/ruvyxa/scripts/sync-shared-runtime.mjs` regenerates the
+    committed copies of shared modules.
   - `create-ruvyxa` — the scaffolder. Its `template/` directory holds a generated copy of every
     starter, not just `minimal`.
   - `@ruvyxa/core` — primitives both the Rust host and a deployed build need: `route-match`,
@@ -54,24 +54,24 @@ work in the repository.
   belongs in the demo instead. `/rsc` there is a **dynamic** server-components route on purpose — a
   pre-rendered one proves nothing about a deployment, because its payload is already in the file the
   adapter copies and no renderer runs.
-- `templates/` holds five scaffolds — `minimal`, `blog`, `crud`, `api`, `plugin`.
-  `templates/minimal/` is what `create-ruvyxa` copies into a new project.
-  `packages/create-ruvyxa/template/` is **generated, not committed**: it is gitignored, and
-  `packages/create-ruvyxa/scripts/prepare-template.mjs` deletes and rebuilds it from `templates/*`
-  on `prepack`, renaming `.gitignore` to `gitignore` because npm strips a packaged dotfile. Edit
-  `templates/`; never that copy, and never add a second mechanism to keep the two in step — this
-  file used to say `scripts/check-template-mirrors.mjs` did, and it does not. That script holds one
-  genuinely hand-maintained pair: `ruvyxa-runner.tsx` in the template and in `examples/demo`, so the
-  fixture exercises what a scaffolded project ships with. `pnpm release:validate` fails on drift
-  there.
+- `templates/` holds four scaffolds — `minimal`, `blog`, `crud`, `api`. `templates/minimal/` is what
+  `create-ruvyxa` copies into a new project. `packages/create-ruvyxa/template/` is **generated, not
+  committed**: it is gitignored, and `packages/create-ruvyxa/scripts/prepare-template.mjs` deletes
+  and rebuilds it from `templates/*` on `prepack`, renaming `.gitignore` to `gitignore` because npm
+  strips a packaged dotfile. Edit `templates/`; never that copy, and never add a second mechanism to
+  keep the two in step — this file used to say `scripts/check-template-mirrors.mjs` did, and it does
+  not. That script holds one genuinely hand-maintained pair: `ruvyxa-runner.tsx` in the template and
+  in `examples/demo`, so the fixture exercises what a scaffolded project ships with.
+  `pnpm release:validate` fails on drift there.
 
   A scaffold's `ruvyxa.config.ts` carries only the decisions a new project has to make. Restating a
   default there costs twice: it teaches a newcomer that the key is required, and it pins the value,
   so a release that improves the default never reaches the projects already scaffolded. Four
   templates each restated fifteen of them. `scripts/pack-smoke.mjs` rewrites the scaffolded config
-  by text replace to add plugins, and a replace that matches nothing returns the source unchanged —
-  so trimming the template left three unused imports and a `tsc` error naming none of it. It asserts
-  its anchor now; anything else that edits a template by string has to do the same.
+  by text replace to turn the content engine on, and a replace that matches nothing returns the
+  source unchanged — so trimming the template left three unused imports and a `tsc` error naming
+  none of it. It asserts its anchor now; anything else that edits a template by string has to do the
+  same.
 
 - `tests/` holds the Node suites, one directory per package under `tests/packages/`, plus the
   cross-language tables in `tests/fixtures/`. Rust tests live beside the crate they cover.
@@ -101,7 +101,7 @@ work in the repository.
 ### The child-process stdio protocol
 
 Six `runtime/*.mjs` files answer a Rust caller over stdout: `adapter-runner`, `api-renderer`,
-`config-renderer`, `css-runner`, `plugin-runtime`, and `ssr-renderer`, plus `worker-pool` for the
+`config-renderer`, `css-runner`, `project-worker`, and `ssr-renderer`, plus `worker-pool` for the
 persistent worker. Each carries its own small writer rather than importing a shared one, because
 `api-renderer.mjs` and `css-runner.mjs` deliberately import no sibling module and a shared file
 would have to be registered in `package.json` `files`, in `WORKER_RUNTIME_FILES`, and in the
@@ -122,8 +122,8 @@ they did diverge — three awaited the flush and three did not. Two rules hold t
   macOS lane alone and reported itself as `RUV1406`, a PostCSS error, on a run that had succeeded.
 - **A loop that keeps writing must respect backpressure.** Check `write()`'s return value and
   `await once(process.stdout, 'drain')`, as `worker-pool.mjs`'s `writeWorkerMessage` and
-  `plugin-runtime.mjs`'s persistent mode do. Ignoring it buffers every unread response in memory for
-  as long as the host is slow.
+  `project-worker.mjs` do. Ignoring it buffers every unread response in memory for as long as the
+  host is slow.
 
 ### Cache identity is derived, never stamped
 
@@ -200,9 +200,9 @@ host's ICU locale — so two machines building the same project disagreed, the J
 graphs sorted the same glob differently, and a Turkish host folds `I` to `ı` where every other host
 and the Rust compiler give `i`. Case-fold with `toLowerCase`/`toUpperCase`. Sort with
 `compareCodeUnits`/`compareEntryKeys` from `packages/ruvyxa/runtime/order.mjs`, `compareStable` in
-`packages/ruvyxa/src/plugins/shared.ts`, or a bare `.sort()` for an array of strings. Code emitted
-into a function artifact writes the comparison out inline, because a deployed function directory
-resolves no sibling specifiers.
+`packages/ruvyxa/src/content-engine/shared.ts`, or a bare `.sort()` for an array of strings. Code
+emitted into a function artifact writes the comparison out inline, because a deployed function
+directory resolves no sibling specifiers.
 
 It also caps structure directly: `complexity` at 30, `max-depth` at 4, `max-nested-callbacks` at 4,
 and `max-params` at 8. `max-lines-per-function` is deliberately off — a long flat function is a
@@ -218,11 +218,11 @@ by macro expansion rather than real branching, `#[allow]` it on that function wi
 
 `pnpm check:unused` runs Knip over the JavaScript/TypeScript workspaces and fails on unused files,
 exports, types, and dependencies. `pnpm release:validate` runs it too, so it gates a release. Ruvyxa
-loads a lot of code by convention rather than by import — `app/` routes, `plugins/`,
-`ruvyxa.config.ts`, the `runtime/*.mjs` modules the Rust CLI resolves by path, and adapters resolved
-from a `@ruvyxa/adapter-${name}` template string — so `knip.json` declares those as entry points or
-ignored dependencies. When a new runtime module or dynamically loaded package reports as unused, add
-it there rather than deleting it; check for a dynamic or path-based loader first. Knip must stay on
+loads a lot of code by convention rather than by import — `app/` routes, `ruvyxa.config.ts`, the
+`runtime/*.mjs` modules the Rust CLI resolves by path, and adapters resolved from a
+`@ruvyxa/adapter-${name}` template string — so `knip.json` declares those as entry points or ignored
+dependencies. When a new runtime module or dynamically loaded package reports as unused, add it
+there rather than deleting it; check for a dynamic or path-based loader first. Knip must stay on
 version 6 or newer: version 5 crashes against this repository's TypeScript 7.
 
 For demo behavior changes, also run:
@@ -267,13 +267,6 @@ before believing it.
   new shared runtime module is one entry there rather than a new script. The Rust router cannot
   share the module, so both languages are held to `tests/fixtures/route-match-conformance.json` —
   add a case there before changing match behavior.
-- `packages/ruvyxa/src/plugins.ts` is a barrel, not an implementation file: it re-exports the public
-  plugin API by name from `packages/ruvyxa/src/plugins/`, one module per plugin family (`http`,
-  `pwa`, `seo`, `search`, `content-engine`, `openapi`, `build`) plus `shared` for helpers two or
-  more families use and `sitemap-xml` for the sitemap document builder. The barrel lists names
-  explicitly rather than re-exporting `*` because the family modules also export helpers to each
-  other; a `*` would publish those as package API. A new plugin goes in the family module and gets
-  one line in the barrel — adding it only to the module leaves it unreachable from `ruvyxa/plugins`.
 - Rust shared behavior needs Rust tests near the changed crate.
 - Runtime/config/package behavior needs Node tests under `tests/packages/**`. TypeScript suites go
   through `scripts/test-package.mjs <suite>`, which compiles them with `tsc -p tsconfig.test.json`
@@ -349,12 +342,13 @@ before believing it.
   positions, and `sourcemap::shift_generated_lines` moves a finished map when a caller prepends to
   the bundle. When adding a pass that rewrites bundle text, carry the provenance through it or the
   map describes a document nobody shipped.
-- A Next.js convention that Ruvyxa does not implement must fail loudly or work, never silently do
-  nothing. `export const dynamic` and `generateStaticParams` were read by nothing: a page that asked
-  for `force-dynamic` was pre-rendered anyway and a route that declared its parameters pre-rendered
-  none, with no diagnostic in either case. Both are honoured now. `export const metadata` is
-  deliberately not aliased to `meta` — the shapes differ, and a name that half-works is worse than
-  one that does not. When adding an alias, check that the _contract_ matches, not just the intent.
+- A route-segment convention that Ruvyxa does not implement must fail loudly or work, never silently
+  do nothing. `export const dynamic` and `generateStaticParams` were read by nothing: a page that
+  asked for `force-dynamic` was pre-rendered anyway and a route that declared its parameters
+  pre-rendered none, with no diagnostic in either case. Both are honoured now.
+  `export const metadata` is deliberately not aliased to `meta` — the shapes differ, and a name that
+  half-works is worse than one that does not. When adding an alias, check that the _contract_
+  matches, not just the intent.
 - A specifier the route graph cannot follow is not a specifier with nothing behind it.
   `detect_render_strategy` pre-renders a route whose reachable graph shows no request-dependent
   data, and `ModuleCache::edges` followed relative imports only — so an aliased import produced no
@@ -367,12 +361,12 @@ before believing it.
   automatic pre-rendering away from the page that called it. When a marker decides something, check
   which direction a wrong answer errs in and make the loose end the safe one.
 - A list that mirrors a code construct has to be checked against that construct, in the direction
-  the guard reads. `RESERVED_FRAMEWORK_ROUTES` protects plugins from registering a path axum has
-  already taken, and two tests compared it with `tests/fixtures/framework-endpoint-conformance.json`
-  — but nothing read `build_app_router`'s route chain _inwards_, so two registered paths were
-  missing from the list and a plugin transport on either panicked the router at startup.
-  `every_registered_route_is_reserved` parses the chain now. When a doc comment says "must stay in
-  sync with X", the test has to read X.
+  the guard reads. `RESERVED_FRAMEWORK_ROUTES` protects `realtime`/`collab` paths from taking a path
+  axum has already taken, and two tests compared it with
+  `tests/fixtures/framework-endpoint-conformance.json` — but nothing read `build_app_router`'s route
+  chain _inwards_, so two registered paths were missing from the list and a transport on either
+  panicked the router at startup. `every_registered_route_is_reserved` parses the chain now. When a
+  doc comment says "must stay in sync with X", the test has to read X.
 - A failed read is not a value. Turning one into a default throws the message away _and_ invents an
   answer, and when the invented answer is also a legitimate one nothing downstream can tell them
   apart. `client_bundle.rs` read a route's source to record whether it exports `flight` and

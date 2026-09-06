@@ -6,7 +6,6 @@ import {
   mkdir,
   mkdtemp,
   readFile,
-  readdir,
   realpath,
   rm,
   stat,
@@ -37,7 +36,7 @@ import { expandImportMetaGlob } from '../../../packages/ruvyxa/runtime/glob.mjs'
 const workspaceRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta.url)))
 const exampleRoot = path.join(workspaceRoot, 'examples/demo')
 const configRenderer = path.join(workspaceRoot, 'packages/ruvyxa/runtime/config-renderer.mjs')
-const pluginRuntime = path.join(workspaceRoot, 'packages/ruvyxa/runtime/plugin-runtime.mjs')
+const projectWorker = path.join(workspaceRoot, 'packages/ruvyxa/runtime/project-worker.mjs')
 const fixtureWorkspace = await createFixtureWorkspace('ruvyxa-compiler-tests-', exampleRoot)
 after(() => rm(fixtureWorkspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
 
@@ -1244,7 +1243,7 @@ A note[^1]
         true,
       )
 
-      const bridged = await runJson(pluginRuntime, [root, 'content.compile'], {
+      const bridged = await runJson(projectWorker, [root, 'content.compile'], {
         code: await readFile(pageFile, 'utf8'),
         id: pageFile,
         environment: 'client',
@@ -2345,451 +2344,7 @@ export const marker = 'reached'
     })
   })
 
-  it('loads TypeScript plugin metadata and executes registered transform hooks', async () => {
-    await withFixture(async ({ root }) => {
-      const pageFile = path.join(root, 'page.tsx')
-      await writeFile(pageFile, 'export const label = "Original"\n')
-      await writeFile(
-        path.join(root, 'ruvyxa.config.ts'),
-        `
-          import { config } from "ruvyxa/config"
-          import { definePlugin } from "ruvyxa/plugin"
-
-          export default config({
-            css: { entries: ["styles/global.css"] },
-            plugins: [
-              definePlugin({
-                name: "replace-label",
-                register({ build }) {
-                  build.onTransform(({ code, id, environment }) => {
-                    if (environment !== "client" || !id.endsWith("page.tsx")) return null
-                    return { code: code.replace("Original", "Transformed") }
-                  })
-                },
-              }),
-            ],
-          })
-        `,
-      )
-
-      const config = await runJson(configRenderer, [root], {})
-      assert.equal(config.ok, true)
-      assert.deepEqual(config.config.css.entries, ['styles/global.css'])
-      assert.equal(config.config.plugins[0].name, 'replace-label')
-
-      const transformed = await runJson(pluginRuntime, [root, 'build.transform'], {
-        code: await readFile(pageFile, 'utf8'),
-        id: pageFile,
-        environment: 'client',
-      })
-
-      assert.equal(transformed.ok, true)
-      assert.match(transformed.result.code, /Transformed/)
-    })
-  })
-
-  it('runs Fetch-native middleware and build-complete hooks from one plugin registry', async () => {
-    await withFixture(async ({ root }) => {
-      await writeFile(
-        path.join(root, 'ruvyxa.config.ts'),
-        `
-          import { writeFile } from "node:fs/promises"
-          import { definePlugin } from "ruvyxa/plugin"
-
-          export default {
-            plugins: [definePlugin({
-              name: "native-hooks",
-              register({ http, build }) {
-                http.onRequest({
-                  match: ["/api/*"],
-                  handler({ request, plugin }) {
-                    const headers = new Headers(request.headers)
-                    headers.set("x-plugin", plugin)
-                    return new Request(request, { headers })
-                  },
-                })
-                http.onResponse({
-                  match: ["/api/*"],
-                  handler({ response }) {
-                    const headers = new Headers(response.headers)
-                    headers.set("x-after", "yes")
-                    return new Response(response.body, { status: response.status, headers })
-                  },
-                })
-                build.onComplete(({ outDir, manifest }) =>
-                  writeFile(outDir + "/plugin-complete.json", JSON.stringify(manifest))
-                )
-              },
-            })],
-          }
-        `,
-      )
-
-      const described = await runJson(pluginRuntime, [root, 'describe'], {})
-      assert.deepEqual(described.result, {
-        plugins: ['native-hooks'],
-        // `describe` reports the environment the host stated. It is the one
-        // place the flag is visible if it ever stops arriving.
-        environment: 'production',
-        http: {
-          request: 1,
-          response: 1,
-          routes: 0,
-          requestMatch: ['/api/*'],
-          responseMatch: ['/api/*'],
-        },
-        build: { start: 0, resolve: 0, load: 0, transform: 0, complete: 1 },
-        dev: { fileChange: 0 },
-        diagnostics: [],
-        capabilities: [],
-      })
-
-      const request = await runJson(pluginRuntime, [root, 'http.request'], {
-        request: { method: 'GET', path: '/api/users?active=1', headers: [] },
-      })
-      assert.equal(request.result.kind, 'request')
-      assert.deepEqual(request.result.request.headers, [['x-plugin', 'native-hooks']])
-      assert.equal(request.result.request.path, '/api/users?active=1')
-
-      const response = await runJson(pluginRuntime, [root, 'http.response'], {
-        request: request.result.request,
-        response: {
-          status: 200,
-          headers: [
-            ['content-type', 'application/octet-stream'],
-            ['set-cookie', 'a=1; Path=/'],
-            ['set-cookie', 'b=2; Path=/'],
-          ],
-          bodyBase64: Buffer.from([0, 255, 1]).toString('base64'),
-        },
-      })
-      assert.equal(response.result.response.bodyBase64, Buffer.from([0, 255, 1]).toString('base64'))
-      assert.equal(response.result.response.headers.find(([name]) => name === 'x-after')[1], 'yes')
-      assert.deepEqual(
-        response.result.response.headers.filter(([name]) => name === 'set-cookie'),
-        [
-          ['set-cookie', 'a=1; Path=/'],
-          ['set-cookie', 'b=2; Path=/'],
-        ],
-      )
-
-      const outDir = path.join(root, 'dist')
-      await mkdir(outDir)
-      const manifest = { routes: [{ path: '/' }] }
-      const complete = await runJson(pluginRuntime, [root, 'build.complete'], { outDir, manifest })
-      assert.equal(complete.ok, true)
-      assert.deepEqual(
-        JSON.parse(await readFile(path.join(outDir, 'plugin-complete.json'), 'utf8')),
-        manifest,
-      )
-    })
-  })
-
-  it('connects route, build, dev, and diagnostic sockets through the plugin host', async () => {
-    await withFixture(async ({ root }) => {
-      await writeFile(
-        path.join(root, 'ruvyxa.config.ts'),
-        `
-          import path from "node:path"
-          import { writeFile } from "node:fs/promises"
-          import { definePlugin } from "ruvyxa/plugin"
-
-          export default {
-            plugins: [definePlugin({
-              name: "all-sockets",
-              register({ http, build, dev, diagnostics }) {
-                http.route({
-                  method: "GET",
-                  path: "/plugin-health",
-                  handler: () => Response.json({ ok: true }),
-                })
-                build.onStart(({ outDir }) => writeFile(path.join(outDir, "started.txt"), "yes"))
-                build.onResolve(({ id, root }) =>
-                  id === "virtual:greeting" ? path.join(root, "virtual-greeting.ts") : undefined
-                )
-                build.onLoad(({ id }) =>
-                  id.endsWith("virtual-greeting.ts")
-                    ? { code: 'export const greeting = "hello"', map: { version: 3, mappings: "" } }
-                    : undefined
-                )
-                dev.onFileChange({
-                  match: ["content/*"],
-                  handler: ({ root, paths }) =>
-                    writeFile(path.join(root, "changed.json"), JSON.stringify(paths)),
-                })
-                diagnostics.report({
-                  level: "warning",
-                  code: "ALL001",
-                  message: "All sockets are active",
-                })
-              },
-            })],
-          }
-        `,
-      )
-
-      const described = await runJson(pluginRuntime, [root, 'describe'], {})
-      assert.equal(described.result.http.routes, 1)
-      assert.deepEqual(described.result.build, {
-        start: 1,
-        resolve: 1,
-        load: 1,
-        transform: 0,
-        complete: 0,
-      })
-      assert.deepEqual(described.result.dev, { fileChange: 1 })
-      assert.deepEqual(described.result.diagnostics, [
-        {
-          plugin: 'all-sockets',
-          level: 'warning',
-          code: 'ALL001',
-          message: 'All sockets are active',
-        },
-        // Implied by the registry's shape, not reported by the plugin: this
-        // one registers `build.onResolve`/`onLoad`, which the native bundler
-        // answers for the browser graph and `runtime/compiler.mjs` — the
-        // server and prerender compiler — has no host to ask. A route that
-        // imports a module those hooks provide renders with `Cannot find
-        // package` while its browser bundle is built correctly, and nothing
-        // said so.
-        {
-          plugin: 'ruvyxa',
-          level: 'info',
-          code: 'RUV2107',
-          message:
-            'build.onResolve/onLoad apply to the browser graph only. A module they provide ' +
-            'cannot be resolved while a page is server-rendered or pre-rendered, so import it ' +
-            'from a client component, or write the file the resolve hook names.',
-        },
-      ])
-
-      const route = await runJson(pluginRuntime, [root, 'http.request'], {
-        request: { method: 'GET', path: '/plugin-health', headers: [] },
-      })
-      assert.equal(route.result.kind, 'response')
-      assert.deepEqual(
-        JSON.parse(Buffer.from(route.result.response.bodyBase64, 'base64').toString('utf8')),
-        { ok: true },
-      )
-
-      const outDir = path.join(root, 'dist')
-      await mkdir(outDir)
-      await runJson(pluginRuntime, [root, 'build.start'], { outDir })
-      assert.equal(await readFile(path.join(outDir, 'started.txt'), 'utf8'), 'yes')
-
-      const resolved = await runJson(pluginRuntime, [root, 'build.resolve'], {
-        id: 'virtual:greeting',
-        environment: 'server',
-      })
-      assert.equal(resolved.result, path.join(root, 'virtual-greeting.ts'))
-      const loaded = await runJson(pluginRuntime, [root, 'build.load'], {
-        id: resolved.result,
-        environment: 'server',
-      })
-      assert.match(loaded.result.code, /greeting = "hello"/)
-      assert.equal(JSON.parse(loaded.result.map).version, 3)
-
-      await runJson(pluginRuntime, [root, 'dev.fileChange'], {
-        paths: ['content/guide.md', 'app/page.tsx'],
-      })
-      assert.deepEqual(JSON.parse(await readFile(path.join(root, 'changed.json'), 'utf8')), [
-        'content/guide.md',
-      ])
-    })
-  })
-
-  it('rejects invalid contracts and duplicate plugin routes', async () => {
-    await withFixture(async ({ root }) => {
-      await writeFile(
-        path.join(root, 'ruvyxa.config.ts'),
-        `export default { plugins: [{ name: "invalid" }] }`,
-      )
-      const invalid = await runJsonResult(pluginRuntime, [root, 'describe'], {})
-      assert.equal(invalid.exitCode, 1)
-      assert.match(invalid.parsed.message, /must provide register\(api\)/)
-
-      await writeFile(
-        path.join(root, 'ruvyxa.config.ts'),
-        `export default {
-          plugins: [
-            { name: "one", register({ http }) { http.route({ method: "GET", path: "/same", handler: () => new Response() }) } },
-            { name: "two", register({ http }) { http.route({ method: "GET", path: "/same", handler: () => new Response() }) } },
-          ],
-        }`,
-      )
-      const duplicate = await runJsonResult(pluginRuntime, [root, 'describe'], {})
-      assert.equal(duplicate.exitCode, 1)
-      assert.match(duplicate.parsed.message, /route GET \/same conflicts with plugin "one"/)
-
-      await writeFile(
-        path.join(root, 'ruvyxa.config.ts'),
-        `export default {
-          plugins: [{
-            name: "empty-match",
-            register({ http }) {
-              http.onRequest({ match: [], handler: () => undefined })
-            },
-          }],
-        }`,
-      )
-      const emptyMatch = await runJsonResult(pluginRuntime, [root, 'describe'], {})
-      assert.equal(emptyMatch.exitCode, 1)
-      assert.match(emptyMatch.parsed.message, /match must contain at least one pattern/)
-
-      await writeFile(
-        path.join(root, 'ruvyxa.config.ts'),
-        `export default {
-          plugins: [{
-            name: "invalid-method",
-            register({ http }) {
-              http.route({ method: "GET /wrong", path: "/wrong", handler: () => new Response() })
-            },
-          }],
-        }`,
-      )
-      const invalidMethod = await runJsonResult(pluginRuntime, [root, 'describe'], {})
-      assert.equal(invalidMethod.exitCode, 1)
-      assert.match(invalidMethod.parsed.message, /method must contain valid HTTP method tokens/)
-
-      await writeFile(path.join(root, 'ruvyxa.config.ts'), `export default { plugins: [] }`)
-      const empty = await runJsonResult(pluginRuntime, [root, 'describe'], {})
-      assert.equal(empty.exitCode, 0)
-      assert.deepEqual(empty.parsed.result.plugins, [])
-    })
-  })
-
-  it('matches plugin HTTP paths after percent-decoding, like the development router', async () => {
-    await withFixture(async ({ root }) => {
-      await writeFile(
-        path.join(root, 'ruvyxa.config.ts'),
-        `export default {
-          plugins: [{
-            name: "unicode-path",
-            register({ http }) {
-              http.route({
-                method: "GET",
-                path: "/café",
-                handler: () => new Response("route matched"),
-              })
-              http.onResponse({
-                match: ["/café"],
-                handler: ({ response }) => {
-                  const headers = new Headers(response.headers)
-                  headers.set("x-plugin-path", "decoded")
-                  return new Response(response.body, { status: response.status, headers })
-                },
-              })
-            },
-          }],
-        }`,
-      )
-
-      const route = await runJson(pluginRuntime, [root, 'http.request'], {
-        request: { method: 'GET', path: '/caf%C3%A9', headers: [] },
-      })
-      assert.equal(route.result.kind, 'response')
-      assert.equal(
-        Buffer.from(route.result.response.bodyBase64, 'base64').toString('utf8'),
-        'route matched',
-      )
-
-      const response = await runJson(pluginRuntime, [root, 'http.response'], {
-        request: { method: 'GET', path: '/caf%C3%A9', headers: [] },
-        response: { status: 200, headers: [], bodyBase64: Buffer.from('ok').toString('base64') },
-      })
-      assert.equal(
-        response.result.response.headers.find(([name]) => name === 'x-plugin-path')[1],
-        'decoded',
-      )
-    })
-  })
-
-  it('loads first-party plugins through the public ruvyxa/plugins entrypoint', async () => {
-    await withFixture(async ({ root }) => {
-      await writeFile(
-        path.join(root, 'ruvyxa.config.ts'),
-        `
-          import { contentEngine, observability, openApi } from "ruvyxa/plugins"
-
-          export default {
-            plugins: [
-              observability({ routes: ["/api/*"], log: false }),
-              contentEngine({
-                siteUrl: "https://example.com",
-                title: "Fixture content",
-                description: "Fixture articles",
-                // Named so this fixture models a correct project and its
-                // diagnostics assertion below stays about plugin loading.
-                // Unset, it reports RUV2207 -- covered on its own below.
-                locale: "en",
-              }),
-              openApi({
-                info: { title: "Fixture API", version: "1.0.0" },
-                operations: [{ method: "get", path: "/api/health" }],
-              }),
-            ],
-          }
-        `,
-      )
-
-      const described = await runJson(pluginRuntime, [root, 'describe'], {})
-      assert.deepEqual(described.result, {
-        plugins: ['ruvyxa:observability', 'ruvyxa:content-engine', 'ruvyxa:openapi'],
-        environment: 'production',
-        http: {
-          // `contentEngine` contributes no request hook here: like `feed()` and
-          // `searchIndex()`, its live re-derivation registers in development
-          // only, and in production the build has written every one of its
-          // artifacts under `assets/`.
-          request: 2,
-          response: 1,
-          routes: 0,
-          requestMatch: ['/api/*', '/openapi.json'],
-          responseMatch: ['/api/*'],
-        },
-        build: { start: 0, resolve: 0, load: 0, transform: 0, complete: 2 },
-        dev: { fileChange: 0 },
-        diagnostics: [],
-        capabilities: [],
-      })
-      const configCache = path.join(root, '.ruvyxa', 'cache', 'config')
-      const compiledConfigs = await Promise.all(
-        (await readdir(configCache))
-          .filter((name) => name.endsWith('.mjs'))
-          .map((name) => readFile(path.join(configCache, name), 'utf8')),
-      )
-      assert.doesNotMatch(compiledConfigs.join('\n'), /^import \* as \w+ from ["']yaml["'];$/m)
-
-      const requestResult = await runJson(pluginRuntime, [root, 'http.request'], {
-        request: { method: 'GET', path: '/api/health', headers: [] },
-      })
-      assert.equal(requestResult.result.kind, 'request')
-      assert.match(
-        requestResult.result.request.headers.find(([name]) => name === 'x-request-id')[1],
-        /^[0-9a-f-]{36}$/,
-      )
-
-      const specResult = await runJson(pluginRuntime, [root, 'http.request'], {
-        request: { method: 'GET', path: '/openapi.json', headers: [] },
-      })
-      assert.equal(specResult.result.kind, 'response')
-      assert.equal(
-        JSON.parse(Buffer.from(specResult.result.response.bodyBase64, 'base64')).info.title,
-        'Fixture API',
-      )
-    })
-  })
-
-  // A search index is a build artifact, and both steps that build it are
-  // locale-sensitive: `Intl.Segmenter` decides where words begin and case
-  // folding decides which term a document is filed under. Passing `undefined`
-  // to either does not mean "locale-independent" -- it means "this host's
-  // locale", which is `th-TH` on the machine this framework is developed on and
-  // `en-US` on GitHub's runners. `scripts/verify-reproducible.mjs` builds twice
-  // on one host, so nothing else could see it. The fallback is a constant now;
-  // this asserts the warning that says so reaches the user through the same
-  // path the Rust host reads plugin diagnostics from.
-  it('warns through the plugin host when no locale names the index language', async () => {
+  it('warns through the project worker when no locale names the index language', async () => {
     await withFixture(async ({ root }) => {
       await writeFile(
         path.join(root, 'ruvyxa.config.ts'),
@@ -2803,13 +2358,12 @@ export const marker = 'reached'
         }`,
       )
 
-      const described = await runJson(pluginRuntime, [root, 'describe'], {})
-      assert.deepEqual(
-        described.result.diagnostics.map(({ plugin, level, code }) => ({ plugin, level, code })),
-        [{ plugin: 'ruvyxa:content-engine', level: 'warning', code: 'RUV2207' }],
-      )
-      // A warning, not an error: the build still produces a usable index.
-      assert.match(described.result.diagnostics[0].message, /is not set/)
+      const described = await runJsonResult(projectWorker, [root, 'describe'], {})
+      assert.equal(described.exitCode, 0)
+      // A warning, not an error: the worker still describes a usable engine.
+      assert.match(described.stderr, /RUV2207/)
+      assert.match(described.stderr, /is not set/)
+      assert.equal(described.parsed.result.content.length, 5)
     })
   })
 
@@ -2836,32 +2390,20 @@ export const marker = 'reached'
         language: 'en',
       })
       assert.equal(rendered.config.content, true)
-      assert.deepEqual(rendered.config.plugins, [{ name: 'ruvyxa:content-engine' }])
+      // The renderer carries nothing executable; the worker materializes the
+      // engine from the same config and reports the paths it will answer.
+      assert.equal(rendered.config.plugins, undefined)
 
-      const described = await runJson(pluginRuntime, [root, 'describe'], {})
-      assert.deepEqual(described.result.plugins, ['ruvyxa:content-engine'])
-      // The live artifacts are a development affordance: serving them in
-      // production re-walks and re-stats the whole content tree per request and
-      // shadows the built `assets/` copy with a second source of truth.
-      assert.deepEqual(described.result.http.requestMatch, [])
-      assert.equal(described.result.build.complete, 1)
-
-      const inDevelopment = await runJson(
-        pluginRuntime,
-        [root, 'describe', '--environment=development'],
-        {},
-      )
-      assert.deepEqual(inDevelopment.result.http.requestMatch, [
-        '/content.json',
-        '/search-index.json',
-        '/rss.xml',
-        '/sitemap.xml',
-        '/llms.txt',
-      ])
+      const described = await runJson(projectWorker, [root, 'describe'], {})
+      assert.deepEqual(described.result, {
+        proxy: false,
+        reactCompiler: false,
+        content: ['/content.json', '/search-index.json', '/rss.xml', '/sitemap.xml', '/llms.txt'],
+      })
     })
   })
 
-  it('rejects incomplete or duplicate top-level content configuration', async () => {
+  it('rejects incomplete top-level content configuration', async () => {
     await withFixture(async ({ root }) => {
       await writeFile(
         path.join(root, 'ruvyxa.config.ts'),
@@ -2870,218 +2412,29 @@ export const marker = 'reached'
       const incomplete = await runJsonResult(configRenderer, [root], {})
       assert.equal(incomplete.exitCode, 1)
       assert.match(incomplete.parsed.message, /site\.title must be a non-empty string/)
-
-      await writeFile(
-        path.join(root, 'ruvyxa.config.ts'),
-        `import { contentEngine } from "ruvyxa/plugins"
-         export default {
-           site: {
-             url: "https://example.com",
-             title: "Example",
-             description: "Example content",
-           },
-           content: true,
-           plugins: [contentEngine({
-             siteUrl: "https://example.com",
-             title: "Example",
-             description: "Example content",
-           })],
-         }`,
-      )
-      const duplicate = await runJsonResult(configRenderer, [root], {})
-      assert.equal(duplicate.exitCode, 1)
-      assert.match(duplicate.parsed.message, /content engine is configured twice/)
     })
   })
 
-  it('rejects middleware route patterns that can never match a pathname', async () => {
+  it('changes the config dependency fingerprint when imported config code changes', async () => {
     await withFixture(async ({ root }) => {
-      await writeFile(
-        path.join(root, 'ruvyxa.config.ts'),
-        `export default {
-          plugins: [{
-            name: 'invalid-route',
-            register({ http }) {
-              http.onRequest({ match: ['api/*'], handler() {} })
-            },
-          }],
-        }`,
-      )
-
-      const failed = await runJsonResult(pluginRuntime, [root, 'describe'], {})
-      assert.equal(failed.exitCode, 1)
-      assert.equal(failed.parsed.ok, false)
-      assert.match(failed.parsed.message, /onRequest\(\)\.match\[0\].*start with "\/"/)
-    })
-  })
-
-  it('describes one validated native realtime transport', async () => {
-    await withFixture(async ({ root }) => {
-      await writeFile(
-        path.join(root, 'ruvyxa.config.ts'),
-        `export default {
-          plugins: [{
-            name: 'realtime',
-            register({ native }) {
-              native.claim('realtime@1', { path: '/events', heartbeatMs: 10000, capacity: 64 })
-            },
-          }],
-        }`,
-      )
-
-      const described = await runJson(pluginRuntime, [root, 'describe'], {})
-      assert.deepEqual(described.result.capabilities[0], {
-        id: 'realtime@1',
-        plugin: 'realtime',
-        path: '/events',
-        heartbeatMs: 10_000,
-        capacity: 64,
-      })
-    })
-  })
-
-  it('describes a native presence transport alongside realtime', async () => {
-    await withFixture(async ({ root }) => {
-      await writeFile(
-        path.join(root, 'ruvyxa.config.ts'),
-        `export default {
-          plugins: [
-            { name: 'realtime', register({ native }) { native.claim('realtime@1') } },
-            { name: 'collab', register({ native }) { native.claim('presence@1', { path: '/rooms', heartbeatMs: 15000 }) } },
-          ],
-        }`,
-      )
-
-      const described = await runJson(pluginRuntime, [root, 'describe'], {})
-      // Both transports are separate capabilities, so a project may claim one,
-      // the other, or both.
-      assert.deepEqual(described.result.capabilities, [
-        {
-          id: 'realtime@1',
-          plugin: 'realtime',
-          path: '/__ruvyxa/realtime',
-          heartbeatMs: 25_000,
-          capacity: 256,
-        },
-        { id: 'presence@1', plugin: 'collab', path: '/rooms', heartbeatMs: 15_000 },
-      ])
-    })
-  })
-
-  it('rejects invalid, reserved, or duplicate presence registrations', async () => {
-    await withFixture(async ({ root }) => {
-      await writeFile(
-        path.join(root, 'ruvyxa.config.ts'),
-        `export default {
-          plugins: [{ name: 'one', register({ native }) { native.claim('presence@1', { path: 'rooms' }) } }],
-        }`,
-      )
-      const invalid = await runJsonResult(pluginRuntime, [root, 'describe'], {})
-      assert.equal(invalid.exitCode, 1)
-      assert.match(invalid.parsed.message, /presence path must be an exact absolute path/)
-
-      await writeFile(
-        path.join(root, 'ruvyxa.config.ts'),
-        `export default {
-          plugins: [{ name: 'one', register({ native }) { native.claim('presence@1', { heartbeatMs: 1000 }) } }],
-        }`,
-      )
-      const heartbeat = await runJsonResult(pluginRuntime, [root, 'describe'], {})
-      assert.equal(heartbeat.exitCode, 1)
-      assert.match(heartbeat.parsed.message, /presence heartbeatMs must be between 5000 and 120000/)
-
-      await writeFile(
-        path.join(root, 'ruvyxa.config.ts'),
-        `export default {
-          plugins: [{ name: 'one', register({ native }) { native.claim('presence@1', { path: '/__ruvyxa/image' }) } }],
-        }`,
-      )
-      const reserved = await runJsonResult(pluginRuntime, [root, 'describe'], {})
-      assert.equal(reserved.exitCode, 1)
-      assert.match(reserved.parsed.message, /collides with a reserved framework route/)
-
-      await writeFile(
-        path.join(root, 'ruvyxa.config.ts'),
-        `export default {
-          plugins: [
-            { name: 'one', register({ native }) { native.claim('presence@1') } },
-            { name: 'two', register({ native }) { native.claim('presence@1') } },
-          ],
-        }`,
-      )
-      const duplicate = await runJsonResult(pluginRuntime, [root, 'describe'], {})
-      assert.equal(duplicate.exitCode, 1)
-      assert.match(duplicate.parsed.message, /already owned by plugin "one"/)
-    })
-  })
-
-  it('rejects invalid or duplicate realtime transport registrations', async () => {
-    await withFixture(async ({ root }) => {
-      await writeFile(
-        path.join(root, 'ruvyxa.config.ts'),
-        `export default {
-          plugins: [
-            { name: 'one', register({ native }) { native.claim('realtime@1', { path: 'events' }) } },
-            { name: 'two', register({ native }) { native.claim('realtime@1') } },
-          ],
-        }`,
-      )
-      const invalid = await runJsonResult(pluginRuntime, [root, 'describe'], {})
-      assert.equal(invalid.exitCode, 1)
-      assert.match(invalid.parsed.message, /realtime path must be an exact absolute path/)
-
-      await writeFile(
-        path.join(root, 'ruvyxa.config.ts'),
-        `export default {
-          plugins: [
-            { name: 'one', register({ native }) { native.claim('realtime@1', { path: '/__ruvyxa/hmr' }) } },
-          ],
-        }`,
-      )
-      const reserved = await runJsonResult(pluginRuntime, [root, 'describe'], {})
-      assert.equal(reserved.exitCode, 1)
-      assert.match(reserved.parsed.message, /collides with a reserved framework route/)
-
-      await writeFile(
-        path.join(root, 'ruvyxa.config.ts'),
-        `export default {
-          plugins: [
-            { name: 'one', register({ native }) { native.claim('realtime@1') } },
-            { name: 'two', register({ native }) { native.claim('realtime@1') } },
-          ],
-        }`,
-      )
-      const duplicate = await runJsonResult(pluginRuntime, [root, 'describe'], {})
-      assert.equal(duplicate.exitCode, 1)
-      assert.match(duplicate.parsed.message, /already owned by plugin "one"/)
-    })
-  })
-
-  it('changes the config dependency fingerprint when imported plugin code changes', async () => {
-    await withFixture(async ({ root }) => {
-      const pluginFile = path.join(root, 'plugin.ts')
+      const siteFile = path.join(root, 'site.ts')
       await writeFile(
         path.join(root, 'ruvyxa.config.ts'),
         `
-          import { plugin } from "./plugin.js"
-          export default { plugins: [plugin] }
+          import { title } from "./site.js"
+          export default { site: { title } }
         `,
       )
-      await writeFile(
-        pluginFile,
-        `export const plugin = { name: "label", register({ build }) { build.onTransform(({ code }) => code + "\\n// one") } }\n`,
-      )
+      await writeFile(siteFile, `export const title = "one"\n`)
 
       const first = await runJson(configRenderer, [root], {})
-      await writeFile(
-        pluginFile,
-        `export const plugin = { name: "label", register({ build }) { build.onTransform(({ code }) => code + "\\n// two") } }\n`,
-      )
+      await writeFile(siteFile, `export const title = "two"\n`)
       const second = await runJson(configRenderer, [root], {})
 
       assert.match(first.dependencyHash, /^[a-f0-9]{64}$/)
       assert.match(second.dependencyHash, /^[a-f0-9]{64}$/)
       assert.notEqual(second.dependencyHash, first.dependencyHash)
+      assert.equal(second.config.site.title, 'two')
     })
   })
 
@@ -3349,7 +2702,7 @@ export const marker = 'reached'
     })
   })
 
-  it('serializes scalable action, API, and plugin security limits', async () => {
+  it('serializes scalable action and API security limits', async () => {
     await withFixture(async ({ root }) => {
       await writeFile(
         path.join(root, 'ruvyxa.config.ts'),
@@ -3357,7 +2710,6 @@ export const marker = 'reached'
           security: {
             actionLimit: 2 * 1024 * 1024,
             apiLimit: 20 * 1024 * 1024,
-            pluginLimit: 64 * 1024 * 1024,
             actionRateLimit: { max: 1200, window: 30 },
             trustedProxyIps: ['10.0.0.2', '2001:db8::1']
           }
@@ -3368,7 +2720,6 @@ export const marker = 'reached'
       assert.deepEqual(config.config.security, {
         actionLimit: 2 * 1024 * 1024,
         apiLimit: 20 * 1024 * 1024,
-        pluginLimit: 64 * 1024 * 1024,
         actionRateLimit: { max: 1200, window: 30 },
         trustedProxyIps: ['10.0.0.2', '2001:db8::1'],
       })
@@ -3791,7 +3142,7 @@ function runJson(script, args, payload) {
         )
       }
     })
-    child.stdin.end(JSON.stringify(script === pluginRuntime ? { ...payload } : payload))
+    child.stdin.end(JSON.stringify(script === projectWorker ? { ...payload } : payload))
   })
 }
 
@@ -3822,7 +3173,7 @@ function runJsonResult(script, args, payload) {
         )
       }
     })
-    child.stdin.end(JSON.stringify(script === pluginRuntime ? { ...payload } : payload))
+    child.stdin.end(JSON.stringify(script === projectWorker ? { ...payload } : payload))
   })
 }
 

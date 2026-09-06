@@ -38,6 +38,7 @@ base64 = "0.23.1"
 blake3 = "1.8.7"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.6.6", features = ["derive"] }
+fancy-regex = "0.19.0"
 dashmap = "6.2.1"
 futures-core = "0.3.34"
 # Already compiled as part of axum's dependency tree; declaring it directly adds

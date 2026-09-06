@@ -81,7 +81,7 @@ database state เพียงเพราะ rollback: การทำเช่
 
 ## Sign-off checklist
 
-- [ ] Target/adapter เข้ากันกับทุก route และ plugin ที่เปิด
+- [ ] Target/adapter เข้ากันกับทุก route, `proxy.handler` และ transport ที่เปิด
 - [ ] Secret เป็น private และถูกส่งให้ตอน build/runtime ตามที่ต้องใช้
 - [ ] `routes`, `check`, `build` และ `test:parity` ผ่านจาก release commit
 - [ ] deployed origin, API, auth path และ static asset ถูก probe แล้ว

@@ -124,7 +124,7 @@ try {
     : ''
 
   return `import { clientAddress, createHandler, logRecord, parseByteRange, parseTrustedProxies, prerenderRelativePath } from './serverless-handler.mjs';
-import { applyPluginHttp, documentCacheHandler, loadActionModule, loadRouteModule } from './route-modules.mjs';
+import { projectProxy, documentCacheHandler, loadActionModule, loadRouteModule } from './route-modules.mjs';
 // The controller the render worker pool already runs on, reused rather than
 // rewritten: bounded FIFO admission is one decision, and two implementations of
 // it would be two overload behaviours for one framework.
@@ -170,11 +170,14 @@ ${platformDocumentStoreSource()}
 const handler = createHandler({
   routes: manifest.routes,
   middleware: runtimePolicy.middleware,
+  headers: runtimePolicy.headers,
+  redirects: runtimePolicy.redirects,
+  rewrites: runtimePolicy.rewrites,
   i18n: manifest.i18n,
   importPage: loadRouteModule,
   importApi: loadRouteModule,
   importAction: loadActionModule,
-  pluginHttp: applyPluginHttp,
+  proxy: projectProxy,
   security: runtimePolicy.security,
   logFormat: LOG_FORMAT,
 ${documentCacheOptionsSource('platformReadPrerendered', 'platformWritePrerendered')}

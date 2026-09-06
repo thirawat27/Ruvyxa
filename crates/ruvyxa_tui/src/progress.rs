@@ -9,8 +9,8 @@
 //! Every transient frame is written to **stderr**; every line that survives the
 //! run — the phase line, fields, tables, banners — stays on stdout. The split
 //! is what makes the spinner safe: it ticks from its own thread while a phase
-//! blocks, and a phase body that prints to stdout (a user's TypeScript plugin
-//! calling `console.log` from a `resolve` or `transform` hook, for instance)
+//! blocks, and a phase body that prints to stdout (a project's `ruvyxa.config.ts`
+//! calling `console.log` while the worker loads it, for instance)
 //! now lands on a different stream instead of tearing the spinner's line in
 //! half. It also means `ruvyxa build > log` records results without animation
 //! bytes, which is the convention progress reporting already follows.

@@ -1,8 +1,10 @@
-//! Build hooks injected by Ruvyxa's TypeScript plugin host.
+//! Build hooks the native bundler hands to a host: the project worker that
+//! runs the React compiler and the Markdown pipeline, and the server-reference
+//! substitution the framework installs for `'use server'` modules.
 //!
-//! Executable plugin callbacks remain in the selected JavaScript runtime. This
-//! module is only the internal, synchronous boundary used by the native resolver
-//! and compiler to request hook results from that host.
+//! Executable code stays in the selected JavaScript runtime. This module is
+//! only the internal, synchronous boundary used by the native resolver and
+//! compiler to request results from a host.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -132,18 +134,18 @@ impl BuildHookPipeline {
     /// every other ecosystem uses for a virtual module are not paths, and both
     /// were passed straight to the filesystem: `'\0virtual:x'` reached Windows
     /// as `strings passed to WinAPI cannot contain NULs`, and `'virtual:x'` as
-    /// `The system cannot find the file specified`, each naming a plugin
+    /// `The system cannot find the file specified`, each naming a host
     /// nowhere in the message.
     fn validate_resolved_id(path: &Path, specifier: &str, host: &str) -> Result<()> {
         let text = path.to_string_lossy();
         // A NUL can never be opened on any platform this runs on; the host
-        // above applies the rest of the rule, where the plugin's own string is
+        // above applies the rest of the rule, where the host's own string is
         // still in hand.
         if !text.contains('\0') {
             return Ok(());
         }
         Err(BundleError::Compiler(format!(
-            "plugin host `{host}` resolved `{specifier}` to `{text}`, which is not a file path. \
+            "build hook host `{host}` resolved `{specifier}` to `{text}`, which is not a file path. \
              A resolve hook answers with a path — the file itself may be virtual, and a load hook \
              can supply its contents — so return something like \
              `${{root}}/virtual-{specifier}.ts` rather than a bare or NUL-prefixed id."

@@ -2,7 +2,7 @@
   "description": "Framework-owned endpoints and which Ruvyxa host must serve each one.",
   "why": "Ruvyxa has two request hosts: the Axum server behind `ruvyxa dev`/`start`, and `createHandler` in packages/ruvyxa/runtime/serverless-handler.mjs, which every adapter's function artifact and the generated standalone server run. Endpoints were added to the Axum router by hand and ported to the handler one at a time, with nothing checking that the two agreed. `/__ruvyxa/image` was ported; `/__ruvyxa/action` was not, so every server action -- the crud template's forms, examples/demo/app/todos, and the markup `ruvyxa add` generates -- returned 404 on every deployed build while working locally. This table is the agreement. Add the endpoint here first; both languages replay it.",
   "fields": {
-    "reserved": "Must appear in RESERVED_FRAMEWORK_ROUTES (crates/ruvyxa_dev_server/src/lib.rs) and RESERVED_FRAMEWORK_PATHS (packages/ruvyxa/runtime/plugin-http.mjs). A plugin that registers one of these paths panics axum, so both lists have to name the same set.",
+    "reserved": "Must appear in RESERVED_FRAMEWORK_ROUTES (crates/ruvyxa_dev_server/src/lib.rs) and RESERVED_FRAMEWORK_PATHS (packages/@ruvyxa/core/src/framework-paths.ts). A configured transport on one of these paths panics axum, so both lists have to name the same set.",
     "native": "Served by the Axum host. `always` in every mode, `dev` only when config.watch is set, `none` when that host deliberately does not serve the path at all. `every_contract_endpoint_is_registered_on_the_native_router` requires a route for every other value, including a misspelling of `none`, so the exemption cannot be taken by accident. `dev` is checked in the other direction too, by `no_dev_only_endpoint_is_served_in_production`: the route has to be registered inside `build_app_router`'s `if config.watch {` block, or handled by a function that reaches a `config.watch` guard. Nothing asserted that until 2026-08-29, so `dev` was honoured three different ways -- devtools at registration, `/__ruvyxa/trace` in the handler, and `/__ruvyxa/hmr` nowhere -- and a production `ruvyxa start` accepted unauthenticated WebSocket upgrades on a dev-only path while this table stayed green.",
     "serverless": "How createHandler answers. `dispatch` means the path is handled before route matching and must never fall through to the generic route-miss 404. `static` means the build emits the bytes and a CDN or publish directory answers, so a function never sees it. `none` means the endpoint does not exist outside the native host. `standalone` means the generated standalone server answers it and `createHandler` does not -- an endpoint that only makes sense to a long-running process, which the six self-hosted adapters emit and the four serverless ones do not.",
     "probe": "Request the Node conformance test sends when serverless is `dispatch`. Use `probes` instead when an endpoint answers more than one verb: a single probe checks one verb and says nothing about the others, which is how `POST /__ruvyxa/rsc` -- every server-function call on a deployed server-components page -- returned 405 with this table green.",
@@ -116,7 +116,7 @@
       "reserved": true,
       "native": "always",
       "serverless": "none",
-      "note": "Deferred-hydration loader for `idle` and `visible` routes. `ruvyxa build` writes the same source to a content-hashed /__ruvyxa/client/hydration-<hash>.js instead, so a deployed build never asks for this path. The axum router registers it unconditionally, which is what makes it reserved: it was registered and not listed, so a plugin could take it and panic the router at startup."
+      "note": "Deferred-hydration loader for `idle` and `visible` routes. `ruvyxa build` writes the same source to a content-hashed /__ruvyxa/client/hydration-<hash>.js instead, so a deployed build never asks for this path. The axum router registers it unconditionally, which is what makes it reserved: it was registered and not listed, so a configured transport could take it and panic the router at startup."
     },
     {
       "path": "/__ruvyxa/client/route-manifest.json",
@@ -144,17 +144,16 @@
       "reserved": false,
       "native": "none",
       "serverless": "standalone",
-      "note": "Prometheus text exposition for a long-running process, served only by the generated standalone server and only when RUVYXA_METRICS_TOKEN is set -- without it the path answers 404 rather than advertising that it exists. The numbers are the ones /__ruvyxa/health deliberately withholds (render concurrency, queue depth, refusals), which is why they sit behind a bearer token compared in constant time instead of beside the public probe. Not reserved, and that is the one trade here: a plugin may still register this path and the standalone server would shadow it. The alternative was reserving it in both lists, which would oblige the Axum host to serve it too -- and that host has no admission controller of its own, so it would have had to invent a metric set to report. An operator who turns metrics on is the one who would notice, and no first-party plugin claims the path."
+      "note": "Prometheus text exposition for a long-running process, served only by the generated standalone server and only when RUVYXA_METRICS_TOKEN is set -- without it the path answers 404 rather than advertising that it exists. The numbers are the ones /__ruvyxa/health deliberately withholds (render concurrency, queue depth, refusals), which is why they sit behind a bearer token compared in constant time instead of beside the public probe. Not reserved, and that is the one trade here: a project route at this path would be shadowed by the standalone server. The alternative was reserving it in both lists, which would oblige the Axum host to serve it too -- and that host has no admission controller of its own, so it would have had to invent a metric set to report. An operator who turns metrics on is the one who would notice."
     }
   ],
-
   "$transportPathsComment": [
-    "Which paths a plugin may claim for the `realtime@1` / `presence@1` socket",
+    "Which paths `config.realtime` / `config.collab` may name for the socket",
     "transports. Two hosts decide this and both have to give the same answer:",
-    "  - packages/ruvyxa/runtime/plugin-http.mjs  (normalizeRealtime / normalizePresence)",
-    "  - crates/ruvyxa_dev_server/src/lib.rs      (validate_socket_path)",
-    "The JavaScript half runs first, inside the plugin host; the Axum half",
-    "re-checks the descriptor it is handed, because a bad path there does not",
+    "  - packages/@ruvyxa/core/src/framework-paths.ts  (normalizeRealtimeConfig / normalizeCollabConfig)",
+    "  - crates/ruvyxa_dev_server/src/lib.rs           (validate_socket_path)",
+    "The JavaScript half runs first, in the config renderer; the Axum half",
+    "re-checks the config it is handed, because a bad path there does not",
     "produce a diagnostic -- it panics matchit inside `Router::route` and takes",
     "the server down before anything can be reported.",
     "",
@@ -176,12 +175,12 @@
     {
       "path": "/__ruvyxa/realtime",
       "valid": true,
-      "why": "The realtime@1 default. Refusing it would refuse `native.claim('realtime@1')` with no options."
+      "why": "The `realtime` default. Refusing it would refuse `realtime: true`."
     },
     {
       "path": "/__ruvyxa/collab",
       "valid": true,
-      "why": "The presence@1 default."
+      "why": "The `collab` default."
     },
     {
       "path": "/events",
@@ -259,7 +258,6 @@
       "why": "Reserved. Refused by the reserved-route check rather than the alphabet, and listed here so a host that lost one of the two checks still fails."
     }
   ],
-
   "capabilities": [
     {
       "id": "actions",
@@ -268,22 +266,16 @@
       "note": "Discovered from action.ts beside a page route by action_file_for in Rust and actionFileFor in adapter-runner.mjs, which must agree on the .ts-before-.js order."
     },
     {
-      "id": "pluginHttp",
-      "nativeHost": true,
-      "buildArtifact": true,
-      "note": "http.onRequest / http.onResponse / http.route, including all of @ruvyxa/auth. The Rust host spawns plugin-runtime.mjs; a function bundle compiles the registry in through adapter-runner.mjs. Both build it with createPluginRegistry."
-    },
-    {
-      "id": "realtime@1",
+      "id": "realtime",
       "nativeHost": true,
       "buildArtifact": false,
-      "note": "Needs a socket upgrade. `ruvyxa build` warns RUV2205 rather than failing, because a deployment without the realtime endpoint is still a valid deployment."
+      "note": "config.realtime. Needs a socket upgrade. `ruvyxa build` warns RUV2205 rather than failing, because a deployment without the realtime endpoint is still a valid deployment."
     },
     {
-      "id": "presence@1",
+      "id": "collab",
       "nativeHost": true,
       "buildArtifact": false,
-      "note": "Same constraint as realtime@1."
+      "note": "config.collab. Same constraint as realtime."
     },
     {
       "id": "images@1",

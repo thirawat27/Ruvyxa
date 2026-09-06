@@ -56,7 +56,7 @@ export default config({
 ## สร้าง vertical slice ที่ทำงานได้จริง
 
 หลังติดตั้ง dependency แล้ว ให้สร้างไฟล์เหล่านี้ ตัวอย่างนี้ตั้งใจให้เล็ก: มันพิสูจน์ page routing,
-layout และ API route ก่อนที่จะเพิ่ม database, auth หรือ plugin
+layout และ API route ก่อนที่จะเพิ่ม database, auth หรือ route rule
 
 ```text
 app/
@@ -135,7 +135,6 @@ npm run clean
 npm run trace -- /
 npm run bench
 npm run test:parity
-npm run plugin -- create my-plugin
 ```
 
 ทั้งหมดนี้คือ user-facing script ที่ starter ทุกตัวมีให้ `start` และ `preview` ใช้ production build

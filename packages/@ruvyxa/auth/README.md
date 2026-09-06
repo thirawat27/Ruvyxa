@@ -50,22 +50,21 @@ export const auth = createAuth({
 })
 ```
 
-Register `auth.plugin` in `ruvyxa.config.ts`. The same plugin serves the endpoints under
-`/__ruvyxa/auth` on every host — `ruvyxa dev`/`start`, and every deployed build through the
+Mount the endpoints with one route handler file under `basePath` (`/__ruvyxa/auth` by default). The
+same file serves them on every host — `ruvyxa dev`/`start`, and every deployed build through the
 adapters' request handler — so nothing changes between a self-hosted process and a serverless
-function. `auth.handle(request)` is also exported for an application that wants to mount the
-endpoints itself.
+function. `auth.handle(request)` is the same dispatch for an application that mounts the endpoints
+itself.
 
 ```ts
-import { config } from 'ruvyxa/config'
-import { auth } from './server/auth.js'
+// app/__ruvyxa/auth/[...path]/route.ts
+import { auth } from '../../../_server/auth.js'
 
-export default config({ plugins: [auth.plugin] })
+export const { GET, POST } = auth.handlers
 ```
 
-The package exposes `@ruvyxa/auth/plugin` for integration authors who need `createAuthPlugin()` with
-an explicit request/build bridge. Normal applications should use the `auth.plugin` value created by
-`createAuth()` so the handler, store validation, and plugin stay aligned.
+`createAuth()` refuses the memory stores when `NODE_ENV` is `production` (`RUV3105`): the process
+that would keep sessions in its own memory is the one that must not start.
 
 **Stores.** `AuthStore.take()` and `AuthRateLimitStore.consume()` must be atomic: a read-then-write
 in the application process lets two concurrent requests both claim one single-use token, or both

@@ -10,8 +10,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::Router;
-#[cfg(test)]
-use axum::body::Bytes;
 use axum::body::{Body, to_bytes};
 use axum::extract::{DefaultBodyLimit, State};
 #[cfg(test)]
@@ -28,11 +26,7 @@ use ruvyxa_graph::RouteEntry;
 use ruvyxa_graph::{
     DiscoverOptions, I18nRouting, RenderStrategy, RouteKind, RouteManifest, discover_routes,
 };
-#[cfg(test)]
-use ruvyxa_middleware::PluginHttpResponse;
-use ruvyxa_middleware::{
-    MiddlewareConfig, MiddlewareStack, PluginEnvironment, PluginHost, PluginHttpRequest,
-};
+use ruvyxa_middleware::{MiddlewareConfig, MiddlewareStack, WorkerHost};
 use serde::Deserialize;
 #[cfg(test)]
 use tokio::net::TcpListener;
@@ -86,6 +80,8 @@ mod document_stream;
 mod html_document;
 mod i18n;
 mod trace;
+#[cfg(test)]
+use html_document::public_internal_error;
 pub use html_document::{
     BOOTSTRAP_ELEMENT_ID, bootstrap_data_block, escape_html, hydration_loader_source,
     hydration_loader_url, localize_document, rsc_payload_block, safe_json_for_script,
@@ -94,22 +90,11 @@ pub use html_document::{
 use html_document::{
     client_hydration_script, compose_document, dev_diagnostic_overlay, prebuilt_client_assets,
 };
-use html_document::{dev_error_overlay, error_response, plain_error_page, public_internal_error};
+use html_document::{dev_error_overlay, error_response, plain_error_page};
 
-mod plugin_bridge;
-#[cfg(test)]
-use plugin_bridge::{
-    BufferedPluginBody, body_exceeds_plugin_limit, buffer_plugin_response_body,
-    plugin_response_into_response,
-};
-use plugin_bridge::{
-    apply_request_plugins, apply_response_plugins, canonical_request_path, decode_plugin_body,
-    encode_plugin_body, headers_to_plugin_pairs, plugin_headers, request_method_allows_body,
-    split_plugin_target,
-};
+mod worker_bridge;
+use worker_bridge::{canonical_request_path, request_method_allows_body};
 
-mod plugin_head;
-pub use plugin_head::{PluginHeadEntry, render_plugin_head};
 mod static_assets;
 pub use static_assets::{
     DEFAULT_VIEWPORT_META, document_head_defaults, public_asset_links, style_head_tag,
@@ -179,10 +164,6 @@ const MAX_API_BODY_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_ACTION_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 /// Absolute upper bound for API payload buffering, regardless of project config.
 pub const MAX_API_BODY_LIMIT_BYTES: usize = 256 * 1024 * 1024;
-/// Default maximum response size buffered for a TypeScript response middleware.
-pub const DEFAULT_PLUGIN_RESPONSE_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
-/// Largest response size a project may configure for TypeScript response middleware.
-pub const MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES: usize = 256 * 1024 * 1024;
 const ACTION_RATE_LIMIT_MAX: usize = 600;
 const ACTION_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 pub const MAX_ACTION_RATE_LIMIT_REQUESTS: usize = 10_000;
@@ -222,7 +203,7 @@ const ADMISSION_QUEUE_PER_SLOT: usize = 4;
 /// down the ones already going; the same two bounds the standalone host uses.
 const ADMISSION_DEFAULT_BOUNDS: std::ops::RangeInclusive<usize> = 2..=8;
 
-/// JavaScript runtime used for Ruvyxa's config, render, and plugin processes.
+/// JavaScript runtime used for Ruvyxa's config, render, and project worker processes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum JavaScriptRuntime {
@@ -245,7 +226,7 @@ impl JavaScriptRuntime {
     /// Arguments that must precede a JavaScript entry point for this runtime.
     ///
     /// Deno is permission-secure by default while Node and Bun are not. Ruvyxa's
-    /// local tool processes execute trusted project config and plugins and need
+    /// local tool processes execute trusted project config and need
     /// filesystem, environment, process, network, and native-addon access, so
     /// local development deliberately uses the equivalent unrestricted mode.
     #[must_use]
@@ -545,8 +526,6 @@ pub struct ServerConfig {
     pub action_body_limit_bytes: usize,
     /// Maximum accepted API route request payload size.
     pub api_body_limit_bytes: usize,
-    /// Maximum response size buffered for TypeScript response middleware.
-    pub plugin_response_body_limit_bytes: usize,
     /// Maximum action requests per client/action in the configured window.
     pub action_rate_limit_max: usize,
     /// Window used by the action rate limiter.
@@ -561,20 +540,26 @@ pub struct ServerConfig {
     /// Apply Ruvyxa's default security response headers.
     pub security_headers: bool,
     pub middleware: MiddlewareConfig,
+    /// `headers()`, `redirects()`, and `rewrites()` from the config, compiled
+    /// once. Evaluated ahead of every route in the documented order, which the
+    /// deployed handler applies from the same shared table.
+    pub route_rules: ruvyxa_middleware::RouteRules,
+    /// The config's `proxy` block, compiled: which requests cross to the
+    /// JavaScript worker that holds `proxy.handler`. `None` when the config
+    /// declares none.
+    pub proxy: Option<ruvyxa_middleware::CompiledProxy>,
+    /// `config.realtime`, every field decided by the renderer. The socket is
+    /// registered on this host's router and served by no build artifact.
+    pub realtime: Option<RealtimeConfig>,
+    /// `config.collab`, likewise.
+    pub collab: Option<CollabConfig>,
     /// Notified whenever route discovery runs, so generated artifacts derived
     /// from the route set stay in step with it.
     pub route_manifest_observer: Option<RouteManifestObserver>,
-    /// Start the TypeScript plugin host for this server.
-    pub plugins_enabled: bool,
-    /// Which environment the plugin host serves.
-    ///
-    /// Deliberately explicit rather than inferred from `watch`: a development
-    /// server with watching disabled is still a development server, and a
-    /// plugin that decided otherwise would withhold behaviour the developer
-    /// asked for.
-    pub plugin_environment: PluginEnvironment,
-    /// Head elements plugins declared in `ruvyxa.config.ts`.
-    pub plugin_head: Vec<PluginHeadEntry>,
+    /// `config.content` turns the content engine on. Under `ruvyxa dev` the
+    /// project worker answers its paths live; a production server serves the
+    /// files the build wrote.
+    pub content_engine: bool,
     pub default_render_strategy: Option<RenderStrategy>,
     pub default_revalidate: Option<u64>,
     /// Validated file-system locale routing policy.
@@ -611,13 +596,6 @@ impl ServerConfig {
                 "security.actionRateLimit.window must be between 1 and {MAX_ACTION_RATE_LIMIT_WINDOW_SECS} seconds"
             )));
         }
-        if self.plugin_response_body_limit_bytes == 0
-            || self.plugin_response_body_limit_bytes > MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES
-        {
-            return Err(RuvyxaError::Message(format!(
-                "security.pluginLimit must be between 1 and {MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES} bytes"
-            )));
-        }
         Ok(())
     }
 
@@ -648,7 +626,6 @@ impl ServerConfig {
             debug_traces: false,
             action_body_limit_bytes: MAX_ACTION_BODY_BYTES,
             api_body_limit_bytes: MAX_API_BODY_BYTES,
-            plugin_response_body_limit_bytes: DEFAULT_PLUGIN_RESPONSE_BODY_LIMIT_BYTES,
             action_rate_limit_max: ACTION_RATE_LIMIT_MAX,
             action_rate_limit_window: ACTION_RATE_LIMIT_WINDOW,
             same_origin_actions: true,
@@ -656,10 +633,12 @@ impl ServerConfig {
             trusted_proxies: TrustedProxies::default(),
             security_headers: true,
             middleware: MiddlewareConfig::default(),
+            route_rules: ruvyxa_middleware::RouteRules::default(),
+            proxy: None,
+            realtime: None,
+            collab: None,
             route_manifest_observer: None,
-            plugins_enabled: false,
-            plugin_environment: PluginEnvironment::Development,
-            plugin_head: Vec::new(),
+            content_engine: false,
             default_render_strategy: None,
             default_revalidate: None,
             i18n: None,
@@ -694,7 +673,6 @@ impl ServerConfig {
             debug_traces: false,
             action_body_limit_bytes: MAX_ACTION_BODY_BYTES,
             api_body_limit_bytes: MAX_API_BODY_BYTES,
-            plugin_response_body_limit_bytes: DEFAULT_PLUGIN_RESPONSE_BODY_LIMIT_BYTES,
             action_rate_limit_max: ACTION_RATE_LIMIT_MAX,
             action_rate_limit_window: ACTION_RATE_LIMIT_WINDOW,
             same_origin_actions: true,
@@ -702,10 +680,12 @@ impl ServerConfig {
             trusted_proxies: TrustedProxies::default(),
             security_headers: true,
             middleware: MiddlewareConfig::default(),
+            route_rules: ruvyxa_middleware::RouteRules::default(),
+            proxy: None,
+            realtime: None,
+            collab: None,
             route_manifest_observer: None,
-            plugins_enabled: false,
-            plugin_environment: PluginEnvironment::Production,
-            plugin_head: Vec::new(),
+            content_engine: false,
             default_render_strategy: None,
             default_revalidate: None,
             i18n: None,
@@ -727,7 +707,7 @@ pub(crate) struct AppState {
     /// One render per cache key, however many requests are asking for it.
     single_flight: Arc<render_pipeline::RenderSingleFlight>,
     hmr_tracker: Arc<HmrTracker>,
-    plugin_runtime: Option<Arc<PluginHost>>,
+    worker: Option<Arc<WorkerHost>>,
     realtime: Option<RealtimeRuntime>,
     presence: Option<PresenceRuntime>,
     devtools: Arc<DevToolsMetrics>,
@@ -749,6 +729,27 @@ struct RealtimeRuntime {
     tx: broadcast::Sender<String>,
 }
 
+/// `config.realtime` as the renderer emits it: every field decided.
+///
+/// Deserialized by the CLI from the rendered config and re-checked here
+/// before the path reaches the router, because a bad path does not produce a
+/// diagnostic there — it panics matchit inside `Router::route`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RealtimeConfig {
+    pub path: String,
+    pub heartbeat_ms: u64,
+    pub capacity: usize,
+}
+
+/// `config.collab` as the renderer emits it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CollabConfig {
+    pub path: String,
+    pub heartbeat_ms: u64,
+}
+
 /// Collaboration rooms live for the process, not for one connection, so the
 /// registry is owned by the shared app state rather than the socket handler.
 #[derive(Clone)]
@@ -758,14 +759,14 @@ struct PresenceRuntime {
     registry: CollabRegistry,
 }
 
-/// Framework endpoints registered on the router before the plugin realtime
+/// Framework endpoints registered on the router before the configured realtime
 /// route. Registering a transport on one of these panics axum with
 /// `Overlapping method route`, before the server can report anything.
 ///
 /// This has to name every path [`build_app_router`] registers, and for a long
 /// time it named eight of ten: `/__ruvyxa/hydration-loader.js` and
 /// `/__ruvyxa/client/route-manifest.json` were registered and not listed, so a
-/// plugin declaring a transport there passed `validate_socket_path` and killed
+/// config naming a transport there passed `validate_socket_path` and killed
 /// the server at startup instead of getting RUV1701. The comment claiming the
 /// two stayed in sync was the only thing holding them together;
 /// `every_registered_route_is_reserved` reads the route chain now.
@@ -1242,37 +1243,38 @@ fn spawn_dependency_warmup(
     });
 }
 
-/// Start the TypeScript plugin host pool, unless plugins are disabled.
-async fn start_plugin_runtime(config: &ServerConfig) -> Result<Option<Arc<PluginHost>>> {
-    if !config.plugins_enabled {
+/// Start the project worker pool, unless nothing needs it.
+///
+/// Two things do: a `proxy.handler` in `ruvyxa.config.ts` — a function only
+/// a JavaScript process can run — and, in development, the content engine,
+/// whose artifacts are derived from the source tree on request until a build
+/// writes them.
+async fn start_worker(config: &ServerConfig) -> Result<Option<Arc<WorkerHost>>> {
+    if config.proxy.is_none() && !(config.watch && config.content_engine) {
         return Ok(None);
     }
-    let runtime_script = find_runtime_script(&config.root, "plugin-runtime.mjs")
-        .ok_or_else(|| RuvyxaError::Message("RUV1701 plugin-runtime.mjs not found".into()))?;
+    let runtime_script = find_runtime_script(&config.root, "project-worker.mjs")
+        .ok_or_else(|| RuvyxaError::Message("RUV1701 project-worker.mjs not found".into()))?;
     let executable = config.runtime.executable();
-    let plugin_workers = config
+    let workers = config
         .middleware
-        .plugin_workers()
+        .worker_processes()
         .map_err(RuvyxaError::Message)?;
-    let plugin_timeout = config
+    let timeout = config
         .middleware
-        .plugin_timeout()
+        .worker_timeout()
         .map_err(RuvyxaError::Message)?;
-    let host = PluginHost::start_pool_with_timeout_and_args(
+    let host = WorkerHost::start_pool(
         &config.root,
         &runtime_script,
         &executable,
         config.runtime.script_args(),
-        plugin_workers,
-        plugin_timeout,
-        config.plugin_environment,
+        workers,
+        timeout,
     )
     .await?;
     if host.pool_size() > 1 {
-        info!(
-            workers = host.pool_size(),
-            "TypeScript plugin middleware pool ready"
-        );
+        info!(workers = host.pool_size(), "project worker pool ready");
     }
     Ok(Some(Arc::new(host)))
 }
@@ -1294,20 +1296,19 @@ async fn start_plugin_runtime(config: &ServerConfig) -> Result<Option<Arc<Plugin
 /// unreserved characters is a literal path in every router version and can
 /// never acquire a meaning.
 ///
-/// `packages/ruvyxa/runtime/plugin-http.mjs` decides the same question first,
-/// inside the plugin host, and the two are held level by `transportPaths` in
+/// `packages/@ruvyxa/core/src/framework-paths.ts` decides the same question
+/// first, in the config renderer, and the two are held level by `transportPaths` in
 /// `tests/fixtures/framework-endpoint-conformance.json`.
 fn validate_socket_path(path: &str, kind: &str) -> Result<()> {
     if !is_literal_transport_path(path) {
         return Err(RuvyxaError::Message(format!(
-            "RUV1701 TypeScript plugin host returned invalid {kind} configuration: \
-             path {path:?} must be one or more `/`-prefixed segments of letters, \
-             digits, `-`, `.`, `_`, or `~`"
+            "RUV1602 config.{kind}.path {path:?} must be one or more `/`-prefixed \
+             segments of letters, digits, `-`, `.`, `_`, or `~`"
         )));
     }
     if RESERVED_FRAMEWORK_ROUTES.contains(&path) {
         return Err(RuvyxaError::Message(format!(
-            "RUV1701 {kind} path {path} collides with a reserved framework route"
+            "RUV1602 config.{kind}.path {path} collides with a reserved framework route"
         )));
     }
     Ok(())
@@ -1316,7 +1317,7 @@ fn validate_socket_path(path: &str, kind: &str) -> Result<()> {
 /// One or more `/`-prefixed segments of RFC 3986 unreserved characters.
 ///
 /// The twin of `isLiteralTransportPath` in
-/// `packages/ruvyxa/runtime/plugin-http.mjs`.
+/// `packages/@ruvyxa/core/src/framework-paths.ts`.
 fn is_literal_transport_path(path: &str) -> bool {
     let Some(rest) = path.strip_prefix('/') else {
         return false;
@@ -1329,43 +1330,43 @@ fn is_literal_transport_path(path: &str) -> bool {
     })
 }
 
-/// Build the realtime transport a plugin declared, if any.
-fn realtime_runtime(plugin_runtime: Option<&Arc<PluginHost>>) -> Result<Option<RealtimeRuntime>> {
-    let Some(descriptor) = plugin_runtime.and_then(|runtime| runtime.descriptor().realtime())
-    else {
+/// Build the realtime transport `config.realtime` declares, if any.
+///
+/// The renderer has already applied the defaults and bounds; they are
+/// re-checked here because this is the process that would panic on them.
+fn realtime_runtime(config: Option<&RealtimeConfig>) -> Result<Option<RealtimeRuntime>> {
+    let Some(config) = config else {
         return Ok(None);
     };
-    if !(5_000..=120_000).contains(&descriptor.heartbeat_ms)
-        || !(16..=4_096).contains(&descriptor.capacity)
+    if !(5_000..=120_000).contains(&config.heartbeat_ms) || !(16..=4_096).contains(&config.capacity)
     {
         return Err(RuvyxaError::Message(
-            "RUV1701 TypeScript plugin host returned invalid realtime configuration".into(),
+            "RUV1602 config.realtime: heartbeatMs must be 5000–120000 and capacity 16–4096".into(),
         ));
     }
-    validate_socket_path(&descriptor.path, "realtime")?;
-    let (tx, _) = broadcast::channel(descriptor.capacity);
+    validate_socket_path(&config.path, "realtime")?;
+    let (tx, _) = broadcast::channel(config.capacity);
     Ok(Some(RealtimeRuntime {
-        path: descriptor.path.clone(),
-        heartbeat: Duration::from_millis(descriptor.heartbeat_ms),
+        path: config.path.clone(),
+        heartbeat: Duration::from_millis(config.heartbeat_ms),
         tx,
     }))
 }
 
-/// Build the presence transport a plugin declared, if any.
-fn presence_runtime(plugin_runtime: Option<&Arc<PluginHost>>) -> Result<Option<PresenceRuntime>> {
-    let Some(descriptor) = plugin_runtime.and_then(|runtime| runtime.descriptor().presence())
-    else {
+/// Build the collaboration transport `config.collab` declares, if any.
+fn presence_runtime(config: Option<&CollabConfig>) -> Result<Option<PresenceRuntime>> {
+    let Some(config) = config else {
         return Ok(None);
     };
-    if !(5_000..=120_000).contains(&descriptor.heartbeat_ms) {
+    if !(5_000..=120_000).contains(&config.heartbeat_ms) {
         return Err(RuvyxaError::Message(
-            "RUV1701 TypeScript plugin host returned invalid presence configuration".into(),
+            "RUV1602 config.collab: heartbeatMs must be 5000–120000".into(),
         ));
     }
-    validate_socket_path(&descriptor.path, "presence")?;
+    validate_socket_path(&config.path, "collab")?;
     Ok(Some(PresenceRuntime {
-        path: descriptor.path.clone(),
-        heartbeat: Duration::from_millis(descriptor.heartbeat_ms),
+        path: config.path.clone(),
+        heartbeat: Duration::from_millis(config.heartbeat_ms),
         registry: CollabRegistry::new(),
     }))
 }
@@ -1387,10 +1388,10 @@ fn native_only_capability_notes(
     }
     let mut notes = Vec::new();
     if let Some(realtime) = realtime {
-        notes.push(format!("realtime@1 {}", realtime.path));
+        notes.push(format!("realtime {}", realtime.path));
     }
     if let Some(presence) = presence {
-        notes.push(format!("presence@1 {}", presence.path));
+        notes.push(format!("collab {}", presence.path));
     }
     notes
 }
@@ -1420,7 +1421,7 @@ fn assert_transport_paths_distinct(
         && realtime.path == presence.path
     {
         return Err(RuvyxaError::Message(format!(
-            "RUV1701 presence path {} collides with the realtime transport",
+            "RUV1602 config.collab.path {} collides with the realtime transport",
             presence.path
         )));
     }
@@ -1619,7 +1620,7 @@ fn build_app_router(config: &ServerConfig, state: Arc<AppState>) -> Router {
         // unauthenticated client open unbounded WebSockets that carry nothing,
         // are never heartbeated, and are never timed out. It stays in
         // `RESERVED_FRAMEWORK_ROUTES`, so `validate_socket_path` keeps refusing
-        // a plugin transport on the path in both modes.
+        // a configured transport on the path in both modes.
         app = app
             .route("/__ruvyxa/hmr", get(hmr_ws))
             .route("/__ruvyxa/devtools", get(devtools_dashboard))
@@ -1699,12 +1700,12 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
 
     // Both start a JavaScript runtime and neither needs anything from the
     // other, so they come up together. In sequence they were the whole of a dev
-    // server's startup — the render workers and then the plugin host, each
+    // server's startup — the render workers and then the project worker, each
     // waiting for a process that had nothing to say to it.
     let env = runtime_env(&config)?;
-    let (worker_pool, plugin_runtime) = tokio::try_join!(
+    let (worker_pool, worker) = tokio::try_join!(
         NodeWorkerPool::start_with_runtime(&config.root, env, config.runtime),
-        start_plugin_runtime(&config),
+        start_worker(&config),
     )?;
     let worker_pool = Arc::new(worker_pool);
     info!(
@@ -1724,8 +1725,8 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     let watcher_render_cache = render_cache.clone();
     let hmr_tracker = Arc::new(HmrTracker::new());
     hmr_tracker.populate_from_manifest(&manifest.routes);
-    let realtime = realtime_runtime(plugin_runtime.as_ref())?;
-    let presence = presence_runtime(plugin_runtime.as_ref())?;
+    let realtime = realtime_runtime(config.realtime.as_ref())?;
+    let presence = presence_runtime(config.collab.as_ref())?;
     assert_transport_paths_distinct(realtime.as_ref(), presence.as_ref())?;
     let native_only = native_only_capability_notes(&config, realtime.as_ref(), presence.as_ref());
     let draining = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1744,7 +1745,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         isr_revalidating: Arc::new(std::sync::Mutex::new(HashSet::new())),
         single_flight: Arc::default(),
         hmr_tracker,
-        plugin_runtime,
+        worker,
         realtime,
         presence,
         devtools: Arc::new(DevToolsMetrics::default()),
@@ -1763,7 +1764,6 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
                 worker_pool: watcher_pool,
                 render_cache: watcher_render_cache,
                 hmr_tracker: state.hmr_tracker.clone(),
-                plugin_runtime: state.plugin_runtime.clone(),
                 edit_traces: state.edit_traces.clone(),
                 tokio_handle: tokio::runtime::Handle::current(),
             },
@@ -2153,40 +2153,15 @@ fn request_body_too_large(error: impl std::fmt::Display) -> Response {
     response
 }
 
-/// The request target the plugin stage is handed.
-///
-/// A plugin hook is scoped by path, and the JavaScript registry answers "does
-/// this hook apply?" against whatever path string arrives here. The router
-/// answers the same question against the canonical segment form, so handing
-/// over the raw request line gave the two stages different answers: `//api/x`
-/// routed to `/api/x` and read as out of scope for `['/api/*']`, which is the
-/// default scope of `originGuard()`. A cross-site form POST to that address
-/// reached the handler with the session cookie and no guard ran.
-///
-/// The query string is carried over untouched. It is not part of the scoping
-/// decision, but this target becomes the request target for the rest of the
-/// pipeline once a plugin has run, so dropping it would drop every query
-/// parameter for any project with request middleware.
-///
-/// Held to `tests/fixtures/plugin-path-scope-conformance.json` together with
-/// the deployed host, which makes the same decision inside
-/// `packages/ruvyxa/runtime/plugin-http.mjs`.
-fn plugin_request_target(request_path: &str, request_target: &str) -> String {
-    match request_target.split_once('?') {
-        Some((_, query)) => format!("{request_path}?{query}"),
-        None => request_path.to_string(),
-    }
-}
-
 async fn handle_request(
     State(state): State<Arc<AppState>>,
     request: Request<Body>,
 ) -> impl IntoResponse {
     let started = Instant::now();
     let (parts, body) = request.into_parts();
-    let mut headers = parts.headers;
-    let mut method = parts.method.as_str().to_string();
-    let mut request_path = match canonical_request_path(parts.uri.path()) {
+    let headers = parts.headers;
+    let method = parts.method.as_str().to_string();
+    let request_path = match canonical_request_path(parts.uri.path()) {
         Ok(path) => path,
         Err(error) => {
             return with_security_headers(
@@ -2200,12 +2175,12 @@ async fn handle_request(
     };
     // Routing and static-file lookup must use only the path, while an API handler's
     // standard Request must retain the original query string.
-    let mut request_target = parts
+    let request_target = parts
         .uri
         .path_and_query()
         .map(|target| target.as_str().to_string())
         .unwrap_or_else(|| request_path.clone());
-    let mut request_body = if request_method_allows_body(&method) {
+    let request_body = if request_method_allows_body(&method) {
         match to_bytes(body, state.config.api_body_limit_bytes).await {
             Ok(bytes) if bytes.is_empty() => None,
             Ok(bytes) => Some(bytes.to_vec()),
@@ -2217,58 +2192,66 @@ async fn handle_request(
         None
     };
 
-    // The plugin round-trip serializes the request over stdio, so it only runs
-    // when the registry declared request middleware whose routes can match.
-    let mut plugin_request: Option<PluginHttpRequest> = None;
-    if state
-        .plugin_runtime
-        .as_deref()
-        .is_some_and(|runtime| runtime.wants_request(&request_path))
+    // `headers()` and `redirects()` from the config, ahead of every route, in
+    // the documented order. Framework endpoints never arrive here — they
+    // are axum routes in front of this fallback — so no rule can redirect
+    // `/__ruvyxa/action`. The header list is decided on the request as it
+    // arrived and set on whatever answers it.
+    let rule_headers = match render_pipeline::route_rule_stage(
+        &state.config.route_rules,
+        &request_path,
+        &request_target,
+        &headers,
+    ) {
+        render_pipeline::RuleStage::Answer(response) => return with_security_headers(*response),
+        render_pipeline::RuleStage::Continue(headers) => headers,
+    };
+
+    // Then the config's `proxy.handler`, for the requests its matcher names,
+    // then the `beforeFiles` rewrites on whatever the proxy forwarded.
+    let forwarded = match worker_bridge::run_proxy_stage(
+        &state,
+        worker_bridge::ForwardedRequest {
+            method,
+            request_path,
+            request_target,
+            headers,
+            body: request_body,
+        },
+    )
+    .await
     {
-        let initial_request = PluginHttpRequest {
-            method: method.clone(),
-            path: plugin_request_target(&request_path, &request_target),
-            headers: headers_to_plugin_pairs(&headers),
-            body_base64: request_body.as_deref().map(encode_plugin_body),
-        };
-        let (short_circuit, next_request) =
-            match apply_request_plugins(&state, initial_request).await {
-                Ok(result) => result,
-                Err(error) => {
-                    error!(%error, path = %request_path, "TypeScript request middleware failed");
-                    let message = public_internal_error(&state.config, &error);
-                    return with_security_headers(
-                        (StatusCode::INTERNAL_SERVER_ERROR, message).into_response(),
-                    );
-                }
-            };
-        if let Some(response) = short_circuit {
-            return response;
+        worker_bridge::StageOutcome::Answer(response) => {
+            return render_pipeline::with_rule_headers(*response, &rule_headers);
         }
-        let (next_method, next_target) =
-            match split_plugin_target(&next_request.method, &next_request.path) {
-                Ok(value) => value,
-                Err(error) => {
-                    return with_security_headers(
-                        (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
-                    );
-                }
-            };
-        method = next_method;
-        request_target = next_target.clone();
-        request_path = next_target
-            .split_once('?')
-            .map_or_else(|| next_target.clone(), |(path, _)| path.to_string());
-        headers = plugin_headers(&next_request.headers);
-        request_body = match decode_plugin_body(next_request.body_base64.as_deref()) {
-            Ok(value) => value,
-            Err(error) => {
-                return with_security_headers(
-                    (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
-                );
-            }
-        };
-        plugin_request = Some(next_request);
+        worker_bridge::StageOutcome::Continue(forwarded) => forwarded,
+    };
+    let worker_bridge::ForwardedRequest {
+        method,
+        mut request_path,
+        mut request_target,
+        headers,
+        body: request_body,
+    } = forwarded;
+    match render_pipeline::before_files_rewrite(
+        &state.config.route_rules,
+        &request_path,
+        &request_target,
+        &headers,
+    ) {
+        Ok(Some((path, full_target))) => {
+            request_path = path;
+            request_target = full_target;
+        }
+        Ok(None) => {}
+        Err(response) => return with_security_headers(*response),
+    }
+
+    // The content engine's live artifacts, in development. Answered after the
+    // rewrites so a `beforeFiles` rule can point at one, and before rendering
+    // so no route has to exist for the path.
+    if let Some(response) = worker_bridge::run_content_stage(&state, &request_path).await {
+        return render_pipeline::with_rule_headers(with_security_headers(response), &rule_headers);
     }
 
     let render_result = render_request_pooled(
@@ -2300,36 +2283,7 @@ async fn handle_request(
             }
         }
     };
-    // Response middleware is gated on the (possibly rewritten) final path so
-    // route-scoped plugins never force non-matching responses through the
-    // buffering base64 round-trip.
-    let response = if state
-        .plugin_runtime
-        .as_deref()
-        .is_some_and(|runtime| runtime.wants_response(&request_path))
-    {
-        let request_payload = plugin_request.unwrap_or_else(|| PluginHttpRequest {
-            method: method.clone(),
-            path: plugin_request_target(&request_path, &request_target),
-            headers: headers_to_plugin_pairs(&headers),
-            body_base64: request_body.as_deref().map(encode_plugin_body),
-        });
-        match apply_response_plugins(&state, &request_payload, response).await {
-            Ok(response) => response,
-            Err(error) => {
-                error!(%error, path = %request_path, "TypeScript response middleware failed");
-                with_security_headers(
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        public_internal_error(&state.config, &error),
-                    )
-                        .into_response(),
-                )
-            }
-        }
-    } else {
-        response
-    };
+    let response = render_pipeline::with_rule_headers(response, &rule_headers);
     if state.config.watch && should_log_dev_request(&request_path) {
         println!(
             "{}",
@@ -2458,12 +2412,12 @@ mod tests {
         }
     }
 
-    /// Every path `build_app_router` registers is reserved against plugins.
+    /// Every path `build_app_router` registers is reserved.
     ///
     /// The two existing checks read the contract outwards: contract to
     /// `RESERVED_FRAMEWORK_ROUTES`, and contract to the route chain. Neither
     /// read the chain inwards, which is the direction `validate_socket_path`
-    /// depends on — a route registered and never listed is one a plugin may
+    /// depends on — a route registered and never listed is one a transport may
     /// take, and axum's answer to that is `Overlapping method route`, a panic
     /// during startup rather than the RUV1701 the guard exists to produce.
     /// `/__ruvyxa/hydration-loader.js` and
@@ -2486,7 +2440,7 @@ mod tests {
         let mut registered = Vec::new();
         for fragment in body.split(".route(").skip(1) {
             // Both spellings the chain uses: a literal, and `&path` for the
-            // plugin transports, which are the paths being guarded rather than
+            // socket transports, which are the paths being guarded rather than
             // guarding paths.
             let Some(rest) = fragment.trim_start().strip_prefix('"') else {
                 continue;
@@ -2507,7 +2461,7 @@ mod tests {
             assert!(
                 RESERVED_FRAMEWORK_ROUTES.contains(&path.as_str()),
                 "{path} is registered on the router but is not in \
-                 RESERVED_FRAMEWORK_ROUTES, so a plugin transport may claim it \
+                 RESERVED_FRAMEWORK_ROUTES, so a configured transport may claim it \
                  and panic axum at startup; add it there and to \
                  tests/fixtures/framework-endpoint-conformance.json"
             );
@@ -2515,7 +2469,7 @@ mod tests {
         for reserved in RESERVED_FRAMEWORK_ROUTES {
             assert!(
                 registered.iter().any(|path| path == reserved),
-                "{reserved} is reserved against plugins but nothing registers it"
+                "{reserved} is reserved but nothing registers it"
             );
         }
     }
@@ -2524,7 +2478,7 @@ mod tests {
     ///
     /// The JavaScript half is replayed by
     /// `tests/packages/ruvyxa/framework-endpoints.test.mjs`. This half matters
-    /// more, because a path the plugin host let through does not produce a
+    /// more, because a path the renderer let through does not produce a
     /// diagnostic here: it panics `matchit` inside `Router::route`, before the
     /// server can report anything.
     #[test]
@@ -2549,7 +2503,7 @@ mod tests {
                 .expect("every case must state whether it is valid");
             let why = case["why"].as_str().unwrap_or("");
 
-            for kind in ["realtime", "presence"] {
+            for kind in ["realtime", "collab"] {
                 let accepted = validate_socket_path(path, kind).is_ok();
                 assert_eq!(
                     accepted, valid,
@@ -3805,130 +3759,6 @@ Host: localhost
             allowed <= 8192 * 4,
             "no slot may exceed its budget, allowed {allowed}"
         );
-    }
-
-    #[test]
-    fn plugin_responses_reject_invalid_headers() {
-        let response = PluginHttpResponse {
-            status: 200,
-            headers: vec![("bad header".to_string(), "value".to_string())],
-            body_base64: Some(encode_plugin_body(b"body")),
-        };
-        assert!(plugin_response_into_response(response).is_err());
-    }
-
-    #[test]
-    fn plugin_responses_preserve_repeated_headers() {
-        let response = PluginHttpResponse {
-            status: 200,
-            headers: vec![
-                ("content-type".to_string(), "application/json".to_string()),
-                ("set-cookie".to_string(), "session=one; Path=/".to_string()),
-                ("set-cookie".to_string(), "theme=dark; Path=/".to_string()),
-            ],
-            body_base64: None,
-        };
-
-        let response = plugin_response_into_response(response).unwrap();
-        let cookies = response
-            .headers()
-            .get_all("set-cookie")
-            .iter()
-            .map(|value| value.to_str().unwrap())
-            .collect::<Vec<_>>();
-
-        assert_eq!(cookies, vec!["session=one; Path=/", "theme=dark; Path=/"]);
-        assert_eq!(response.headers().get_all("content-type").iter().count(), 1);
-        assert_eq!(response.headers()["content-type"], "application/json");
-    }
-
-    /// Yields each chunk in turn; a `None` chunk injects a stream error.
-    struct ChunkStream(std::collections::VecDeque<Option<Bytes>>);
-    impl futures_core::Stream for ChunkStream {
-        type Item = std::result::Result<Bytes, std::io::Error>;
-        fn poll_next(
-            mut self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Option<Self::Item>> {
-            std::task::Poll::Ready(
-                self.0.pop_front().map(|chunk| {
-                    chunk.ok_or_else(|| std::io::Error::other("stream failed mid-body"))
-                }),
-            )
-        }
-    }
-
-    fn chunked_body(chunks: &[&'static [u8]]) -> Body {
-        Body::from_stream(ChunkStream(
-            chunks.iter().map(|c| Some(Bytes::from_static(c))).collect(),
-        ))
-    }
-
-    #[tokio::test]
-    async fn plugin_response_body_buffers_within_the_limit() {
-        match buffer_plugin_response_body(Body::from(vec![0_u8; 8]), 8)
-            .await
-            .unwrap()
-        {
-            BufferedPluginBody::Buffered(bytes) => assert_eq!(bytes.len(), 8),
-            BufferedPluginBody::Oversized(_) => panic!("body at the limit must buffer"),
-        }
-
-        match buffer_plugin_response_body(chunked_body(&[b"hel", b"lo"]), 8)
-            .await
-            .unwrap()
-        {
-            BufferedPluginBody::Buffered(bytes) => assert_eq!(&bytes[..], b"hello"),
-            BufferedPluginBody::Oversized(_) => panic!("multi-chunk body within limit must buffer"),
-        }
-    }
-
-    #[tokio::test]
-    async fn oversized_unsized_bodies_pass_through_with_all_bytes_intact() {
-        let body = chunked_body(&[b"abc", b"def", b"ghi"]);
-        match buffer_plugin_response_body(body, 4).await.unwrap() {
-            BufferedPluginBody::Buffered(_) => panic!("body over the limit must not buffer"),
-            BufferedPluginBody::Oversized(body) => {
-                let bytes = to_bytes(body, usize::MAX).await.unwrap();
-                assert_eq!(&bytes[..], b"abcdefghi");
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn plugin_response_body_read_errors_still_fail() {
-        let body = Body::from_stream(ChunkStream(
-            [Some(Bytes::from_static(b"ok")), None]
-                .into_iter()
-                .collect(),
-        ));
-        let error = buffer_plugin_response_body(body, 64).await.unwrap_err();
-        assert!(error.to_string().contains("stream failed mid-body"));
-    }
-
-    #[test]
-    fn oversized_sized_bodies_bypass_response_plugins() {
-        assert!(body_exceeds_plugin_limit(&Body::from(vec![0_u8; 9]), 8));
-        assert!(!body_exceeds_plugin_limit(&Body::from(vec![0_u8; 8]), 8));
-        assert!(!body_exceeds_plugin_limit(&Body::empty(), 8));
-
-        // Unsized bodies have no exact size hint, so the fast path never
-        // triggers; they go through the chunked buffering path instead.
-        let body = chunked_body(&[b"chunk"]);
-        assert!(!body_exceeds_plugin_limit(&body, 4));
-    }
-
-    #[test]
-    fn server_configs_default_to_the_plugin_response_limit() {
-        for config in [
-            ServerConfig::dev(".", "localhost", 3000),
-            ServerConfig::production(".", "localhost", 3000),
-        ] {
-            assert_eq!(
-                config.plugin_response_body_limit_bytes,
-                DEFAULT_PLUGIN_RESPONSE_BODY_LIMIT_BYTES
-            );
-        }
     }
 
     #[test]

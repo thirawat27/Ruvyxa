@@ -199,16 +199,16 @@ async function main() {
         )
       }
       assert(
-        listing.includes('package/dist/plugins.js'),
-        'ruvyxa package missing built-in plugin entrypoint',
+        listing.includes('package/dist/content-engine/index.js'),
+        'ruvyxa package missing the content engine',
       )
-      const pluginDeclarations = execFileSync('tar', [
+      const contentDeclarations = execFileSync('tar', [
         '-xOf',
         tarball,
-        'package/dist/plugins.d.ts',
+        'package/dist/content-engine/index.d.ts',
       ]).toString()
       assert(
-        pluginDeclarations.includes('contentEngine'),
+        contentDeclarations.includes('createContentEngine'),
         'ruvyxa package missing Content Engine declarations',
       )
       for (const typeFile of [
@@ -216,7 +216,7 @@ async function main() {
         'index.d.ts',
         'config.d.ts',
         'server.d.ts',
-        'plugins.d.ts',
+        'content-engine.d.ts',
       ]) {
         assert(
           listing.includes(`package/types/${typeFile}`),
@@ -255,34 +255,6 @@ async function main() {
   execFileSync('node', [`${extracted}/package/bin/ruvyxa.js`, '--help'], {
     stdio: 'inherit',
   })
-  const pluginSmokeDir = `${extracted}/scaffolded-plugin`
-  execFileSync(
-    'node',
-    [
-      `${extracted}/package/bin/ruvyxa.js`,
-      'plugin',
-      'create',
-      'request-logger',
-      '--root',
-      extracted,
-      '--dir',
-      'scaffolded-plugin',
-    ],
-    { stdio: 'inherit' },
-  )
-  const pluginSmokePackagePath = `${pluginSmokeDir}/package.json`
-  const pluginSmokePackage = JSON.parse(readFileSync(pluginSmokePackagePath, 'utf8'))
-  assert(
-    pluginSmokePackage.ruvyxa === undefined,
-    'generated plugin must not include Ruvyxa metadata',
-  )
-  assert(
-    pluginSmokePackage.devDependencies?.typescript === '^7.0.2',
-    'generated plugin must use TypeScript 7',
-  )
-  pluginSmokePackage.peerDependencies.ruvyxa = `file:../../${destination}/${ruvyxaTgz}`
-  pluginSmokePackage.devDependencies.ruvyxa = `file:../../${destination}/${ruvyxaTgz}`
-  writeFileSync(pluginSmokePackagePath, JSON.stringify(pluginSmokePackage, null, 2) + '\n')
   mkdirSync(`${extracted}/create-ruvyxa`)
   execFileSync('tar', [
     '-xzf',
@@ -323,26 +295,23 @@ async function main() {
       [
         "import 'ruvyxa'",
         "import 'ruvyxa/config'",
-        "import { contentEngine } from 'ruvyxa/plugins'",
         "import 'ruvyxa/server'",
         "import type { AuthSession } from '@ruvyxa/auth/client'",
-        "import { databasePlugin } from '@ruvyxa/database'",
-        "import { realtime } from '@ruvyxa/realtime'",
+        "import { requireDatabaseEnv } from '@ruvyxa/database'",
+        "import type { RealtimeConfig } from '@ruvyxa/realtime'",
         "import { createRealtimeClient } from '@ruvyxa/realtime/client'",
         "import type { AnswerProps, SeoProps } from '@ruvyxa/react'",
         "import styles from './type-check.module.scss'",
         'const moduleClass: string = styles.typeCheck',
-        "const contentPlugin = contentEngine({ siteUrl: 'https://example.com', title: 'Example', description: 'Articles' })",
-        'const databaseBuildPlugin = databasePlugin()',
-        'const realtimePlugin = realtime()',
+        "const realtimeConfig: RealtimeConfig = { path: '/__ruvyxa/realtime' }",
+        'const requireEnv: typeof requireDatabaseEnv = requireDatabaseEnv',
         'const realtimeClient = createRealtimeClient()',
         'const authSession: AuthSession | null = null',
         "const answerProps: AnswerProps = { question: 'Is it typed?', answer: 'Yes.' }",
         "const seoProps: SeoProps = { title: 'Guide', article: { authors: [{ name: 'Ada' }] } }",
         'void moduleClass',
-        'void contentPlugin',
-        'void databaseBuildPlugin',
-        'void realtimePlugin',
+        'void realtimeConfig',
+        'void requireEnv',
         'void realtimeClient',
         'void authSession',
         'void answerProps',
@@ -362,26 +331,23 @@ async function main() {
       const anchor = 'export default config({'
       if (!configSource.includes(anchor)) {
         throw new Error(
-          `pack:smoke expected "${anchor}" in the scaffolded ruvyxa.config.ts so it could add ` +
-            'plugins to it. Update this injection to match the template.',
+          `pack:smoke expected "${anchor}" in the scaffolded ruvyxa.config.ts so it could turn ` +
+            'the content engine on. Update this injection to match the template.',
         )
       }
       writeFileSync(
         configPath,
-        `import { databasePlugin } from '@ruvyxa/database'\nimport { realtime } from '@ruvyxa/realtime'\nimport { contentEngine } from 'ruvyxa/plugins'\n${configSource.replace(
-          anchor,
-          `${anchor}
-  plugins: [
-    databasePlugin(),
-    realtime(),
-    contentEngine({
-      siteUrl: 'https://example.com',
-      title: 'Example',
-      description: 'Articles',
-      locale: 'en',
-    }),
-  ],`,
-        )}`,
+        configSource
+          .replace(
+            anchor,
+            `${anchor}
+  realtime: true,
+  content: { engine: { locale: 'en' } },`,
+          )
+          .replace(
+            "    // url: 'https://example.com',",
+            "    url: 'https://example.com',\n    title: 'Example',\n    description: 'Articles',\n    language: 'en',",
+          ),
       )
       mkdirSync(`${appDir}/app/guide`, { recursive: true })
       writeFileSync(
@@ -419,10 +385,6 @@ async function main() {
       stdio: 'inherit',
     })
   }
-  execPnpm(['run', 'test'], {
-    cwd: pluginSmokeDir,
-    stdio: 'inherit',
-  })
   execPnpm(['exec', 'ruvyxa', 'check', '--root', '.'], {
     cwd: `${extracted}/scaffolded-minimal`,
     stdio: 'inherit',

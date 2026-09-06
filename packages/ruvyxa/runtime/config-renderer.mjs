@@ -4,6 +4,13 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { compareEntryKeys } from './order.mjs'
 import { CONFIG_KEY_SCHEMA } from './config-schema.mjs'
+import {
+  compileMatcher,
+  compileRouteRules,
+  normalizeMatcher,
+  normalizeRewrites,
+} from './route-rules.mjs'
+import { normalizeCollabConfig, normalizeRealtimeConfig } from './framework-paths.mjs'
 
 import {
   cacheFileName,
@@ -175,8 +182,10 @@ async function sanitizeConfig(config) {
   assertConfigValueShape(config)
   assertMarkdownShape(config.markdown)
   assertContentShape(config.content, config.site)
+  const routeRules = await resolveRouteRules(config)
 
   return {
+    ...routeRules,
     appDir: stringValue(config.appDir),
     outDir: stringValue(config.outDir),
     runtime: stringValue(config.runtime),
@@ -198,9 +207,134 @@ async function sanitizeConfig(config) {
     site: siteValue(config.site),
     content: contentValue(config.content),
     middleware: safeJsonValue(config.middleware),
+    // The native socket transports, every field decided here so the Axum host
+    // and `ruvyxa build` read one shape. `true` takes the defaults.
+    realtime: normalizeRealtimeConfig(config.realtime),
+    collab: normalizeCollabConfig(config.collab),
     adapter: await adapterOutput(config.adapter, projectRoot, config.outDir),
     adapterOptions: safeJsonValue(config.adapterOptions),
-    plugins: pluginDescriptors(config.plugins, config.content),
+  }
+}
+
+/**
+ * `headers`, `redirects`, `rewrites`, and `proxy`, resolved and validated.
+ *
+ * The first three may be written as a function — sync or async — so they
+ * are called here, once, at config time. What Rust and the
+ * deployed handler receive is the resolved list, already reduced to one shape
+ * (`rewrites` to its three phases, a bare matcher string to `{ source }`) and
+ * already compiled once through the shared route-rules module, so a pattern
+ * that does not compile fails the config with `RUV1602` rather than the first
+ * request it would have matched.
+ *
+ * `proxy.handler` is a function and cannot travel: it stays in the compiled
+ * config module, where the JavaScript hosts import it, and only `handler: true`
+ * is reported so the native host knows to route matching requests to it.
+ */
+async function resolveRouteRules(config) {
+  const headers = await resolveRuleList(config.headers, 'config.headers')
+  const redirects = await resolveRuleList(config.redirects, 'config.redirects')
+  const rewrites = await resolveRewriteRules(config.rewrites)
+  const proxy = proxyDescriptor(config.proxy)
+
+  assertRuleListKeys(headers, 'config.headers')
+  for (const [index, rule] of headers.entries()) {
+    for (const [headerIndex, header] of (Array.isArray(rule?.headers)
+      ? rule.headers
+      : []
+    ).entries()) {
+      assertKnownKeys(
+        header,
+        'config.headers[].headers[]',
+        `config.headers[${index}].headers[${headerIndex}]`,
+      )
+    }
+  }
+  assertRuleListKeys(redirects, 'config.redirects')
+  if (rewrites) {
+    assertKnownKeys(rewrites, 'config.rewrites')
+    for (const phase of ['beforeFiles', 'afterFiles', 'fallback']) {
+      assertRuleListKeys(rewrites[phase], `config.rewrites.${phase}`)
+    }
+  }
+  if (proxy) {
+    assertKnownKeys(config.proxy, 'config.proxy')
+    if (proxy.matcher) assertRuleListKeys(proxy.matcher, 'config.proxy.matcher')
+  }
+
+  // Compile once so an invalid pattern is a config error, not a request error.
+  compileRouteRules({ headers, redirects, rewrites })
+  if (proxy?.matcher) compileMatcher(proxy.matcher)
+
+  return {
+    headers: headers.length > 0 ? headers : undefined,
+    redirects: redirects.length > 0 ? redirects : undefined,
+    rewrites,
+    proxy,
+  }
+}
+
+/** A rule list as written, or the list a function form returns. */
+async function resolveRuleList(value, field) {
+  const resolved = typeof value === 'function' ? await value() : value
+  if (resolved === undefined) return []
+  if (!Array.isArray(resolved)) {
+    throw new Error(`RUV1602 ${field} must be an array or a function returning one.`)
+  }
+  return resolved
+}
+
+/** `rewrites` as written, reduced to its three phases; `undefined` when absent. */
+async function resolveRewriteRules(value) {
+  const resolved = typeof value === 'function' ? await value() : value
+  if (resolved === undefined) return undefined
+  if (!Array.isArray(resolved) && !isObject(resolved)) {
+    throw new Error(
+      'RUV1602 config.rewrites must be an array, a { beforeFiles, afterFiles, fallback } object, or a function returning one.',
+    )
+  }
+  const phases = normalizeRewrites(resolved)
+  for (const phase of ['beforeFiles', 'afterFiles', 'fallback']) {
+    if (!Array.isArray(phases[phase])) {
+      throw new Error(`RUV1602 config.rewrites.${phase} must be an array.`)
+    }
+  }
+  return phases
+}
+
+/** The `proxy` block with its handler reduced to a presence marker. */
+function proxyDescriptor(proxy) {
+  if (proxy === undefined) return undefined
+  if (!isObject(proxy) || typeof proxy.handler !== 'function') {
+    throw new Error('RUV1602 config.proxy must be an object with a handler(request) function.')
+  }
+  const matcher = normalizeMatcher(proxy.matcher)
+  return { ...(matcher ? { matcher } : {}), handler: true }
+}
+
+/**
+ * Walk one rule list: every element and its `has`/`missing` conditions are
+ * checked against the schema entry for that path, with the index in the name
+ * the user is shown.
+ */
+function assertRuleListKeys(rules, schemaPath) {
+  for (const [index, rule] of rules.entries()) {
+    const field = `${schemaPath}[${index}]`
+    assertKnownKeys(rule, `${schemaPath}[]`, field)
+    for (const list of ['has', 'missing']) {
+      const conditions = rule?.[list]
+      if (conditions === undefined) continue
+      if (!Array.isArray(conditions)) {
+        throw new Error(`RUV1602 ${field}.${list} must be an array.`)
+      }
+      for (const [conditionIndex, condition] of conditions.entries()) {
+        assertKnownKeys(
+          condition,
+          `${schemaPath}[].${list}[]`,
+          `${field}.${list}[${conditionIndex}]`,
+        )
+      }
+    }
   }
 }
 
@@ -281,7 +415,6 @@ function securityValue(security) {
   return objectValue(security, {
     actionLimit: numberValue(security?.actionLimit),
     apiLimit: numberValue(security?.apiLimit),
-    pluginLimit: numberValue(security?.pluginLimit),
     actionRateLimit: objectValue(security?.actionRateLimit, {
       max: numberValue(security?.actionRateLimit?.max),
       window: numberValue(security?.actionRateLimit?.window),
@@ -335,15 +468,12 @@ async function writeRuntimeConfigPointer(root, bundleFile, dependencyHash) {
   if (!specifier.startsWith('.')) specifier = `./${specifier}`
   const versioned = JSON.stringify(`${specifier}?v=${dependencyHash}`)
   // `default` stays the Markdown configuration, which is what the compiler has
-  // always imported from here. `plugins` is added beside it so the JavaScript
-  // compiler can run the project's `build.onTransform` hooks: those reached the
-  // Rust bundler alone, so a plugin rewrote the browser bundle while every
-  // server render read the original file, and a rewritten value that landed in
-  // markup made the two documents disagree.
+  // always imported from here; `proxy` travels beside it because its handler is
+  // a function that no JSON rendering can carry.
   const source =
     `import config from ${versioned}\n` +
     `export default config?.markdown\n` +
-    `export const plugins = config?.plugins ?? []\n` +
+    `export const proxy = config?.proxy\n` +
     `export const dependencyHash = ${JSON.stringify(dependencyHash)}\n`
   await mkdir(directory, { recursive: true })
   try {
@@ -403,7 +533,6 @@ function assertConfigValueShape(config) {
     security: {
       actionLimit: 'number',
       apiLimit: 'number',
-      pluginLimit: 'number',
       actionRateLimit: { max: 'number', window: 'number' },
       sameOrigin: 'boolean',
       fetchMeta: 'boolean',
@@ -421,7 +550,6 @@ function assertConfigValueShape(config) {
     middleware: { workers: 'number', timeoutMs: 'number' },
     adapter: 'object',
     adapterOptions: 'object',
-    plugins: 'array',
   })
   assertSiteShape(config.site)
   assertImageOnDemandShape(config.image?.onDemand)
@@ -896,43 +1024,6 @@ function safeJsonValue(value) {
   } catch {
     return undefined
   }
-}
-
-function pluginDescriptors(value, content) {
-  const names = new Set()
-  const plugins = (Array.isArray(value) ? value : []).map((plugin, index) => {
-    if (!isObject(plugin)) {
-      throw new Error(`RUV1602 config.plugins[${index}] must be an object.`)
-    }
-    if (typeof plugin.name !== 'string' || plugin.name.trim() === '') {
-      throw new Error(`RUV1602 config.plugins[${index}].name must be a non-empty string.`)
-    }
-    if (typeof plugin.register !== 'function') {
-      throw new Error(`RUV1602 plugin "${plugin.name}" must provide register(api).`)
-    }
-    const name = plugin.name.trim()
-    if (names.has(name)) {
-      throw new Error(`RUV1602 duplicate plugin name: ${name}`)
-    }
-    names.add(name)
-    // Head entries are declared once and injected by the server on every
-    // render, so they travel with the descriptor instead of through a
-    // per-request hook. `definePlugin` has already validated their shape.
-    const head = Array.isArray(plugin.head) ? plugin.head.filter(isObject) : []
-    return head.length > 0 ? { name, head } : { name }
-  })
-
-  if (contentEngineEnabled(content)) {
-    const name = 'ruvyxa:content-engine'
-    if (names.has(name)) {
-      throw new Error(
-        'RUV1602 content engine is configured twice; use either config.content or contentEngine().',
-      )
-    }
-    plugins.push({ name })
-  }
-
-  return plugins.length > 0 ? plugins : undefined
 }
 
 function contentEngineEnabled(content) {

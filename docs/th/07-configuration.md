@@ -34,8 +34,8 @@ source type ของมัน
 | Image         | `optimize`, `quality`, `lossless`, `keepOriginal`, `variantWidths`, `workers`, `effort`, `onDemand.enabled`, `onDemand.maxWidth` | Default คือ optimize true, quality 82, lossless false, keep-original false, ไม่สร้าง prebuilt variant, worker 0 (จำนวน CPU ที่ใช้ได้) และ effort 4 จึงได้ WebP หนึ่งไฟล์ต่อต้นฉบับ ส่วน on-demand image แบบ object เปิดโดยปริยายและ max width 3840                                                                                                                                                                                                                                                                                               |
 | i18n          | `locales`, `defaultLocale`, `localeParam`, `detectLocale`, `cookie`                                                              | `locales` และ `defaultLocale` จำเป็นเมื่อกำหนด i18n param ปริยาย `lang`, detection true, cookie `RUVYXA_LOCALE`                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | Site          | `site.url`, `site.sitemap`, `site.robots`                                                                                        | Sitemap ตั้ง `exclude`, `additionalPaths`, `defaults` และ `entries` ที่เพิ่ม metadata ได้; robots ตั้ง rule, sitemap URL และ host ได้                                                                                                                                                                                                                                                                                                                                                                                                            |
-| Middleware    | `builtin.cors`, `builtin.timing`, `builtin.log`, `builtin.rate`, `builtin.headers`, `workers`, `timeoutMs`                       | CORS มี origins/methods/headers/credentials/maxAge built-in rate ต้องมี `max`, `window`, `key` แบบเลือกได้ plugin worker 1–8; timeout ปริยาย 30,000 ms และสูงสุด 300,000                                                                                                                                                                                                                                                                                                                                                                         |
-| Integration   | `adapter`, `adapterOptions`, `plugins`                                                                                           | `adapter` เก็บ adapter ที่สร้างไว้แล้ว ส่วน `adapterOptions` ใช้ตั้งค่า adapter ที่เลือกด้วยชื่อแทน (ดู [Configuring an adapter selected by name](#configuring-an-adapter-selected-by-name)) การตั้งทั้งสองพร้อมกันเป็น error ส่วน `plugins` เป็น array ของ `RuvyxaPlugin`                                                                                                                                                                                                                                                                       |
+| Middleware    | `builtin.cors`, `builtin.timing`, `builtin.log`, `builtin.rate`, `builtin.headers`, `workers`, `timeoutMs`                       | CORS มี origins/methods/headers/credentials/maxAge built-in rate ต้องมี `max`, `window`, `key` แบบเลือกได้ project worker 1–8; timeout ปริยาย 30,000 ms และสูงสุด 300,000                                                                                                                                                                                                                                                                                                                                                                        |
+| Integration   | `adapter`, `adapterOptions`                                                                                                      | `adapter` เก็บ adapter ที่สร้างไว้แล้ว ส่วน `adapterOptions` ใช้ตั้งค่า adapter ที่เลือกด้วยชื่อแทน (ดู [Configuring an adapter selected by name](#configuring-an-adapter-selected-by-name)) การตั้งทั้งสองพร้อมกันเป็น error                                                                                                                                                                                                                                                                                                                    |
 
 ## Runtime selection
 
@@ -44,7 +44,7 @@ source type ของมัน
 `bun run` หรือ `deno task` เป็นเพียง hint; หากไม่มีให้ตรวจ Node, Bun แล้ว Deno ตามลำดับ `edge` และ
 `static` เป็น build target ไม่ใช่ JavaScript worker host
 
-Deno รัน trusted local project configuration และ plugin พร้อม permission ที่ต้องใช้
+Deno รัน trusted local project configuration พร้อม permission ที่ต้องใช้
 (`deno run -A --no-prompt --node-modules-dir=manual`) อย่าเลือกใช้กับ project code ที่ไม่น่าเชื่อถือ
 
 ## Listening address
@@ -105,7 +105,6 @@ option name ที่รองรับ ให้แทน origin ตัวอ�
 
 ```ts
 import { config } from 'ruvyxa/config'
-import { requireEnv, securityHeaders } from 'ruvyxa/plugins'
 
 export default config({
   site: {
@@ -119,16 +118,19 @@ export default config({
   content: true,
   build: { minify: true, map: false, treeShake: true, split: 'route', prerenderCache: true },
   security: { actionLimit: 1_048_576, apiLimit: 10_485_760, sameOrigin: true, fetchMeta: true },
-  plugins: [
-    requireEnv(['DATABASE_URL', 'RUVYXA_AUTH_SECRET']),
-    securityHeaders({ contentSecurityPolicy: { 'default-src': ["'self'"] } }),
+  headers: [
+    {
+      source: '/:path*',
+      headers: [{ key: 'content-security-policy', value: "default-src 'self'" }],
+    },
   ],
 })
 ```
 
-`requireEnv` validate name ตอนท้าย production build จึงต้องตั้ง required value ใน build environment
-เดียวกัน มันไม่อ่าน secret เข้า browser code CSP มักต้องเพิ่ม source สำหรับ analytics, image, font
-หรือ API; ทดสอบทุก route หลังจำกัด policy
+environment ที่จำเป็นถูกตรวจตรงจุดที่โปรเซสเริ่ม — `register()` ใน `instrumentation.ts` (ดู
+[Observability](14-observability-performance.md#instrumentationts)) — deployment ที่ขาด secret
+จึงล้ม ตอนเริ่มพร้อมชื่อที่ขาด CSP มักต้องการ source เพิ่มสำหรับ analytics, image, font หรือ API
+ให้ทดสอบทุก route หลังทำให้เข้มขึ้น
 
 ```ts
 import { config } from 'ruvyxa/config'
@@ -177,23 +179,24 @@ production client bundle ใช้ร่วมกัน `gfm` เปิดเป
 ใช้ส่งค่าภาษา footnote กับค่าของ bridge อ่านตัวอย่างเต็มและ contract ของ frontmatter/heading ได้ที่
 [Routing และ rendering](04-routing-rendering.md)
 
-## Security, middleware, site และ plugin
+## Security, middleware, site และ route rule
 
 `security.actionLimit` ปริยาย 1,048,576 byte; `security.apiLimit` ปริยาย 10,485,760 byte;
-`security.pluginLimit` ปริยาย 33,554,432 และจำกัดสูงสุด 268,435,456 `security.actionRateLimit`
-ปริยาย 600 request ใน 60 วินาที `trustedProxyIps` รับ IPv4/IPv6 แบบ exact หรือ CIDR range; เฉพาะ
-non-loopback proxy ที่ตั้งค่าเท่านั้นที่ส่ง forwarded client/protocol header ได้
+`security.actionRateLimit` ปริยาย 600 request ใน 60 วินาที `trustedProxyIps` รับ IPv4/IPv6 แบบ exact
+หรือ CIDR range; เฉพาะ non-loopback proxy ที่ตั้งค่าเท่านั้นที่ส่ง forwarded client/protocol header
+ได้
 
-`middleware` มี built-in (`cors`, `timing`, `log`, `rate`, `headers`) และ TypeScript plugin
+`middleware` มี built-in (`cors`, `timing`, `log`, `rate`, `headers`) และค่าของ project worker
 `build.workers` ควรปล่อยไม่ตั้งค่า เมื่อไม่ตั้ง การ bundle route จะปรับตามเครื่อง:
 ค่าที่น้อยกว่าระหว่างจำนวน core (เคารพ `RAYON_NUM_THREADS`) กับจำนวนที่ memory ว่างรองรับได้ การ pin
 ตัวเลขไว้จะจำกัดเครื่องใหญ่ — ค่า 4 ใช้แค่ 4 worker บนเครื่อง 16 core — และ starter template
 ไม่ส่งค่านี้มาแล้ว การตั้งค่าจะลด CPU budget เท่านั้น ส่วนขอบเขต memory ยังบังคับอยู่ ค่าที่ copy
 มาจากโปรเจกต์อื่นจึงทำให้ CI container ที่จำกัด memory ขอเกินที่มีไม่ได้
 
-`workers` (1–8) กับ `timeoutMs` (ปริยาย 30,000, สูงสุด 300,000) `site` ตั้งค่า `sitemap.xml` และ
-`robots.txt` ตอน build; exact app route หรือไฟล์ชื่อเดียวกันใน `public/` จะระงับ core generator
-`plugins` คือ array ของ `RuvyxaPlugin`
+`workers` (1–8) กับ `timeoutMs` (ปริยาย 30,000, สูงสุด 300,000) ซึ่งจำกัด `proxy.handler` บน native
+host `site` ตั้งค่า `sitemap.xml` และ `robots.txt` ตอน build; exact app route หรือไฟล์ชื่อเดียวกันใน
+`public/` จะระงับ core generator `headers`, `redirects`, `rewrites` และ `proxy` ประกาศ request
+pipeline — ดู [Request pipeline](08-request-pipeline.md)
 
 ## Entry ของ sitemap และ robots
 
@@ -224,12 +227,12 @@ non-loopback proxy ที่ตั้งค่าเท่านั้นที�
 `SiteSitemapVideo`, `SiteRobotsConfig`, `SiteRobotsRule` — คือการสะกดตารางนี้แบบที่ type checker
 ตรวจได้ ดู [Public API reference](17-public-api-reference.md)
 
-## สร้าง content artifact โดยไม่ต้องต่อ plugin เอง
+## Content artifact
 
 route Markdown และ MDX ใช้งานได้โดยไม่ต้องตั้ง `content` ให้เปิด `content: true` เฉพาะเมื่อ site
 ต้องการ `/content.json`, `/search-index.json`, `/rss.xml`, `/sitemap.xml` และ `/llms.txt` เพิ่มด้วย
 content engine จะใช้ `site.url`, `site.title`, `site.description` และ `site.language` ร่วมกัน
-จึงไม่ต้อง import plugin หรือกรอกข้อมูล site ซ้ำ
+จึงไม่ต้องกรอกข้อมูล site ซ้ำ
 
 ```ts
 export default config({
@@ -262,8 +265,8 @@ export default config({
 | `llmsPath`               | `"/llms.txt"`          | ดัชนีให้ agent ค้นพบ ใส่ `false` เพื่อปิด                              |
 | `language`               | `site.language`        | ภาษาของ feed เมื่อต่างจาก locale ของ search                            |
 
-plugin `contentEngine(options)` แบบเดิมยังรองรับสำหรับ advanced/programmatic composition แต่ห้าม
-ตั้งทั้งสองรูปแบบใน application เดียวกัน
+ใน `ruvyxa dev` artifact ถูก derive จาก content tree ตอน request หน้าที่แก้จึงสะท้อนโดยไม่ต้อง
+restart; `ruvyxa build` เขียนมันไว้ใต้ `assets/` และทุก production host เสิร์ฟไฟล์เหล่านั้น
 
 ## Environment variable
 
@@ -403,8 +406,7 @@ path เป็น project-relative และ module ถูก compile เข้�
 export ทั้งสองตัวไม่บังคับ: ให้แค่ `read` ตัวเดียวก็ได้ platform ยังเขียนที่เดิมของมันอยู่
 ถ้าไม่ประกาศอะไรเลย ทุก host ทำงานเหมือนเดิมทุกอย่าง
 
-นี่คือ seam เดียวกับที่ Next.js เปิดไว้ในชื่อ `cacheHandler` ใน `next.config.js`
-และมีอยู่ด้วยเหตุผลเดียวกัน — framework เลือก store ที่แอปใช้ร่วมกันแทนแอปไม่ได้
+seam นี้มีอยู่เพราะ framework เลือก store ที่แอปใช้ร่วมกันแทนแอปไม่ได้
 
 `revalidateTag()` เคลียร์ `cache()` ของ process นี้ทันทีเหมือนเดิมทุกอย่าง ถ้า handler export
 `revalidateTag` ด้วย tag ที่ request นั้นสั่งไว้จะถูกส่งให้มัน หลังตอบ response —
@@ -440,8 +442,7 @@ export async function deleteData(keys) {
 การเรียกแบบนั้นล้าง namespace ทั้งหมดของ deployment ซึ่ง prefix อย่างเดียวบอกได้ ทั้งสองค่ามี build
 id ของ deployment นี้ติดมาแล้ว ใช้ได้ตามที่มาเลย
 
-module เดียวกันนี้รองรับ `cache()` ได้ด้วย ซึ่งเป็นอีกครึ่งของสิ่งที่ Next.js วางไว้หลัง
-`cacheHandler`:
+module เดียวกันนี้รองรับ `cache()` ได้ด้วย:
 
 ```js
 export async function readData(key) {
@@ -457,9 +458,9 @@ export async function writeData(key, entry) {
 }
 ```
 
-store ใน memory ของ process ยังตอบก่อนเสมอ — มันคือชั้นที่เร็ว และเป็นที่เดียวกับที่
-`cacheMaxMemorySize` ของ Next.js อยู่ เฉพาะตอน miss ในเครื่องเท่านั้นที่ไปถาม shared store และเฉพาะ
-miss ทั้งสองชั้นเท่านั้นที่ producer จะทำงาน ส่วนการเขียนถูกส่งออกไปโดย request ไม่ต้องรอ
+store ใน memory ของ process ยังตอบก่อนเสมอ — มันคือชั้นที่เร็ว เฉพาะตอน miss
+ในเครื่องเท่านั้นที่ไปถาม shared store และเฉพาะ miss ทั้งสองชั้นเท่านั้นที่ producer จะทำงาน
+ส่วนการเขียนถูกส่งออกไปโดย request ไม่ต้องรอ
 
 store ที่ throw คือ cache ที่ช้าลง ไม่ใช่ request ที่ล้มเหลว: error ถูกรายงาน แล้ว producer ทำงานต่อ
 ถ้าไม่ประกาศเลยไม่มีต้นทุนใดๆ — เส้นทางที่ไม่มี handler ไม่แม้แต่จะสร้าง promise
@@ -479,9 +480,8 @@ export default {
 ที่วางอยู่หน้า store ที่แชร์ คือสิ่งที่ทำให้สอง instance ตอบ key เดียวกันไม่เหมือนกัน
 การปิดมันคือการแลก round trip หนึ่งครั้งกับคำตอบเดียว
 
-Next.js เรียกการตัดสินใจเดียวกันนี้ว่า `cacheMaxMemorySize` และ `0` มีความหมายเดียวกัน
-หน่วยต่างกันโดยตั้งใจ — store นี้นับเป็น entry และไม่มีการนับขนาดที่จะตอบ budget แบบไบต์ได้
-ถ้าไปประมาณเอาก็จะได้ budget ที่ไม่มีใครเชื่อถือได้
+หน่วยเป็น entry โดยตั้งใจ — store นี้ไม่มีการนับขนาดที่จะตอบ budget แบบไบต์ได้ ถ้าไปประมาณเอาก็จะได้
+budget ที่ไม่มีใครเชื่อถือได้
 
 ค่าที่ไม่ใช่จำนวนเต็มของ entry จะถูกรายงานแล้วเมิน: bound ที่ใช้ไม่ได้ต้องไม่กลายเป็น "ไม่มี cache"
 หรือ "ไม่จำกัด" อย่างเงียบๆ ซึ่งเป็นสองทิศทางที่เจ็บ และหน้าตาเหมือน โค้ดที่ทำงานได้ทั้งคู่
@@ -495,8 +495,8 @@ export default {
 ```
 
 `maxEntries` คุมว่าเก็บกี่ค่า แต่ไม่ได้บอกว่าแต่ละค่าใหญ่แค่ไหน หนึ่งพัน entry
-ที่ค่าละสิบเมกะไบต์คือสิบกิกะไบต์ `maxBytes` ค่าเริ่มต้นห้าสิบเมกะไบต์ — เท่ากับที่ Next.js ตั้ง
-`cacheMaxMemorySize` ไว้ — แล้ว evict ตัวที่ใช้ล่าสุด นานที่สุดจนกว่าจะพอดี
+ที่ค่าละสิบเมกะไบต์คือสิบกิกะไบต์ `maxBytes` ค่าเริ่มต้นห้าสิบเมกะไบต์ แล้ว evict ตัวที่ใช้ล่าสุด
+นานที่สุดจนกว่าจะพอดี
 
 แต่ละค่าถูกชั่งจากความยาวหลัง serialize เป็นการประมาณ และเป็นตัวที่มีให้ใช้จริง: ทุกค่าที่ถูก cache
 ผ่าน `assertCacheSerializable` มาแล้ว จึงชั่งแบบนี้ได้เสมอ
@@ -523,4 +523,4 @@ export default {
   `cache('user:1')` ทับกันและอ่านคำตอบของอีกฝั่ง handler ของคุณจะได้รับ key ที่เติม prefix แล้ว
 
 **ก่อนหน้า:** [UI, navigation, metadata และ asset](06-ui-navigation-metadata-and-assets.md) ·
-**ถัดไป:** [Plugin และ middleware](08-plugins-middleware.md)
+**ถัดไป:** [Request pipeline](08-request-pipeline.md)

@@ -26,9 +26,8 @@
 ```ts
 // ruvyxa.config.ts
 import { config } from 'ruvyxa/config'
-import { realtime } from '@ruvyxa/realtime/plugin'
 
-export default config({ plugins: [realtime()] })
+export default config({ realtime: true })
 ```
 
 ```ts
@@ -57,12 +56,11 @@ broadcast queue lagged, allowing the application to refetch authoritative state.
 **Where it runs.** The transport is served by the Axum host and nothing else. A deployment that
 depends on it runs `ruvyxa start` as its process — on Railway, Render, a VM, a container. Every
 adapter, including node, bun, deno, railway, and render, emits a build artifact that speaks plain
-HTTP with no upgrade path, and `ruvyxa build` says so once with `RUV2205`, naming the plugin, the
-capability, and the path that will answer 404 in that deployment. The plugin itself decides nothing
-about deployment: it claims the capability, and the host that serves the socket owns the rule about
-which targets can. Horizontal multi-instance fan-out requires a future external broker adapter and
-is not claimed by this release.
+HTTP with no upgrade path, and `ruvyxa build` says so once with `RUV2205`, naming the config key and
+the path that will answer 404 in that deployment. Horizontal multi-instance fan-out requires a
+future external broker adapter and is not claimed by this release.
 
-`realtime()` exclusively claims the framework-owned `realtime@1` native socket; `collab()` claims
-`presence@1` and serves collaboration rooms at `/__ruvyxa/collab` under the same rule. The main
-package also re-exports both factories; `./plugin` makes the lifecycle entry explicit.
+`realtime` serves the framework-owned socket at `/__ruvyxa/realtime` (`path`, `heartbeatMs`, and
+`capacity` are its options); `collab` serves collaboration rooms at `/__ruvyxa/collab` under the
+same rule. Both are keys of `ruvyxa.config.ts`, typed as `RealtimeConfig` and `CollabConfig`, which
+this package re-exports.

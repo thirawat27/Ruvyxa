@@ -63,20 +63,20 @@ A build artifact runs the same request pipeline as `ruvyxa start`, not a reduced
 | ------------------------------------------------------------------- | --------------- | ----------------- |
 | Page routes and API routes                                          | yes             | yes               |
 | Server actions (`POST /__ruvyxa/action`)                            | yes             | yes               |
-| Plugin `http.onRequest` / `onResponse` / `route`                    | yes             | yes               |
-| `@ruvyxa/auth` (built on plugin HTTP hooks)                         | yes             | yes               |
+| `headers()`, `redirects()`, `rewrites()`, `proxy.handler`           | yes             | yes               |
+| `@ruvyxa/auth` (mounted through `route.ts`)                         | yes             | yes               |
 | On-demand images (`/__ruvyxa/image`)                                | yes             | adapter-dependent |
 | Native realtime and presence                                        | yes             | no                |
 | `security.apiLimit`, `security.headers`, `security.trustedProxyIps` | yes             | yes               |
 
-Server actions and plugin HTTP hooks are compiled into the function artifact from `ruvyxa.config`,
-so a project using either needs no extra configuration to deploy. Realtime and presence need a
-socket upgrade that no build artifact can perform; `ruvyxa build` prints `RUV2205` naming the
-endpoint that will be missing, and `ruvyxa check` reports the same under its capability parity rows.
-Serve those projects with `ruvyxa start`.
+Server actions and `proxy.handler` are compiled into the function artifact from `ruvyxa.config`, so
+a project using either needs no extra configuration to deploy. Realtime and presence need a socket
+upgrade that no build artifact can perform; `ruvyxa build` prints `RUV2205` naming the endpoint that
+will be missing, and `ruvyxa check` reports the same under its capability parity rows. Serve those
+projects with `ruvyxa start`.
 
 Selecting an adapter that cannot serve something the project uses fails the build rather than
-deploying a site that answers 404: a static adapter with a server action or a plugin HTTP route
+deploying a site that answers 404: a static adapter with a server action or a `proxy.handler`
 reports `RUV2204`.
 
 ## The build output is a contract

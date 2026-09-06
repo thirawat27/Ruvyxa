@@ -2,16 +2,15 @@ import type {
   AuthOptions,
   AuthProvider,
   AuthResult,
+  AuthRouteHandlers,
   AuthRuntime,
   AuthSession,
   AuthUser,
   OAuthProvider,
   OAuthTokenSet,
 } from './types.js'
-import { createAuthPlugin } from './plugin.js'
 
 export * from './providers.js'
-export * from './plugin.js'
 export * from './stores.js'
 export type * from './types.js'
 
@@ -29,30 +28,42 @@ const RESERVED_OAUTH_PARAMETERS = new Set([
   'code_challenge_method',
 ])
 
-/** Create an isolated auth runtime, its direct Request handler, and its Ruvyxa plugin. */
+/**
+ * Create an isolated auth runtime: its direct Request handler, the route
+ * handlers that mount it, and the session helpers.
+ *
+ * The endpoints are served by an `app/<basePath>/[...path]/route.ts` that
+ * re-exports `auth.handlers` — the same file on every host, `ruvyxa dev`/`start`
+ * and every deployed build alike. `auth.handle(request)` is the same dispatch
+ * for an application that mounts the endpoints itself.
+ *
+ * A production process refuses development stores here, at construction,
+ * rather than in a build hook: the process that would serve sessions out of
+ * its own memory is the one that must not start.
+ */
 export function createAuth(options: AuthOptions): AuthRuntime {
   const settings = normalizeOptions(options)
+  if (
+    process.env.NODE_ENV === 'production' &&
+    (!settings.store.durable || !settings.rateLimitStore.durable)
+  ) {
+    throw new AuthError(
+      'RUV3105',
+      'production auth requires durable session/token and rate-limit stores',
+      500,
+    )
+  }
   // `basePath` is fixed for the lifetime of the runtime, so the OAuth route
   // pattern is compiled once here rather than on every request that reaches
   // the auth handler.
   const oauthPathPattern = new RegExp(
     `^${escapeRegex(settings.basePath)}/oauth/([^/]+)/(start|callback)$`,
   )
-  const plugin = createAuthPlugin({
-    basePath: settings.basePath,
-    handle,
-    validateBuild(manifest) {
-      if (manifest.profile === 'production') {
-        if (!settings.store.durable || !settings.rateLimitStore.durable) {
-          throw new AuthError(
-            'RUV3105',
-            'production auth requires durable session/token and rate-limit stores',
-            500,
-          )
-        }
-      }
-    },
-  })
+
+  async function routeHandler({ request }: { request: Request }): Promise<Response> {
+    return (await handle(request)) ?? new Response('Auth route not found', { status: 404 })
+  }
+  const handlers: AuthRouteHandlers = Object.freeze({ GET: routeHandler, POST: routeHandler })
 
   async function handle(request: Request): Promise<Response | undefined> {
     try {
@@ -164,7 +175,14 @@ export function createAuth(options: AuthOptions): AuthRuntime {
     return new Headers({ 'set-cookie': deleteCookie(settings) })
   }
 
-  return Object.freeze({ plugin, basePath: settings.basePath, handle, login, getSession, logout })
+  return Object.freeze({
+    basePath: settings.basePath,
+    handle,
+    handlers,
+    login,
+    getSession,
+    logout,
+  })
 }
 
 type NormalizedOptions = ReturnType<typeof normalizeOptions>

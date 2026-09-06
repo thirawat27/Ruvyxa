@@ -5,9 +5,9 @@
 > แล้วจึงไปบท 2
 
 Ruvyxa ออกแบบมาสำหรับ React application ที่ต้องการ file-system route, server rendering, static
-output, server action, API route, plugin และ native build/dev pipeline โดยยังควบคุม deployment
-target ได้ชัดเจน npm entry point แบบ public คือ `ruvyxa`; React helper อยู่ใน `@ruvyxa/react`;
-framework primitive อยู่ใน `@ruvyxa/core` และถูก re-export จาก `ruvyxa`.
+output, server action, API route, request pipeline ที่ประกาศใน config และ native build/dev pipeline
+โดยยังควบคุม deployment target ได้ชัดเจน npm entry point แบบ public คือ `ruvyxa`; React helper
+อยู่ใน `@ruvyxa/react`; framework primitive อยู่ใน `@ruvyxa/core` และถูก re-export จาก `ruvyxa`.
 
 ## สิ่งที่มี implementation อยู่จริง
 
@@ -50,8 +50,7 @@ application directory (โดยทั่วไปคือ `app/`)
 
 > **ขอบเขต:** framework รองรับ runtime option `node`, `bun` และ `deno` ใน CLI/config Node ยังคงเป็น
 > package prerequisite ที่ประกาศไว้; ติดตั้ง Bun หรือ Deno เฉพาะเมื่อเลือก runtime นั้น Deno local
-> tooling จะรัน trusted project configuration และ plugin พร้อม permission ที่ต้องใช้
-> (`-A --no-prompt`)
+> tooling จะรัน trusted project configuration พร้อม permission ที่ต้องใช้ (`-A --no-prompt`)
 
 ## ผลลัพธ์ขั้นต่ำ
 

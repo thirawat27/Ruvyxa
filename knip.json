@@ -9,7 +9,7 @@
       "entry": ["runtime/*.mjs"]
     },
     "examples/demo": {
-      "entry": ["ruvyxa.config.ts", "instrumentation.ts", "app/**/*.{ts,tsx}", "plugins/**/*.ts"],
+      "entry": ["ruvyxa.config.ts", "instrumentation.ts", "app/**/*.{ts,tsx}"],
       "project": ["**/*.{ts,tsx}"]
     },
     "examples/deploy-smoke": {

@@ -8,7 +8,7 @@ import type {
 } from './types.js'
 
 export * from './adapters.js'
-export * from './plugin.js'
+export * from './env.js'
 export type * from './types.js'
 
 /** Create a typed database facade over one production adapter. */

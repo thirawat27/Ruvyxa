@@ -5,8 +5,8 @@
     "Three implementations decide whether a request is provably same-origin: the",
     "native server in crates/ruvyxa_dev_server/src/action_security.rs, the shared",
     "JavaScript module packages/@ruvyxa/core/src/origin-policy.ts (read by the",
-    "action endpoint through its generated runtime copy and by the originGuard",
-    "plugin), and any future host. They used to be kept in step by a comment",
+    "action endpoint through its generated runtime copy), and any future host.",
+    "They used to be kept in step by a comment",
     "saying they mirrored each other, which is the arrangement that let",
     "STATIC_CONTENT_TYPES and DEFAULT_SECURITY_HEADERS drift apart.",
     "",
@@ -14,8 +14,8 @@
     "it is the one step the callers legitimately disagree about. The native host",
     "supplies a scheme only when the transport peer is in security.trustedProxyIps;",
     "a deployed function is reachable only through its platform ingress and reads",
-    "X-Forwarded-Proto as stated; the plugin has no trust policy and always",
-    "supplies null. Everything after that decision must be identical."
+    "X-Forwarded-Proto as stated. Everything after that decision must be",
+    "identical."
   ],
   "cases": [
     {

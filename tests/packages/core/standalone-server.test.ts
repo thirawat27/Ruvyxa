@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, it } from 'node:test'
@@ -345,7 +345,14 @@ describe('the ISR temporary cache has one derivation', () => {
     )
       .split('\n')
       .map((file) => file.trim())
-      .filter((file) => file && !file.includes('node_modules/') && !file.startsWith('tests/'))
+      // Deleted in the working tree but not yet staged is still listed.
+      .filter(
+        (file) =>
+          file &&
+          !file.includes('node_modules/') &&
+          !file.startsWith('tests/') &&
+          existsSync(repoPath(file)),
+      )
 
     const declarations = tracked.filter((file) => {
       const source = readFileSync(repoPath(file), 'utf8')

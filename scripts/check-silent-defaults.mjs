@@ -29,6 +29,7 @@
 // A site that genuinely wants a default is allowed below, with the reason
 // written out. An allowlist entry that stops matching is itself a failure: a
 // reason nothing stands behind is how a list like this rots.
+import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { execFileSync } from 'node:child_process'
 import path from 'node:path'
@@ -351,6 +352,9 @@ const tracked = execFileSync('git', ['ls-files', 'crates/**/*.rs'], {
 })
   .split('\n')
   .filter(Boolean)
+  // `--cached` also lists a file deleted in the working tree and not yet
+  // staged, which reads as ENOENT here; a gate is about the tree as it is.
+  .filter((file) => existsSync(path.join(REPO_ROOT, file)))
   // Test code may fabricate freely: it is asserting on values it wrote itself.
   .filter((file) => !file.includes('/tests/') && !/tests(_visual)?\.rs$/.test(file))
 
@@ -442,6 +446,9 @@ const jsTracked = execFileSync(
   .split('\n')
   .map((file) => file.trim())
   .filter(Boolean)
+  // `--cached` also lists a file deleted in the working tree and not yet
+  // staged, which reads as ENOENT here; a gate is about the tree as it is.
+  .filter((file) => existsSync(path.join(REPO_ROOT, file)))
   // Build output and test code are both out of scope, for the reasons the Rust
   // pass gives: one is generated, the other asserts on values it wrote itself.
   .filter(

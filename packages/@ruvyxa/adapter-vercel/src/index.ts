@@ -91,7 +91,7 @@ function vercelHandlerSource(
   buildId: string,
 ): string {
   return `import { createHandler, prerenderRelativePath } from './serverless-handler.mjs';
-import { applyPluginHttp, documentCacheHandler, loadActionModule, loadRouteModule } from './route-modules.mjs';
+import { projectProxy, documentCacheHandler, loadActionModule, loadRouteModule } from './route-modules.mjs';
 // Imported, not read from disk: a platform that re-bundles the function only
 // carries files it can resolve statically (see the netlify adapter, where a
 // readFileSync of a sibling manifest.json crashed the deployed function).
@@ -147,13 +147,16 @@ ${platformDocumentStoreSource({ onForcedWrite: 'revalidateOnVercel' })}
 const handler = createHandler({
   routes: manifest.routes,
   middleware: runtimePolicy.middleware,
+  headers: runtimePolicy.headers,
+  redirects: runtimePolicy.redirects,
+  rewrites: runtimePolicy.rewrites,
   i18n: manifest.i18n,
   optimizeImage: runtimePolicy.image?.onDemand === true ? optimizeImage : undefined,
   imageQuality: runtimePolicy.image?.quality,
   importPage: loadRouteModule,
   importApi: loadRouteModule,
   importAction: loadActionModule,
-  pluginHttp: applyPluginHttp,
+  proxy: projectProxy,
   security: runtimePolicy.security,
 ${documentCacheOptionsSource('platformReadPrerendered', 'platformWritePrerendered')}
   // The project's own not-found page, pre-rendered by the build and carried
@@ -245,7 +248,7 @@ async function serve(req, res, context, url) {
 /** Vercel Edge entry point: Request -> Response with no Node.js imports. */
 function vercelEdgeHandlerSource(runtimePolicy: unknown, imageSizes: readonly number[]): string {
   return `import { createHandler } from './serverless-handler.mjs';
-import { applyPluginHttp, loadActionModule, loadRouteModule } from './route-modules.mjs';
+import { projectProxy, loadActionModule, loadRouteModule } from './route-modules.mjs';
 import manifest from './manifest.mjs';
 
 const runtimePolicy = ${JSON.stringify(runtimePolicy ?? {})};
@@ -255,9 +258,12 @@ const handler = createHandler({
   importPage: loadRouteModule,
   importApi: loadRouteModule,
   importAction: loadActionModule,
-  pluginHttp: applyPluginHttp,
+  proxy: projectProxy,
   security: runtimePolicy.security,
   middleware: runtimePolicy.middleware,
+  headers: runtimePolicy.headers,
+  redirects: runtimePolicy.redirects,
+  rewrites: runtimePolicy.rewrites,
   i18n: manifest.i18n,
   optimizeImage: runtimePolicy.image?.onDemand === true ? optimizeImage : undefined,
   imageQuality: runtimePolicy.image?.quality,

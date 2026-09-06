@@ -10,7 +10,6 @@ import {
   type AuthUser,
   type OAuthProvider,
 } from '../../../packages/@ruvyxa/auth/dist/index.js'
-import { createAuthPlugin } from '../../../packages/@ruvyxa/auth/dist/plugin.js'
 
 const origin = 'https://app.example.com'
 const secret = 'test-secret-that-is-at-least-thirty-two-characters'
@@ -779,42 +778,30 @@ describe('@ruvyxa/auth', () => {
     )
   })
 
-  it('refuses development stores in production plugin builds', async () => {
-    const auth = runtime()
-    let hook: ((context: unknown) => void | Promise<void>) | undefined
-    await auth.plugin.register({
-      environment: 'production',
-      http: { onRequest() {}, onResponse() {}, route() {} },
-      build: {
-        onStart() {},
-        onResolve() {},
-        onLoad() {},
-        onTransform() {},
-        onComplete(value) {
-          hook = value as typeof hook
-        },
-      },
-      dev: { onFileChange() {} },
-      diagnostics: { report() {} },
-      native: { claim() {} },
-    })
-    await assert.rejects(
-      async () => hook?.({ manifest: { profile: 'production' } }),
-      /RUV3105|production auth requires durable/,
-    )
+  it('refuses development stores in a production process', () => {
+    const previous = process.env.NODE_ENV
+    process.env.NODE_ENV = 'production'
+    try {
+      assert.throws(() => runtime(), /RUV3105|production auth requires durable/)
+    } finally {
+      if (previous === undefined) delete process.env.NODE_ENV
+      else process.env.NODE_ENV = previous
+    }
     assert.throws(() => memoryAuthStore({} as never), /development: true/)
   })
 
-  it('exposes the explicit plugin integration entry', () => {
-    const plugin = createAuthPlugin({
-      basePath: '/auth',
-      async handle() {
-        return undefined
-      },
-      validateBuild() {},
+  it('mounts through route handlers that answer 404 off the auth surface', async () => {
+    const auth = runtime()
+    assert.equal(typeof auth.handlers.GET, 'function')
+    assert.equal(auth.handlers.POST, auth.handlers.GET)
+    const session = await auth.handlers.GET({
+      request: new Request(`${origin}/__ruvyxa/auth/session`),
     })
-
-    assert.equal(plugin.name, 'ruvyxa:auth')
+    assert.equal(session.status, 200)
+    const unknown = await auth.handlers.GET({
+      request: new Request(`${origin}/__ruvyxa/auth/does-not-exist`),
+    })
+    assert.equal(unknown.status, 404)
   })
 
   it('keeps token keys bound to their own secret across runtimes', async () => {

@@ -42,7 +42,7 @@ route shape:
 - Import `.scss` or `.sass` directly when Sass is useful. Use `.module.css`, `.module.scss`, or
   `.module.sass` when styles should expose a locally scoped class map to a component.
 - Runtime CSS-in-JS through React `style` objects and `<style>` elements is supported. Libraries
-  that require compile-time transforms should be wired through a transform plugin.
+  that require compile-time transforms are not supported.
 - Do not commit `.env`, `.ruvyxa/`, `dist/`, `node_modules/`, or other generated output.
 
 ## Commands
@@ -65,7 +65,6 @@ npm run clean       # ruvyxa clean
 npm run trace -- /  # ruvyxa trace /
 npm run bench       # ruvyxa bench
 npm run test:parity # ruvyxa test:parity
-npm run plugin -- create my-plugin # ruvyxa plugin create my-plugin
 ```
 
 ## Checks

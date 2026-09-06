@@ -3,7 +3,7 @@
 //! Every place Ruvyxa shells out to a JavaScript runtime or a project-local
 //! tool used to call [`std::process::Command::output`], which waits forever. A
 //! child that keeps its event loop alive — an unawaited handle, a listening
-//! socket, a stray `setInterval` in a config file or a plugin — therefore hung
+//! socket, a stray `setInterval` in a config file — therefore hung
 //! the CLI with no output and no way out but killing it, and a `SIGKILL` or a
 //! panic on the Rust side left the child orphaned because
 //! [`std::process::Child`] does not terminate on drop.
@@ -11,7 +11,7 @@
 //! [`output_with_timeout`] closes both holes: the wait is bounded, and the
 //! child is killed and reaped before the call returns on every path out.
 //!
-//! The async paths do not use this module — the worker pool and the plugin
+//! The async paths do not use this module — the worker pool and the project
 //! middleware host have `tokio::time::timeout` and `kill_on_drop(true)` for the
 //! same purpose. This is the synchronous half of that same rule.
 

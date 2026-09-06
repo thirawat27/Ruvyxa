@@ -22,7 +22,6 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use ruvyxa_diagnostics::{Result, RuvyxaError};
 #[cfg(test)]
 use ruvyxa_graph::discover_routes;
-use ruvyxa_middleware::PluginHost;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
 
@@ -40,7 +39,6 @@ pub(crate) struct WatcherRuntime {
     pub(crate) worker_pool: Arc<NodeWorkerPool>,
     pub(crate) render_cache: Arc<RenderCache>,
     pub(crate) hmr_tracker: Arc<HmrTracker>,
-    pub(crate) plugin_runtime: Option<Arc<PluginHost>>,
     pub(crate) edit_traces: Arc<trace::TraceStore>,
     pub(crate) tokio_handle: tokio::runtime::Handle,
 }
@@ -67,7 +65,6 @@ struct WatchBatchContext {
     worker_pool: Arc<NodeWorkerPool>,
     render_cache: Arc<RenderCache>,
     hmr_tracker: Arc<HmrTracker>,
-    plugin_runtime: Option<Arc<PluginHost>>,
     edit_traces: Arc<trace::TraceStore>,
     tokio_handle: tokio::runtime::Handle,
     root: PathBuf,
@@ -86,7 +83,6 @@ pub(crate) fn start_watcher(
         worker_pool,
         render_cache,
         hmr_tracker,
-        plugin_runtime,
         edit_traces,
         tokio_handle,
     } = runtime;
@@ -98,7 +94,6 @@ pub(crate) fn start_watcher(
         worker_pool,
         render_cache,
         hmr_tracker,
-        plugin_runtime,
         edit_traces,
         tokio_handle,
         root: root.to_path_buf(),
@@ -281,7 +276,6 @@ fn handle_watch_batch(context: &WatchBatchContext, paths: Vec<PathBuf>) {
         worker_pool,
         render_cache,
         hmr_tracker,
-        plugin_runtime,
         edit_traces,
         tokio_handle,
         root,
@@ -378,15 +372,6 @@ fn handle_watch_batch(context: &WatchBatchContext, paths: Vec<PathBuf>) {
     if worker_result.as_ref().is_some_and(|result| result.is_err()) {
         hmr_update.full_reload = true;
         hmr_update.event_type = HmrEventType::FullReload;
-    }
-
-    if let Some(plugin_runtime) = plugin_runtime.clone() {
-        let plugin_paths = plugin_watch_paths(root, &paths);
-        tokio_handle.spawn(async move {
-            if let Err(error) = plugin_runtime.notify_file_change(&plugin_paths).await {
-                warn!(%error, "plugin dev.fileChange hook failed");
-            }
-        });
     }
 
     if instrumentation_changed {
@@ -745,15 +730,6 @@ fn instrumentation_source_changed(roots: &WatchRoots, paths: &[PathBuf]) -> bool
         absolute.parent().map(canonicalized).as_deref() == Some(root.as_path())
     })
 }
-
-fn plugin_watch_paths(root: &Path, paths: &[PathBuf]) -> Vec<String> {
-    paths
-        .iter()
-        .map(|path| path.strip_prefix(root).unwrap_or(path))
-        .map(|path| path.display().to_string().replace('\\', "/"))
-        .collect()
-}
-
 pub(crate) fn format_update_elapsed(elapsed: Duration) -> String {
     if elapsed >= Duration::from_millis(1) {
         return format!("{}ms", elapsed.as_millis());
@@ -1249,17 +1225,6 @@ mod tests {
             &roots,
             &[root.join("instrumentation.ts.bak")]
         ));
-    }
-
-    #[test]
-    fn plugin_file_change_paths_are_project_relative_and_portable() {
-        let root = PathBuf::from("C:/workspace/app");
-        let paths = vec![root.join("content/guide.md"), root.join("app/page.tsx")];
-
-        assert_eq!(
-            plugin_watch_paths(&root, &paths),
-            vec!["content/guide.md", "app/page.tsx"]
-        );
     }
 
     #[test]

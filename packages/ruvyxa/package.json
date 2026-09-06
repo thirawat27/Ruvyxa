@@ -31,13 +31,13 @@
     "runtime/origin-policy.mjs",
     "runtime/package-exports.mjs",
     "runtime/paths.mjs",
-    "runtime/plugin-http.mjs",
-    "runtime/plugin-registration.mjs",
-    "runtime/plugin-runtime.mjs",
+    "runtime/project-worker.mjs",
     "runtime/react-compiler.mjs",
     "runtime/request-context.mjs",
     "runtime/route-intercepts.mjs",
     "runtime/route-match.mjs",
+    "runtime/route-rules.mjs",
+    "runtime/framework-paths.mjs",
     "runtime/rsc-client-install.mjs",
     "runtime/rsc-client-runtime.mjs",
     "runtime/scanner.mjs",
@@ -129,17 +129,9 @@
       "types": "./types/config.d.ts",
       "default": "./dist/config.js"
     },
-    "./plugin": {
-      "types": "./types/plugin.d.ts",
-      "default": "./dist/plugin.js"
-    },
-    "./plugins": {
-      "types": "./types/plugins.d.ts",
-      "default": "./dist/plugins.js"
-    },
-    "./plugin-harness": {
-      "types": "./types/plugin-harness.d.ts",
-      "default": "./dist/plugin-harness.js"
+    "./content-engine": {
+      "types": "./types/content-engine.d.ts",
+      "default": "./dist/content-engine/index.js"
     }
   },
   "dependencies": {

@@ -290,7 +290,7 @@ mod tests {
 
         for case in fixture["canonical"].as_array().expect("canonical cases") {
             let input = case["input"].as_str().expect("canonical input");
-            let actual = crate::plugin_bridge::canonical_request_path(input).ok();
+            let actual = crate::worker_bridge::canonical_request_path(input).ok();
             let expected = case["output"].as_str().map(str::to_string);
             assert_eq!(actual, expected, "canonical form of {input}");
         }

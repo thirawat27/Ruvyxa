@@ -32,9 +32,8 @@ secret storage, upstream network controls, and infrastructure policy remain your
   by the caller. Behind nginx, Traefik, Cloudflare, or any other proxy, name it in
   `security.trustedProxyIps`: without that the rightmost hop is the proxy itself and every client
   shares one bucket.
-- The first-party `redirects` plugin validates destinations against unsafe scheme-relative,
-  backslash, and invalid-origin forms. `securityHeaders` validates CSP directive maps and defaults
-  HSTS.
+- `redirects()` validates destinations at config time: an absolute URL must be `http(s)`, and a
+  relative one must be an absolute application path.
 - Auth code defines a signed/session/provider runtime and rate-limit store contracts and ships Redis
   implementations of both; choosing the store and deployment-specific cookie/origin decisions are
   application work.
@@ -52,17 +51,19 @@ secret storage, upstream network controls, and infrastructure policy remain your
   value — an unset `methods` or `headers` sends no `Access-Control-Allow-Methods` or
   `Access-Control-Allow-Headers`, so a cross-origin request using anything beyond a simple method is
   blocked until you name it. Credentials alongside `origins: ['*']` are refused outright.
-- Use route-scoped CSP, frame, referrer, COOP/COEP/CORP, and permissions policies via
-  `securityHeaders` after verifying required assets.
+- Use route-scoped CSP, frame, referrer, COOP/COEP/CORP, and permissions policies via `headers()`
+  after verifying required assets.
 - Keep structured logs free of tokens, cookies, authorization headers, request bodies, and personal
-  data. The observability plugin logs method/path/status/timing, not a general redaction solution.
+  data. The built-in request log records method/path/status/timing, not a general redaction
+  solution.
 
 ## Infrastructure checklist
 
 Terminate TLS, restrict inbound network access, set process memory/time limits, patch
 Node/Rust/dependencies, and provide a secret manager. Place only known proxy addresses/CIDRs in
 `trustedProxyIps`. Test authentication redirects with production origins. Cross-site protection for
-route handlers is the `originGuard` plugin and is opt-in per route scope; general rate limiting is
+route handlers is a `proxy.handler` on the routes that mutate state (see
+[Request pipeline](08-request-pipeline.md#guarding-route-handlers)); general rate limiting is
 `middleware.builtin.rate` and is off until configured. No codebase evidence establishes malware
 scanning, WAF, or automatic dependency-vulnerability remediation; add those controls where your
 threat model needs them.

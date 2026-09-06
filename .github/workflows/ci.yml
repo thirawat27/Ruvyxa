@@ -245,10 +245,10 @@ jobs:
       # The same emitted server, asked what the *application* carries.
       #
       # Every lane above deploys `examples/deploy-smoke` — five routes, no
-      # plugins — so the whole plugin lane, three of the five render strategies,
-      # and a streamed document were deployed by nobody and asked by nothing. A
-      # response hook that turned every 204 into a 500 lived in that gap, and so
-      # did a deployed build that buffered every render instead of streaming it.
+      # route rules — so the config-declared request pipeline, three of the five
+      # render strategies, and a streamed document were deployed by nobody and
+      # asked by nothing. A deployed build that buffered every render instead of
+      # streaming it lived in that gap.
       - name: Deploy and probe the feature fixture
         timeout-minutes: 20
         shell: bash

@@ -30,7 +30,6 @@ handler การเรียกที่ระดับ module scope หรื�
 | `params`                                        | `ruvyxa/server`               | route parameter ของหน้าที่กำลัง render อ่านได้จากใต้ component ที่รับ props มาแล้ว                                                                                                                          |
 | `revalidatePath`                                | `ruvyxa/server`               | `(path: string) => void`; คิว URL จริงหนึ่งอันให้ render ใหม่ในคำขอถัดไป                                                                                                                                    |
 | `FlightContext`, `FlightHandler`, `FlightValue` | `ruvyxa/server`               | type สำหรับ route export `flight` แบบ public และ payload ที่มันคืน                                                                                                                                          |
-| `definePlugin`, `withResponseHeader`            | `ruvyxa/plugin` หรือ `ruvyxa` | plugin definition และ response-header helper                                                                                                                                                                |
 | `standaloneServerSource`                        | `ruvyxa`                      | source generator สำหรับ standalone server artifact                                                                                                                                                          |
 
 "ทั้งสอง" หมายถึงชื่อนั้น re-export ทั้งจาก `ruvyxa` และ `ruvyxa/server` ในโมดูลที่รันฝั่ง server
@@ -55,8 +54,9 @@ type มี `RuvyxaConfig`, `PageProps`, `GetStaticParams`, `RenderStrategy`, `A
 คือ `SiteSitemapConfig`, `SiteSitemapEntry`, `SiteSitemapEntryDefaults`, `SiteSitemapVideo`,
 `SiteRobotsConfig` และ `SiteRobotsRule`, subtype ของ content คือ `ContentConfig` และ
 `ContentEngineConfig`, type ของ deploy manifest คือ `DeployManifest`, `DeployRoute` และ
-`DeployServeMode` และ plugin contract ใช้ import จาก `ruvyxa` สำหรับ public primitive และ
-`ruvyxa/config` หรือ `ruvyxa/plugin` เพื่อสื่อ intent ชัดเจน
+`DeployServeMode` และ type ของ route rule คือ `HeaderRule`, `RedirectRule`, `RewriteRule`,
+`RewritePhases`, `ProxyConfig`, `RealtimeConfig` และ `CollabConfig` ใช้ import จาก `ruvyxa` สำหรับ
+public primitive และ `ruvyxa/config` เพื่อสื่อ intent ชัดเจน
 
 ## `@ruvyxa/react`
 
@@ -106,13 +106,13 @@ resolve route นอก React tree เช่น custom server หรือ adapt
 
 ## Public package อื่น
 
-| Package             | Integration ที่ export                                                                                                                          |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@ruvyxa/auth`      | `createAuth`, provider, store, client/plugin entry point, auth type/error และ `forwardedClientIp(request)` สำหรับ rate limit หลัง trusted proxy |
-| `@ruvyxa/database`  | `createDatabase`, operation/type, `prismaAdapter`, `dynamoAdapter`, `defineDatabaseAdapter`                                                     |
-| `@ruvyxa/realtime`  | plugin entry point; client export `createRealtimeClient`                                                                                        |
-| `@ruvyxa/testing`   | `mockLoader`, `mockAction`, `mockCache`                                                                                                         |
-| `@ruvyxa/adapter-*` | typed build adapter package                                                                                                                     |
+| Package             | Integration ที่ export                                                                                                                |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `@ruvyxa/auth`      | `createAuth` (มี `handlers` สำหรับ `route.ts`), provider, store, client entry point, auth type/error และ `forwardedClientIp(request)` |
+| `@ruvyxa/database`  | `createDatabase`, `requireDatabaseEnv`, operation/type, `prismaAdapter`, `dynamoAdapter`, `defineDatabaseAdapter`                     |
+| `@ruvyxa/realtime`  | type `RealtimeConfig`/`CollabConfig`; `client` export `createRealtimeClient`, `collab` และ `react` คือ room client                    |
+| `@ruvyxa/testing`   | `mockLoader`, `mockAction`, `mockCache`                                                                                               |
+| `@ruvyxa/adapter-*` | typed build adapter package                                                                                                           |
 
 สำหรับ option/default detail ให้ดู [Configuration](07-configuration.md) และ exported TypeScript
 declaration ใน package ที่ติดตั้ง ชื่อ public API ที่แสดงถูกยืนยันจาก source; runtime name

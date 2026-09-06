@@ -85,8 +85,7 @@ for (const dir of crateDirs) {
 }
 
 // Update framework dependencies in every source starter template. The
-// create-ruvyxa package copies application templates during prepack, while
-// the CLI embeds templates/plugin when it scaffolds a plugin package.
+// create-ruvyxa package copies application templates during prepack.
 const templateDirs = readdirSync('templates')
   .map((name) => `templates/${name}`)
   .filter((dir) => statSync(dir).isDirectory())

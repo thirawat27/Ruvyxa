@@ -238,11 +238,7 @@ export const auth = createAuth({
         relative: "__ruvyxa/auth/[...path]/route.ts",
         content: r#"import { auth } from '../../../_server/auth.js'
 
-async function handle({ request }: { request: Request }) {
-  return (await auth.handle(request)) ?? new Response('Auth route not found', { status: 404 })
-}
-
-export { handle as GET, handle as POST }
+export const { GET, POST } = auth.handlers
 "#,
     },
     ScaffoldFile {

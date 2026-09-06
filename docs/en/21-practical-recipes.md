@@ -159,25 +159,27 @@ can create WebP variants for local PNG/JPEG assets.
 ```ts
 // ruvyxa.config.ts
 import { config } from 'ruvyxa/config'
-import { cacheRules, headers, securityHeaders } from 'ruvyxa/plugins'
 
 export default config({
-  plugins: [
-    headers([{ source: '/api/*', headers: { 'x-content-type-options': 'nosniff' } }]),
-    cacheRules([
-      { source: '/assets/*', browser: 'public, max-age=3600', cdn: 'public, max-age=86400' },
-    ]),
-    securityHeaders({
-      routes: ['/admin/*'],
-      contentSecurityPolicy: { 'default-src': ["'self'"] },
-      frameOptions: 'DENY',
-    }),
+  headers: [
+    { source: '/api/:path*', headers: [{ key: 'x-content-type-options', value: 'nosniff' }] },
+    {
+      source: '/assets/:path*',
+      headers: [{ key: 'cache-control', value: 'public, max-age=3600' }],
+    },
+    {
+      source: '/admin/:path*',
+      headers: [
+        { key: 'content-security-policy', value: "default-src 'self'" },
+        { key: 'x-frame-options', value: 'DENY' },
+      ],
+    },
   ],
 })
 ```
 
-Patterns are exact or trailing-star prefixes. Test one matching and one non-matching route; a cache
-rule must set at least browser, CDN, or `vary`.
+Patterns are path-to-regexp sources; see [Request pipeline](08-request-pipeline.md). Test one
+matching and one non-matching route.
 
 ## 7. Test server primitives without a running server
 
@@ -211,21 +213,19 @@ your action/loader contract; they do not replace an HTTP integration test.
 ## 8. Add release controls that fail early
 
 ```ts
-// ruvyxa.config.ts
-import { config } from 'ruvyxa/config'
-import { bundleBudget, requireEnv } from 'ruvyxa/plugins'
+// instrumentation.ts
+import { requireDatabaseEnv } from '@ruvyxa/database'
 
-export default config({
-  build: { minify: true, map: false, split: 'route' },
-  plugins: [
-    requireEnv(['DATABASE_URL', 'RUVYXA_AUTH_SECRET']),
-    bundleBudget({ maxChunkKb: 250, maxTotalKb: 800 }),
-  ],
-})
+export function register() {
+  requireDatabaseEnv(['DATABASE_URL'])
+  for (const name of ['RUVYXA_AUTH_SECRET']) {
+    if (!process.env[name]?.trim()) throw new Error(`${name} is required`)
+  }
+}
 ```
 
-`requireEnv` fails a production build if a named value is absent/empty. `bundleBudget` measures
-final minified client JavaScript. Run the four release commands in
+`register()` runs once per server process before the first request, so a deployment missing a value
+fails at startup with the name listed. Run the four release commands in
 [Release-readiness playbook](19-release-readiness-playbook.md), then choose the artifact from
 [Platform adapter guide](20-platform-adapter-guide.md).
 

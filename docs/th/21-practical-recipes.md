@@ -160,25 +160,27 @@ local PNG/JPEG ได้
 ```ts
 // ruvyxa.config.ts
 import { config } from 'ruvyxa/config'
-import { cacheRules, headers, securityHeaders } from 'ruvyxa/plugins'
 
 export default config({
-  plugins: [
-    headers([{ source: '/api/*', headers: { 'x-content-type-options': 'nosniff' } }]),
-    cacheRules([
-      { source: '/assets/*', browser: 'public, max-age=3600', cdn: 'public, max-age=86400' },
-    ]),
-    securityHeaders({
-      routes: ['/admin/*'],
-      contentSecurityPolicy: { 'default-src': ["'self'"] },
-      frameOptions: 'DENY',
-    }),
+  headers: [
+    { source: '/api/:path*', headers: [{ key: 'x-content-type-options', value: 'nosniff' }] },
+    {
+      source: '/assets/:path*',
+      headers: [{ key: 'cache-control', value: 'public, max-age=3600' }],
+    },
+    {
+      source: '/admin/:path*',
+      headers: [
+        { key: 'content-security-policy', value: "default-src 'self'" },
+        { key: 'x-frame-options', value: 'DENY' },
+      ],
+    },
   ],
 })
 ```
 
-pattern เป็น exact หรือ trailing-star prefix ทดสอบ route ที่ match หนึ่ง route และไม่ match หนึ่ง
-route; cache rule ต้องมีอย่างน้อย browser, CDN หรือ `vary`
+pattern เป็น path-to-regexp source ดู [Request pipeline](08-request-pipeline.md) ทดสอบ route ที่
+match หนึ่ง route และไม่ match หนึ่ง route
 
 ## 7. Test server primitive โดยไม่ต้องรัน server
 
@@ -212,21 +214,19 @@ contract ของคุณ; มันไม่แทน HTTP integration test
 ## 8. เพิ่ม release control ที่ fail เร็ว
 
 ```ts
-// ruvyxa.config.ts
-import { config } from 'ruvyxa/config'
-import { bundleBudget, requireEnv } from 'ruvyxa/plugins'
+// instrumentation.ts
+import { requireDatabaseEnv } from '@ruvyxa/database'
 
-export default config({
-  build: { minify: true, map: false, split: 'route' },
-  plugins: [
-    requireEnv(['DATABASE_URL', 'RUVYXA_AUTH_SECRET']),
-    bundleBudget({ maxChunkKb: 250, maxTotalKb: 800 }),
-  ],
-})
+export function register() {
+  requireDatabaseEnv(['DATABASE_URL'])
+  for (const name of ['RUVYXA_AUTH_SECRET']) {
+    if (!process.env[name]?.trim()) throw new Error(`${name} is required`)
+  }
+}
 ```
 
-`requireEnv` ทำให้ production build ล้มเหลวเมื่อค่าที่ระบุหาย/ว่าง `bundleBudget` วัด final minified
-client JavaScript รัน four release command ใน
+`register()` รันหนึ่งครั้งต่อโปรเซสของเซิร์ฟเวอร์ก่อนคำขอแรก deployment ที่ขาดค่าจึงล้มตอนเริ่มพร้อม
+ชื่อที่ขาด รัน four release command ใน
 [Release-readiness playbook](19-release-readiness-playbook.md) แล้วเลือก artifact จาก
 [คู่มือ platform adapter](20-platform-adapter-guide.md)
 

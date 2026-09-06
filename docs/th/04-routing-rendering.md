@@ -91,14 +91,14 @@ export default function Post({ params }: PageProps<{ slug: string }>) {
 ```
 
 `generateStaticParams` และ `staticParams` ถูกยอมรับเป็นชื่อของ export เดียวกัน page ที่ย้ายมาจาก
-Next.js จึงประกาศ parameter ได้โดยไม่ต้องเปลี่ยนชื่อ
+framework แบบ app-router อื่นจึงประกาศ parameter ได้โดยไม่ต้องเปลี่ยนชื่อ
 
 ## การกำหนด rendering strategy เอง
 
 Ruvyxa เลือก strategy ให้อัตโนมัติ และ `export const dynamic` ใช้ override ได้ — เป็น route segment
-config ตัวเดียวกับที่ Next.js ใช้ และลำดับความสำคัญเหมือนกัน `'force-dynamic'` จะพา route
-ออกจากเส้นทาง pre-render แม้จะ export `revalidate` ด้วยก็ตาม ส่วน `'force-static'` และ `'error'`
-จะพาเข้าไป และ `'auto'` คือค่าเริ่มต้น ใช้ `export const revalidate = <วินาที>` เพื่อเลือก ISR และ
+config ตาม convention และลำดับความสำคัญตามที่คุ้นเคย `'force-dynamic'` จะพา route ออกจากเส้นทาง
+pre-render แม้จะ export `revalidate` ด้วยก็ตาม ส่วน `'force-static'` และ `'error'` จะพาเข้าไป และ
+`'auto'` คือค่าเริ่มต้น ใช้ `export const revalidate = <วินาที>` เพื่อเลือก ISR และ
 `export const ppr = true` เพื่อเลือก partial pre-rendering
 
 `export const metadata` **ไม่ถูกอ่าน** เพราะ metadata object ของ Next เป็นโครงซ้อนชั้น ขณะที่ `meta`
@@ -108,7 +108,7 @@ config ตัวเดียวกับที่ Next.js ใช้ และล
 
 `export const runtime = 'edge'` เป็นการประกาศว่า route นั้นใช้เฉพาะสิ่งที่ runtime มาตรฐานเว็บมีให้
 — `Request`, `Response`, `fetch`, `URL`, `crypto` ส่วน `'nodejs'` เป็นค่าเริ่มต้นและไม่ต้องเขียน
-ทั้งสองสะกดแบบเดียวกับที่ Next.js สะกด
+ทั้งสองสะกดตาม convention ที่ใช้กันทั่วไป
 
 ```tsx
 // app/ping/route.ts

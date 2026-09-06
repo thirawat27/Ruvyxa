@@ -45,9 +45,11 @@ describe('dependency security workflow', () => {
     assert.match(policy, /Scheduled and change-triggered RustSec plus pnpm production dependency/)
   })
 
-  it('documents the plugin trust boundary without claiming a sandbox', () => {
-    assert.match(policy, /TypeScript plugins run as trusted application code/)
-    assert.match(policy, /security\.pluginLimit[\s\S]{0,160}resource limit/)
-    assert.doesNotMatch(policy, /Wasm plugin|plugin sandboxing/)
+  it('documents the config trust boundary without claiming a sandbox', () => {
+    assert.match(
+      policy,
+      /ruvyxa\.config\.ts[\s\S]{0,120}runs as trusted[\s\S]{0,10}application code/,
+    )
+    assert.doesNotMatch(policy, /sandbox(?:es|ing) (?:the config|proxy\.handler)/)
   })
 })

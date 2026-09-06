@@ -68,7 +68,7 @@ pub struct ResolvedModule {
     pub load_source_map: Option<String>,
     /// Specifiers that this module imports (absolute paths after resolution).
     pub deps: Vec<PathBuf>,
-    /// Exact source specifier to resolved path bindings, including plugin aliases.
+    /// Exact source specifier to resolved path bindings, including tsconfig aliases.
     pub dependency_aliases: BTreeMap<String, PathBuf>,
     /// Directories whose membership affects compile-time glob expansion.
     pub watch_paths: Vec<PathBuf>,

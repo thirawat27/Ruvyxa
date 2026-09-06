@@ -19,7 +19,7 @@ behavior implemented in this repository at the revision you are reading it from.
 - Full-stack developer: continue with [Data, actions, and API routes](05-data-actions-api.md),
   [UI, navigation, metadata, and assets](06-ui-navigation-metadata-and-assets.md), and
   [Configuration](07-configuration.md).
-- Plugin or integration developer: read [Plugins and middleware](08-plugins-middleware.md),
+- Integration developer: read [Request pipeline](08-request-pipeline.md),
   [Integrations](09-integrations-auth-data-and-realtime.md), and
   [Public API reference](17-public-api-reference.md).
 - Operator: begin with [CLI](10-cli.md), then [Security](13-security.md),
@@ -37,7 +37,7 @@ behavior implemented in this repository at the revision you are reading it from.
 5. [Data, actions, and API routes](05-data-actions-api.md)
 6. [UI, navigation, metadata, and assets](06-ui-navigation-metadata-and-assets.md)
 7. [Configuration and environment](07-configuration.md)
-8. [Plugins and middleware](08-plugins-middleware.md)
+8. [Request pipeline](08-request-pipeline.md)
 9. [Integrations: authentication, data, realtime, adapters, and testing](09-integrations-auth-data-and-realtime.md)
 10. [CLI reference](10-cli.md)
 11. [Architecture](11-architecture.md)

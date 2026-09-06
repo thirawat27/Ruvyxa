@@ -15,8 +15,7 @@ use std::path::{Path, PathBuf};
 
 use ruvyxa_dev_server::{
     JavaScriptRuntime, MAX_ACTION_BODY_LIMIT_BYTES, MAX_ACTION_RATE_LIMIT_REQUESTS,
-    MAX_ACTION_RATE_LIMIT_WINDOW_SECS, MAX_API_BODY_LIMIT_BYTES,
-    MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES, TrustedProxies,
+    MAX_ACTION_RATE_LIMIT_WINDOW_SECS, MAX_API_BODY_LIMIT_BYTES, TrustedProxies,
 };
 use ruvyxa_graph::{DiscoverOptions, I18nRouting, RenderStrategy, RouteManifest, discover_routes};
 
@@ -70,12 +69,27 @@ pub(crate) struct ProjectConfig {
     pub(crate) cache: CacheConfigOptions,
     #[serde(default)]
     pub(crate) site: SiteConfigOptions,
+    /// `content`, read only for whether the engine is on: its options belong
+    /// to the JavaScript side, which materializes the engine in the worker.
     #[serde(rename = "content")]
-    pub(crate) _content: Option<serde_json::Value>,
+    pub(crate) content: Option<serde_json::Value>,
     #[serde(default)]
     pub(crate) middleware: ruvyxa_middleware::MiddlewareConfig,
+    /// Route rules, already resolved from any function form by the renderer.
+    /// Their grammar is held by `tests/fixtures/route-rules-conformance.json`.
     #[serde(default)]
-    pub(crate) plugins: Vec<BuildPluginConfig>,
+    pub(crate) headers: Vec<ruvyxa_middleware::HeaderRule>,
+    #[serde(default)]
+    pub(crate) redirects: Vec<ruvyxa_middleware::RedirectRule>,
+    #[serde(default)]
+    pub(crate) rewrites: ruvyxa_middleware::RewritePhases,
+    /// `proxy` with its handler reduced to a presence marker; the function
+    /// stays in the compiled config module the JavaScript hosts load.
+    pub(crate) proxy: Option<ruvyxa_middleware::ProxyConfig>,
+    /// `realtime` and `collab`, every field decided by the renderer; the
+    /// Axum host registers the sockets and `ruvyxa build` reports `RUV2205`.
+    pub(crate) realtime: Option<ruvyxa_dev_server::RealtimeConfig>,
+    pub(crate) collab: Option<ruvyxa_dev_server::CollabConfig>,
     #[serde(rename = "adapter")]
     pub(crate) adapter: Option<serde_json::Value>,
     #[serde(rename = "adapterOptions")]
@@ -212,8 +226,6 @@ pub(crate) struct SecurityConfigOptions {
     pub(crate) action_body_limit_bytes: Option<usize>,
     #[serde(rename = "apiLimit")]
     pub(crate) api_body_limit_bytes: Option<usize>,
-    #[serde(rename = "pluginLimit")]
-    pub(crate) plugin_response_body_limit_bytes: Option<usize>,
     #[serde(rename = "actionRateLimit")]
     pub(crate) action_rate_limit: Option<ActionRateLimitOptions>,
     #[serde(rename = "sameOrigin")]
@@ -279,15 +291,6 @@ pub(crate) struct CacheConfigOptions {
     /// an approximation and the one available — every cached value has already
     /// been proved serializable. `0` leaves the entry bound in sole charge.
     pub(crate) max_bytes: Option<u64>,
-}
-
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct BuildPluginConfig {
-    pub(crate) name: String,
-    /// Elements this plugin contributes to every rendered document's `<head>`.
-    #[serde(default)]
-    pub(crate) head: Vec<ruvyxa_dev_server::PluginHeadEntry>,
 }
 
 pub(crate) struct RuvyxaBuildCache<'a> {
@@ -402,6 +405,28 @@ impl ProjectConfig {
         self.markdown_enabled.unwrap_or(false)
     }
 
+    /// Whether `content` turns the content engine on: `true`, or an object
+    /// whose `engine` is `true` or an options object.
+    pub(crate) fn content_engine_enabled(&self) -> bool {
+        match &self.content {
+            Some(serde_json::Value::Bool(enabled)) => *enabled,
+            Some(serde_json::Value::Object(content)) => matches!(
+                content.get("engine"),
+                Some(serde_json::Value::Bool(true)) | Some(serde_json::Value::Object(_))
+            ),
+            _ => false,
+        }
+    }
+
+    /// Which parts of the project worker a build needs.
+    pub(crate) fn worker_options(&self) -> crate::worker::WorkerOptions {
+        crate::worker::WorkerOptions {
+            markdown: self.markdown_enabled(),
+            react_compiler: self.react_compiler.unwrap_or(false),
+            content_engine: self.content_engine_enabled(),
+        }
+    }
+
     pub(crate) fn validate_paths(&self) -> anyhow::Result<()> {
         validate_project_relative_path("appDir", self.app_dir())?;
         validate_project_relative_path("outDir", self.out_dir())?;
@@ -418,7 +443,6 @@ impl ProjectConfig {
             self.security.api_body_limit_bytes,
             MAX_API_BODY_LIMIT_BYTES,
         )?;
-        validate_plugin_response_limit(self.security.plugin_response_body_limit_bytes)?;
         if let Some(rate_limit) = &self.security.action_rate_limit {
             validate_bounded_limit(
                 "security.actionRateLimit.max",
@@ -576,16 +600,6 @@ fn valid_identifier(value: &str) -> bool {
         && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$'))
 }
 
-pub(crate) fn validate_positive_limit<T>(field: &str, value: Option<T>) -> anyhow::Result<()>
-where
-    T: PartialEq + From<u8>,
-{
-    if value.is_some_and(|value| value == T::from(0)) {
-        anyhow::bail!("RUV1601 config field `{field}` must be greater than zero");
-    }
-    Ok(())
-}
-
 pub(crate) fn validate_bounded_limit<T>(
     field: &str,
     value: Option<T>,
@@ -604,17 +618,6 @@ where
     }
     Ok(())
 }
-
-pub(crate) fn validate_plugin_response_limit(value: Option<usize>) -> anyhow::Result<()> {
-    validate_positive_limit("security.pluginLimit", value)?;
-    if value.is_some_and(|value| value > MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES) {
-        anyhow::bail!(
-            "RUV1602 config field `security.pluginLimit` must not exceed {MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES} bytes"
-        );
-    }
-    Ok(())
-}
-
 pub(crate) fn validate_trusted_proxy_ips(values: &[String]) -> anyhow::Result<()> {
     parse_trusted_proxies(values).map(|_| ())
 }

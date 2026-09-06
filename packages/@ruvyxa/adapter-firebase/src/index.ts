@@ -218,7 +218,7 @@ function firebaseHandlerSource(
 ): string {
   return `import { onRequest } from 'firebase-functions/v2/https';
 import { createHandler, prerenderRelativePath } from './serverless-handler.mjs';
-import { applyPluginHttp, documentCacheHandler, loadActionModule, loadRouteModule } from './route-modules.mjs';
+import { projectProxy, documentCacheHandler, loadActionModule, loadRouteModule } from './route-modules.mjs';
 import manifest from './manifest.mjs';
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
@@ -237,11 +237,14 @@ ${platformDocumentStoreSource()}
 const handler = createHandler({
   routes: manifest.routes,
   middleware: runtimePolicy.middleware,
+  headers: runtimePolicy.headers,
+  redirects: runtimePolicy.redirects,
+  rewrites: runtimePolicy.rewrites,
   i18n: manifest.i18n,
   importPage: loadRouteModule,
   importApi: loadRouteModule,
   importAction: loadActionModule,
-  pluginHttp: applyPluginHttp,
+  proxy: projectProxy,
   security: runtimePolicy.security,
 ${documentCacheOptionsSource('platformReadPrerendered', 'platformWritePrerendered')}
   // The project's own not-found page, pre-rendered by the build and carried

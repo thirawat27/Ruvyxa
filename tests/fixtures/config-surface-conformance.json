@@ -56,18 +56,23 @@
         "appDir",
         "build",
         "cache",
+        "collab",
         "content",
         "css",
         "debug",
+        "headers",
         "i18n",
         "image",
         "markdown",
         "middleware",
         "outDir",
-        "plugins",
+        "proxy",
         "react",
         "reactCompiler",
+        "realtime",
+        "redirects",
         "render",
+        "rewrites",
         "runtime",
         "security",
         "server",
@@ -139,6 +144,30 @@
       "probe": "serde",
       "fields": ["overlay", "traces"]
     },
+    "config.headers[]": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["headers[]"],
+      "probe": "serde",
+      "fields": ["has", "headers", "missing", "source"]
+    },
+    "config.headers[].has[]": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["headers[]", "has[]"],
+      "probe": "serde",
+      "fields": ["key", "type", "value"]
+    },
+    "config.headers[].headers[]": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["headers[]", "headers[]"],
+      "probe": "serde",
+      "fields": ["key", "value"]
+    },
+    "config.headers[].missing[]": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["headers[]", "missing[]"],
+      "probe": "serde",
+      "fields": ["key", "type", "value"]
+    },
     "config.i18n": {
       "rustType": "ProjectConfig",
       "rustPath": ["i18n"],
@@ -207,11 +236,125 @@
       "probe": "serde",
       "fields": ["key", "max", "window"]
     },
+    "config.proxy": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["proxy"],
+      "probe": "serde",
+      "fields": ["handler", "matcher"]
+    },
+    "config.proxy.matcher[]": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["proxy", "matcher[]"],
+      "probe": "serde",
+      "fields": ["has", "missing", "source"]
+    },
+    "config.proxy.matcher[].has[]": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["proxy", "matcher[]", "has[]"],
+      "probe": "serde",
+      "fields": ["key", "type", "value"]
+    },
+    "config.proxy.matcher[].missing[]": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["proxy", "matcher[]", "missing[]"],
+      "probe": "serde",
+      "fields": ["key", "type", "value"]
+    },
+    "config.realtime": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["realtime"],
+      "probe": "serde",
+      "fields": ["capacity", "heartbeatMs", "path"]
+    },
+    "config.collab": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["collab"],
+      "probe": "serde",
+      "fields": ["heartbeatMs", "path"]
+    },
+    "config.redirects[]": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["redirects[]"],
+      "probe": "serde",
+      "fields": ["destination", "has", "missing", "permanent", "source", "statusCode"]
+    },
+    "config.redirects[].has[]": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["redirects[]", "has[]"],
+      "probe": "serde",
+      "fields": ["key", "type", "value"]
+    },
+    "config.redirects[].missing[]": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["redirects[]", "missing[]"],
+      "probe": "serde",
+      "fields": ["key", "type", "value"]
+    },
     "config.render": {
       "rustType": "ProjectConfig",
       "rustPath": ["render"],
       "probe": "serde",
       "fields": ["revalidate", "strategy"]
+    },
+    "config.rewrites": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["rewrites"],
+      "probe": "serde",
+      "fields": ["afterFiles", "beforeFiles", "fallback"]
+    },
+    "config.rewrites.afterFiles[]": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["rewrites", "afterFiles[]"],
+      "probe": "serde",
+      "fields": ["destination", "has", "missing", "source"]
+    },
+    "config.rewrites.afterFiles[].has[]": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["rewrites", "afterFiles[]", "has[]"],
+      "probe": "serde",
+      "fields": ["key", "type", "value"]
+    },
+    "config.rewrites.afterFiles[].missing[]": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["rewrites", "afterFiles[]", "missing[]"],
+      "probe": "serde",
+      "fields": ["key", "type", "value"]
+    },
+    "config.rewrites.beforeFiles[]": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["rewrites", "beforeFiles[]"],
+      "probe": "serde",
+      "fields": ["destination", "has", "missing", "source"]
+    },
+    "config.rewrites.beforeFiles[].has[]": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["rewrites", "beforeFiles[]", "has[]"],
+      "probe": "serde",
+      "fields": ["key", "type", "value"]
+    },
+    "config.rewrites.beforeFiles[].missing[]": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["rewrites", "beforeFiles[]", "missing[]"],
+      "probe": "serde",
+      "fields": ["key", "type", "value"]
+    },
+    "config.rewrites.fallback[]": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["rewrites", "fallback[]"],
+      "probe": "serde",
+      "fields": ["destination", "has", "missing", "source"]
+    },
+    "config.rewrites.fallback[].has[]": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["rewrites", "fallback[]", "has[]"],
+      "probe": "serde",
+      "fields": ["key", "type", "value"]
+    },
+    "config.rewrites.fallback[].missing[]": {
+      "rustType": "ProjectConfig",
+      "rustPath": ["rewrites", "fallback[]", "missing[]"],
+      "probe": "serde",
+      "fields": ["key", "type", "value"]
     },
     "config.security": {
       "rustType": "ProjectConfig",
@@ -223,7 +366,6 @@
         "apiLimit",
         "fetchMeta",
         "headers",
-        "pluginLimit",
         "sameOrigin",
         "trustedProxyIps"
       ]

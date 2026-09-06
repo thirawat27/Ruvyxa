@@ -82,7 +82,7 @@ ruvyxa/
 │   ├── ruvyxa_cli/            # CLI binary (dev, build, check, start, routes, analyze, etc.)
 │   ├── ruvyxa_dev_server/     # Dev + production HTTP server, HMR, render cache, worker pool
 │   ├── ruvyxa_graph/          # Route discovery, validation, rendering strategy detection
-│   ├── ruvyxa_middleware/     # Tower middleware plus the TypeScript plugin host bridge
+│   ├── ruvyxa_middleware/     # Tower middleware, route rules, and the project worker host
 │   ├── ruvyxa_diagnostics/    # Structured error types (RUV#### codes)
 │   └── ruvyxa_tui/            # Terminal layout, progress, mascot, and theme primitives
 ├── packages/                  # TypeScript packages (npm)
@@ -93,7 +93,7 @@ ruvyxa/
 │   ├── demo/                  # Broad integration fixture — deliberately NOT deployable
 │   └── deploy-smoke/          # Smallest app every adapter can deploy; CI runs it on Node/Bun/Deno
 ├── templates/                 # minimal, blog, crud, api — copied into new projects by
-│                              # create-ruvyxa; plugin/ backs `ruvyxa plugin create`
+│                              # create-ruvyxa
 ├── tests/                     # Node package tests (organized by package) and shared fixtures/
 ├── scripts/                   # Release, validation, and repository check scripts
 └── docs/                      # User-facing documentation (en/ and th/ editions)

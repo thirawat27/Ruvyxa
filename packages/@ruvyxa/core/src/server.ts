@@ -1081,7 +1081,7 @@ export function redirect(location: string, status = 302): Response {
  * `new Response('x', { status: 204 })` throws `Response with null body status
  * cannot have body`, so the message has to be refused before it gets there.
  *
- * `isNullBodyStatus` in `packages/ruvyxa/runtime/plugin-http.mjs` lists 101 and
+ * `isNullBodyStatus` in `packages/ruvyxa/runtime/serverless-handler.mjs` lists 101 and
  * 103 as well, and they are deliberately absent here rather than copied across
  * for symmetry: that function classifies a status read off the wire, where an
  * upgrade or early-hints response exists, while this one builds a `Response`,

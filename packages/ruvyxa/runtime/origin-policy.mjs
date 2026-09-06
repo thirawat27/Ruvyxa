@@ -4,12 +4,11 @@
 /**
  * Cross-site request policy — the single JavaScript implementation.
  *
- * Three places in this repository have to answer "is this request provably
+ * Two places in this repository have to answer "is this request provably
  * same-origin?": the action endpoint in
  * `packages/ruvyxa/runtime/action-runtime.mjs` (via the generated
- * `runtime/origin-policy.mjs` copy), the `originGuard` plugin in
- * `packages/ruvyxa/src/plugins/http.ts`, and the native server in
- * `crates/ruvyxa_dev_server/src/action_security.rs`. The first two read this
+ * `runtime/origin-policy.mjs` copy) and the native server in
+ * `crates/ruvyxa_dev_server/src/action_security.rs`. The first reads this
  * module. The Rust host cannot — it is a different language — so it is held to
  * the same behaviour by a shared case table instead:
  * `tests/fixtures/origin-policy-conformance.json` is replayed by both suites.

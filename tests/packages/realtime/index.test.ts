@@ -1,9 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { realtime } from '../../../packages/@ruvyxa/realtime/dist/index.js'
 import { createRealtimeClient } from '../../../packages/@ruvyxa/realtime/dist/client.js'
-import { realtime as realtimeEntry } from '../../../packages/@ruvyxa/realtime/dist/plugin.js'
 
 class FakeSocket {
   readyState = 0
@@ -31,42 +29,6 @@ class FakeSocket {
 }
 
 describe('@ruvyxa/realtime', () => {
-  it('claims the native transport and registers no deployment gate of its own', async () => {
-    assert.equal(realtimeEntry, realtime)
-    const plugin = realtimeEntry({ path: '/events', heartbeatMs: 10_000, capacity: 64 })
-    const claims: Array<{ capability: string; options: unknown }> = []
-    const buildHooks: unknown[] = []
-    await plugin.register({
-      environment: 'production',
-      http: { onRequest() {}, onResponse() {}, route() {} },
-      build: {
-        onStart() {},
-        onResolve() {},
-        onLoad() {},
-        onTransform() {},
-        onComplete(value) {
-          buildHooks.push(value)
-        },
-      },
-      dev: { onFileChange() {} },
-      diagnostics: { report() {} },
-      native: {
-        claim(capability, value) {
-          claims.push({ capability, options: value })
-        },
-      },
-    })
-    assert.deepEqual(claims, [
-      { capability: 'realtime@1', options: { path: '/events', heartbeatMs: 10_000, capacity: 64 } },
-    ])
-    // Whether a target can serve the socket is decided where the socket is
-    // served — `adapter-runner.mjs` reports RUV2205 for every build artifact,
-    // because none of them holds a connection. A gate here was a second owner
-    // of that rule with the opposite premise: it refused vercel outright and
-    // let a railway build ship `/__ruvyxa/realtime` as a 404.
-    assert.deepEqual(buildHooks, [])
-  })
-
   it('routes action events only to matching channel listeners', () => {
     const sockets: FakeSocket[] = []
     const received: string[] = []

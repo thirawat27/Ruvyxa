@@ -31,7 +31,6 @@ npm install @ruvyxa/core
 
 ```ts
 import { config } from '@ruvyxa/core/config'
-import { definePlugin } from '@ruvyxa/core/plugin'
 import {
   action,
   cache,
@@ -46,10 +45,11 @@ import type {
   Adapter,
   AdapterOutput,
   BuildContext,
-  PluginRegistrationApi,
-  PluginHttpRequestContext,
+  HeaderRule,
+  ProxyConfig,
+  RedirectRule,
+  RewriteRule,
   RuvyxaConfig,
-  RuvyxaPlugin,
   TransformResult,
 } from '@ruvyxa/core'
 ```
@@ -183,19 +183,23 @@ export function customAdapter(): Adapter {
 }
 ```
 
-## Plugin Contract
+## Route rules
 
-Plugins are ordinary TypeScript modules. Start with direct declarations and use `register()` only
-for advanced composition:
+`headers()`, `redirects()`, `rewrites()`, and `proxy` are keys on the config object. Their sources
+are path-to-regexp patterns compiled by `route-rules.ts`, the same module every deployed build
+evaluates, and held to `tests/fixtures/route-rules-conformance.json` together with the native
+evaluator:
 
 ```ts
-import { definePlugin } from '@ruvyxa/core/plugin'
+import { config } from '@ruvyxa/core/config'
 
-export default definePlugin({
-  name: 'auth',
-  http: {
-    match: ['/api/*'],
-    onRequest({ request }) {
+export default config({
+  headers: [{ source: '/api/:path*', headers: [{ key: 'cache-control', value: 'no-store' }] }],
+  redirects: async () => [{ source: '/old/:path*', destination: '/new/:path*', permanent: true }],
+  rewrites: { beforeFiles: [{ source: '/alias', destination: '/' }] },
+  proxy: {
+    matcher: ['/admin/:path*'],
+    handler(request) {
       return request.headers.has('authorization')
         ? undefined
         : new Response('Unauthorized', { status: 401 })
@@ -204,33 +208,8 @@ export default definePlugin({
 })
 ```
 
-One plugin may combine any socket groups it needs:
-
-```ts
-import { definePlugin, type RuvyxaPlugin } from '@ruvyxa/core/plugin'
-
-export function bannerPlugin(): RuvyxaPlugin {
-  return definePlugin({
-    name: 'banner',
-    register({ build, http }) {
-      build.onTransform(({ code, id, environment }) => {
-        if (environment !== 'client' || !id.endsWith('.tsx')) return null
-        return { code: `/* client bundle */\n${code}` }
-      })
-      http.onRequest({
-        match: ['/api/*'],
-        handler({ request }) {
-          return request
-        },
-      })
-    },
-  })
-}
-```
-
-Request hooks return `undefined` to continue, a `Request` to replace the request, or a `Response` to
-short-circuit. Grouped `http`, `build`, `dev`, `diagnostics`, and `native` sockets run in
-declaration and registration order. The sole contract is a non-empty `name` plus direct behavior or
-a `register(api)` function.
+`proxy.handler` returns `undefined` to continue, a `Request` to continue with (a different path is a
+rewrite), or a `Response` to answer. Rules apply in a fixed order: headers, redirects, proxy,
+`beforeFiles` rewrites, files, `afterFiles`, dynamic routes, `fallback`.
 
 This package is published as ESM with generated TypeScript declarations.

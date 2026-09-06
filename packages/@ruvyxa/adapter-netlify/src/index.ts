@@ -70,7 +70,7 @@ function netlifyHandlerSource(
   buildId: string,
 ): string {
   return `import { createHandler, prerenderRelativePath } from './serverless-handler.mjs';
-import { applyPluginHttp, documentCacheHandler, loadActionModule, loadRouteModule } from './route-modules.mjs';
+import { projectProxy, documentCacheHandler, loadActionModule, loadRouteModule } from './route-modules.mjs';
 // Netlify bundles the function with esbuild, so anything the deployed code
 // needs must be reachable through the module graph. A sibling manifest.json
 // read from import.meta.dirname is not, and never reaches /var/task.
@@ -130,11 +130,14 @@ ${platformDocumentStoreSource({ onForcedWrite: 'purgeDurableCache' })}
 const handler = createHandler({
   routes: manifest.routes,
   middleware: runtimePolicy.middleware,
+  headers: runtimePolicy.headers,
+  redirects: runtimePolicy.redirects,
+  rewrites: runtimePolicy.rewrites,
   i18n: manifest.i18n,
   importPage: loadRouteModule,
   importApi: loadRouteModule,
   importAction: loadActionModule,
-  pluginHttp: applyPluginHttp,
+  proxy: projectProxy,
   security: runtimePolicy.security,
 ${documentCacheOptionsSource('platformReadPrerendered', 'platformWritePrerendered')}
   // The project's own not-found page, pre-rendered by the build and carried

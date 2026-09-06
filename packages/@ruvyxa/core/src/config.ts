@@ -18,11 +18,16 @@ export type {
   MiddlewareConfig,
   OnDemandImageConfig,
   PageProps,
+  ProxyConfig,
+  RealtimeConfig,
+  CollabConfig,
+  ProxyResult,
   RateLimitConfig,
   RenderConfig,
   RenderStrategy,
   RouteParamValue,
   RouteParams,
+  RouteRuleList,
   RuvyxaConfig,
   SiteConfig,
   StaticParamsContext,
@@ -30,7 +35,6 @@ export type {
   StaticParamsCacheDuration,
   StaticParamsResult,
   StaticParamsValues,
-  TransformResult,
 } from './types.js'
 
 /** Define the typed contents of `ruvyxa.config.ts`. */

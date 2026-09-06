@@ -86,7 +86,7 @@ actions have application-specific data consequences not managed by Ruvyxa.
 
 ## Sign-off checklist
 
-- [ ] Target/adapter is compatible with every route and enabled plugin.
+- [ ] Target/adapter is compatible with every route, `proxy.handler`, and transport.
 - [ ] Secret values are private and supplied at build/runtime as required.
 - [ ] `routes`, `check`, `build`, and `test:parity` pass from the release commit.
 - [ ] The deployed origin, API, auth path, and static assets have been probed.

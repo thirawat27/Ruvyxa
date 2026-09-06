@@ -103,30 +103,10 @@ for (const dir of ignoredTemplateDirs) {
 
 for (const dir of templateDirs) {
   const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
-  // Checked before the plugin branch below. The plugin template used to skip
-  // every shared check because that branch `continue`s, and it was the one
-  // template that shipped no Node floor at all.
   check(
     pkg.engines?.node === requiredRuntimeNodeEngine,
     `${dir} Node engine must match the framework requirement (${requiredRuntimeNodeEngine})`,
   )
-  if (dir === 'templates/plugin') {
-    check(
-      pkg.peerDependencies?.ruvyxa === `^${expectedVersion}`,
-      `${dir} ruvyxa peer dependency must be ^${expectedVersion}`,
-    )
-    check(
-      pkg.devDependencies?.ruvyxa === `^${expectedVersion}`,
-      `${dir} ruvyxa development dependency must be ^${expectedVersion}`,
-    )
-    check(pkg.ruvyxa === undefined, `${dir} must not include package-level Ruvyxa metadata`)
-    check(pkg.devDependencies?.typescript === '^7.0.2', `${dir} must use TypeScript ^7.0.2`)
-    check(
-      pkg.dependencies?.['@ruvyxa/react'] === undefined,
-      `${dir} plugin must not depend on @ruvyxa/react`,
-    )
-    continue
-  }
   for (const dependency of ['ruvyxa', '@ruvyxa/react']) {
     check(
       pkg.dependencies?.[dependency] === `^${expectedVersion}`,

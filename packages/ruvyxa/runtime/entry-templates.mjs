@@ -238,13 +238,6 @@ const __RUVYXA_STYLE_HEAD = ${JSON.stringify(styleHead)}
  * while \`dev\`, \`start\`, and every pre-rendered page beside it were correct.
  */
 const __RUVYXA_ASSET_LINKS = ${JSON.stringify(documentHead?.assetLinks ?? '')}
-/**
- * What the project's plugins declared for every document's head.
- *
- * Rendered by \`render_plugin_head\` during the build for the same reason: the
- * entries live in \`ruvyxa.config.ts\`, which a deployed function never loads.
- */
-const __RUVYXA_PLUGIN_HEAD = ${JSON.stringify(documentHead?.pluginHead ?? '')}
 
 /** Twin of \`safe_json_for_script\`: make JSON safe as raw text inside a script. */
 function __ruvyxaSafeJson(json) {
@@ -348,7 +341,7 @@ function __ruvyxaDocumentHead(source, head) {
     /rel=("(icon|shortcut icon|apple-touch-icon)"|'(icon|shortcut icon|apple-touch-icon)')/i.test(source)
       ? ""
       : __RUVYXA_ASSET_LINKS
-  return viewport + icons + __RUVYXA_PLUGIN_HEAD + head
+  return viewport + icons + head
 }
 
 /**

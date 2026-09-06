@@ -54,14 +54,7 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    },
-    "./plugin": {
-      "types": "./dist/plugin.d.ts",
-      "default": "./dist/plugin.js"
     }
-  },
-  "dependencies": {
-    "@ruvyxa/core": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "24.13.3"

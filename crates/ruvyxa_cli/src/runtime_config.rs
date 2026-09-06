@@ -345,10 +345,6 @@ fn apply_project_settings(server: &mut ServerConfig, config: &ProjectConfig) -> 
         .security
         .api_body_limit_bytes
         .unwrap_or(server.api_body_limit_bytes);
-    server.plugin_response_body_limit_bytes = config
-        .security
-        .plugin_response_body_limit_bytes
-        .unwrap_or(server.plugin_response_body_limit_bytes);
     if let Some(rate_limit) = &config.security.action_rate_limit {
         server.action_rate_limit_max = rate_limit.max.unwrap_or(server.action_rate_limit_max);
         server.action_rate_limit_window = Duration::from_secs(
@@ -371,8 +367,26 @@ fn apply_project_settings(server: &mut ServerConfig, config: &ProjectConfig) -> 
         .security_headers
         .unwrap_or(server.security_headers);
     server.middleware = config.middleware.clone();
-    server.plugins_enabled = !config.plugins.is_empty();
-    server.plugin_head = collect_plugin_head(&config.plugins);
+    // Compiled here, once, so a pattern the renderer let through still fails
+    // the command that would serve it rather than the first request it matches.
+    server.route_rules = ruvyxa_middleware::RouteRules::compile(
+        config.headers.clone(),
+        config.redirects.clone(),
+        config.rewrites.clone(),
+    )
+    .map_err(|error| anyhow::anyhow!(error))?;
+    // Only a `proxy` the renderer saw a handler on: a block with a matcher and
+    // no function has nothing to run.
+    server.proxy = config
+        .proxy
+        .as_ref()
+        .filter(|proxy| proxy.handler == Some(true))
+        .map(ruvyxa_middleware::CompiledProxy::compile)
+        .transpose()
+        .map_err(|error| anyhow::anyhow!(error))?;
+    server.realtime = config.realtime.clone();
+    server.collab = config.collab.clone();
+    server.content_engine = config.content_engine_enabled();
     server.default_render_strategy = config.rendering.default_strategy;
     server.default_revalidate = config.rendering.default_revalidate;
     server.i18n = config.i18n.as_ref().map(I18nConfigOptions::routing);
@@ -947,7 +961,7 @@ pub(crate) fn command_runtime(command: &Command) -> Option<CliRuntime> {
         Command::Adds(args) => args.runtime,
         Command::Doctor(args) => args.runtime,
         Command::Bench(args) => args.runtime,
-        Command::Trace(_) | Command::Plugin(_) => None,
+        Command::Trace(_) => None,
     }
 }
 

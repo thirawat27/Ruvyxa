@@ -98,7 +98,7 @@ export function echoManifest(): Record<string, unknown> {
  * answers `x-binary: 1` with bytes that are not valid UTF-8 (so a wrapper that
  * round-trips the body through a string is visible).
  *
- * `loadActionModule` and `applyPluginHttp` are exported because the generated
+ * `loadActionModule` and `projectProxy` are exported because the generated
  * registry exports them and every wrapper imports all three — a stub that omits
  * them fails at module load rather than at assertion time.
  */
@@ -118,7 +118,7 @@ export function echoRouteModules(): string {
 }
 export async function loadRouteModule() { return api }
 export async function loadActionModule() { return null }
-export const applyPluginHttp = undefined
+export const projectProxy = undefined
 // The registry the real build emits also exports the project's ISR store, or
 // \`null\` when no \`cache.handler\` is configured. A handler imports it by
 // name, so a stub without it fails to load — which is the point.

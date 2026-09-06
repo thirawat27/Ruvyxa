@@ -31,8 +31,6 @@ Ruvyxa 1.x includes:
 - Same-origin and Fetch Metadata (`Sec-Fetch-Site`) checks for server actions
 - Action body size limits (1 MB default, hard ceiling 16 MB)
 - API route body size limits (10 MB default, hard ceiling 256 MB via `security.apiLimit`)
-- TypeScript plugin response buffering limited to 32 MB by default, configurable through
-  `security.pluginLimit` up to 256 MB, to prevent unbounded server memory use
 - Configurable per-client/action rate limiting (600 req/min default via `security.actionRateLimit`)
 - Content-Type enforcement (JSON or form-encoded only)
 - Strict malformed JSON/UTF-8 rejection (no type-confusion fallback)
@@ -41,8 +39,9 @@ Ruvyxa 1.x includes:
   `Permissions-Policy`, `Cross-Origin-Opener-Policy`, `Cross-Origin-Resource-Policy`,
   `X-Frame-Options`, `X-Permitted-Cross-Domain-Policies`, WebSocket upgrade preservation)
 - Optional CORS middleware with origin allowlist
-- TypeScript plugins run as trusted application code with the selected JavaScript runtime's process,
-  filesystem, environment, and network access; Ruvyxa does not sandbox plugin code
+- `ruvyxa.config.ts` — including `proxy.handler` and the Markdown pipeline — runs as trusted
+  application code with the selected JavaScript runtime's process, filesystem, environment, and
+  network access; Ruvyxa does not sandbox it
 - Deterministic BLAKE3-256 client asset hashes (immutable caching with ETag/304 support)
 - Bounded `X-Request-ID` correlation values in request logs and responses for incident tracing
 - Ruvyxa CLI packages for supported OS/CPU targets (no Rust toolchain required)
@@ -51,5 +50,5 @@ Ruvyxa 1.x includes:
 Apps should still add deployment-layer controls such as TLS termination, CDN/WAF rules, secret
 rotation, CSP headers, and database access policies.
 
-Only enable plugins that you trust. `security.pluginLimit` bounds response buffering across the
-plugin bridge; it is a resource limit, not a security boundary or execution sandbox.
+`proxy.handler` runs on every matching request with the process's full access; treat the code it
+imports as part of the application, not as an isolated extension.

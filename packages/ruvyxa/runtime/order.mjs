@@ -23,7 +23,7 @@
  *
  * This lives in one module because the rule had been written out three times as
  * a private helper (`compareBySlashedPath` here, `comparePatterns` in
- * `paths.mjs`, `compareStable` in `../src/plugins.ts`) while nine other call
+ * `paths.mjs`, `compareStable` in `../src/content-engine/shared.ts`) while nine other call
  * sites still reached for `localeCompare` — among them the Flight cache key,
  * the project input fingerprint, and the config cache's env key. The Oxlint
  * `no-restricted-properties` entry that bans `localeCompare` is what keeps the

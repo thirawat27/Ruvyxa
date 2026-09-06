@@ -27,7 +27,6 @@ use crate::html_document::{
     bootstrap_data_block, client_hydration_script, compose_localized_document, error_page,
     hmr_client_script,
 };
-use crate::plugin_head::render_plugin_head;
 use crate::render_cache::{CachedDocument, ForcedRevalidationClaim, RenderCache};
 use crate::router::RadixRouter;
 use crate::static_assets::{
@@ -400,6 +399,142 @@ pub(crate) fn render_request_cached(
 
 // --- Worker-pool-based async render functions ---
 
+/// The response a `redirects()` rule answers with.
+pub(crate) fn rule_redirect_response(
+    redirect: &ruvyxa_middleware::route_rules::RedirectDecision,
+) -> Response {
+    let status = StatusCode::from_u16(redirect.status).unwrap_or(StatusCode::TEMPORARY_REDIRECT);
+    match HeaderValue::from_str(&redirect.location) {
+        Ok(location) => (status, [(header::LOCATION, location)]).into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "redirect destination is not a valid header value",
+        )
+            .into_response(),
+    }
+}
+
+/// Where a `rewrites()` destination sends this host: the canonical path and
+/// the full target with its query, or the response that refuses it.
+///
+/// An absolute `http(s)` destination is refused here. A deployed build fetches
+/// it — that host has an outbound `fetch` and the platform in front of it —
+/// while this server serves the application's own routes and files and would
+/// otherwise turn one config line into an open proxy. The refusal names the
+/// rule so the gap is visible under `ruvyxa dev` rather than after deploying.
+pub(crate) fn rewrite_target(target: &str) -> std::result::Result<(String, String), Box<Response>> {
+    let lower = target.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        warn!(
+            target,
+            "rewrites(): an external destination is served only by a deployed build"
+        );
+        return Err(Box::new(
+            (
+                StatusCode::BAD_GATEWAY,
+                "This rewrite targets an external URL, which the native host does not proxy.",
+            )
+                .into_response(),
+        ));
+    }
+    let (path, query) = match target.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (target, None),
+    };
+    let canonical = crate::worker_bridge::canonical_request_path(path)
+        .map_err(|error| Box::new((StatusCode::BAD_REQUEST, error.to_string()).into_response()))?;
+    let full = match query {
+        Some(query) => format!("{canonical}?{query}"),
+        None => canonical.clone(),
+    };
+    Ok((canonical, full))
+}
+
+/// What the config-time route rules decided about a request before routing.
+pub(crate) enum RuleStage {
+    /// A `redirects()` rule answered.
+    Answer(Box<Response>),
+    /// Continue, with the `headers()` to set on the response. The `beforeFiles`
+    /// rewrite is decided separately by [`before_files_rewrite`], after the
+    /// proxy has had its turn.
+    Continue(Vec<(String, String)>),
+}
+
+/// `headers()`, `redirects()`, and `beforeFiles` rewrites, in the documented
+/// order, decided on the request as it arrived.
+///
+/// Framework endpoints never reach this: they are axum routes in front of the
+/// page fallback, so no rule can redirect `/__ruvyxa/action`.
+pub(crate) fn route_rule_stage(
+    rules: &ruvyxa_middleware::RouteRules,
+    request_path: &str,
+    request_target: &str,
+    headers: &HeaderMap,
+) -> RuleStage {
+    if rules.is_empty() {
+        return RuleStage::Continue(Vec::new());
+    }
+    let header_list = ruvyxa_middleware::route_rules::header_pairs(headers);
+    let rule_request = ruvyxa_middleware::route_rules::RuleRequest {
+        path: request_path,
+        query: request_target.split_once('?').map(|(_, query)| query),
+        headers: &header_list,
+        host: ruvyxa_middleware::route_rules::host_header(headers),
+    };
+    // `headers()` is decided before `redirects()` and set on whatever answers,
+    // a redirect included — the documented order, and the one the deployed
+    // handler follows.
+    let rule_headers =
+        ruvyxa_middleware::route_rules::apply_header_rules(&rules.headers, &rule_request);
+    if let Some(redirect) =
+        ruvyxa_middleware::route_rules::match_redirect(&rules.redirects, &rule_request)
+    {
+        return RuleStage::Answer(Box::new(with_rule_headers(
+            rule_redirect_response(&redirect),
+            &rule_headers,
+        )));
+    }
+    RuleStage::Continue(rule_headers)
+}
+
+/// The `beforeFiles` rewrite for a request, decided after the proxy has had
+/// its turn — the documented order is `redirects → proxy → beforeFiles`, so
+/// the path this reads is the one the proxy forwarded.
+pub(crate) fn before_files_rewrite(
+    rules: &ruvyxa_middleware::RouteRules,
+    request_path: &str,
+    request_target: &str,
+    headers: &HeaderMap,
+) -> std::result::Result<Option<(String, String)>, Box<Response>> {
+    if rules.before_files.is_empty() {
+        return Ok(None);
+    }
+    let header_list = ruvyxa_middleware::route_rules::header_pairs(headers);
+    let rule_request = ruvyxa_middleware::route_rules::RuleRequest {
+        path: request_path,
+        query: request_target.split_once('?').map(|(_, query)| query),
+        headers: &header_list,
+        host: ruvyxa_middleware::route_rules::host_header(headers),
+    };
+    match ruvyxa_middleware::route_rules::match_rewrite(&rules.before_files, &rule_request) {
+        Some(target) => rewrite_target(&target).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Set the `headers()` rules that matched the request on its response.
+pub(crate) fn with_rule_headers(mut response: Response, entries: &[(String, String)]) -> Response {
+    for (name, value) in entries {
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(value),
+        ) {
+            response.headers_mut().insert(name, value);
+        }
+    }
+    response
+}
+
 pub(crate) async fn render_request_pooled(
     state: &AppState,
     request_path: &str,
@@ -407,6 +542,35 @@ pub(crate) async fn render_request_pooled(
     method: &str,
     request_headers: &HeaderMap,
     request_body: Option<&[u8]>,
+) -> Result<Response> {
+    render_request_inner(
+        state,
+        request_path,
+        request_target,
+        method,
+        request_headers,
+        request_body,
+        true,
+    )
+    .await
+}
+
+/// `afterFiles` and `fallback` rewrites, decided once files and routes have
+/// been looked up.
+///
+/// `afterFiles` applies when no route matched or only a dynamic one did — the
+/// point between static pages and dynamic routes in the documented order —
+/// and `fallback` when nothing matched at all. A rewritten request is looked
+/// up again from the top, files included, with `apply_rewrites` off so a rule
+/// is never checked against its own result.
+async fn render_request_inner(
+    state: &AppState,
+    request_path: &str,
+    request_target: &str,
+    method: &str,
+    request_headers: &HeaderMap,
+    request_body: Option<&[u8]>,
+    apply_rewrites: bool,
 ) -> Result<Response> {
     if let Some(client_response) = serve_client_file(
         &state.config.client_dir,
@@ -438,7 +602,49 @@ pub(crate) async fn render_request_pooled(
     }
 
     let (manifest, router) = state.runtime_cache.router(&state.config).await?;
-    let route_match = match router.find(&manifest, request_path) {
+    let found = router.find(&manifest, request_path);
+    let rules = &state.config.route_rules;
+    if apply_rewrites
+        && !rules.is_empty()
+        && found
+            .as_ref()
+            .is_none_or(|matched| matched.route.path.contains('['))
+    {
+        let header_list = ruvyxa_middleware::route_rules::header_pairs(request_headers);
+        let rule_request = ruvyxa_middleware::route_rules::RuleRequest {
+            path: request_path,
+            query: request_target.split_once('?').map(|(_, query)| query),
+            headers: &header_list,
+            host: ruvyxa_middleware::route_rules::host_header(request_headers),
+        };
+        let target =
+            ruvyxa_middleware::route_rules::match_rewrite(&rules.after_files, &rule_request)
+                .or_else(|| {
+                    found.is_none().then(|| {
+                        ruvyxa_middleware::route_rules::match_rewrite(
+                            &rules.fallback,
+                            &rule_request,
+                        )
+                    })?
+                });
+        if let Some(target) = target {
+            let (path, full_target) = match rewrite_target(&target) {
+                Ok(value) => value,
+                Err(response) => return Ok(with_security_headers(*response)),
+            };
+            return Box::pin(render_request_inner(
+                state,
+                &path,
+                &full_target,
+                method,
+                request_headers,
+                request_body,
+                false,
+            ))
+            .await;
+        }
+    }
+    let route_match = match found {
         Some(route_match) => route_match,
         None => {
             if let Some(location) = crate::i18n::locale_redirect_path(
@@ -701,11 +907,10 @@ async fn render_page_streamed(
     })?;
 
     let asset_links = state.runtime_cache.asset_links(&state.config).await;
-    let plugin_head = render_plugin_head(&state.config.plugin_head);
     // Composed per stream rather than once: the framework's defaults stand down
     // for a document that declares its own, and the prefix — the first frame,
     // which carries the shell's `<head>` — is the only place to read that from.
-    let head_tail = format!("{plugin_head}{styles}");
+    let head_tail = styles.to_string();
     // Resolved before the stream starts: the request is out of reach by the time
     // the head prefix arrives, and the answer is the same for every chunk.
     let locale = crate::i18n::localized_head(
@@ -991,9 +1196,8 @@ async fn render_page_ssg_fresh(
     };
     let client_script = client_hydration_script(&state.config, route, request_path, params);
     let rsc_payload = rsc_payload_block(route, response.rsc_payload.as_deref());
-    let plugin_head = render_plugin_head(&state.config.plugin_head);
     let head_content = format!(
-        "{}{plugin_head}{styles}",
+        "{}{styles}",
         crate::document_head_defaults(&rendered, &asset_links)
     );
     let html = compose_localized_document(
@@ -1157,9 +1361,8 @@ async fn render_isr_background(
     };
     let client_script = client_hydration_script(&state.config, route, request_path, params);
     let rsc_payload = rsc_payload_block(route, response.rsc_payload.as_deref());
-    let plugin_head = render_plugin_head(&state.config.plugin_head);
     let head_content = format!(
-        "{}{plugin_head}{styles}",
+        "{}{styles}",
         crate::document_head_defaults(&rendered, &asset_links)
     );
     Ok(compose_localized_document(
@@ -1996,9 +2199,8 @@ async fn render_page_ppr_fresh(
         ""
     };
     let client_script = client_hydration_script(&state.config, route, request_path, params);
-    let plugin_head = render_plugin_head(&state.config.plugin_head);
     let head_content = format!(
-        "{}{plugin_head}{styles}",
+        "{}{styles}",
         crate::document_head_defaults(&rendered, &asset_links)
     );
     let html = compose_localized_document(
@@ -2232,9 +2434,8 @@ async fn render_page_pooled_fresh(
     // Written before the bundle that reads it: both are inert data until the
     // deferred module runs, but a reader that precedes its data reads as a bug.
     let rsc_payload = rsc_payload_block(route, response.rsc_payload.as_deref());
-    let plugin_head = render_plugin_head(&state.config.plugin_head);
     let head_content = format!(
-        "{}{plugin_head}{styles}",
+        "{}{styles}",
         crate::document_head_defaults(&rendered, &asset_links)
     );
 
@@ -2718,9 +2919,8 @@ fn render_page(
         ""
     };
     let client_script = client_hydration_script(config, route, request_path, params);
-    let plugin_head = render_plugin_head(&config.plugin_head);
     let head_content = format!(
-        "{}{plugin_head}{styles}",
+        "{}{styles}",
         crate::document_head_defaults(&rendered, &asset_links)
     );
 
@@ -3217,6 +3417,112 @@ mod tests {
                 "{strategy:?} 304"
             );
         }
+    }
+
+    /// A `redirects()` decision becomes the response it names, or a 500 when
+    /// the destination cannot be a header value.
+    #[test]
+    fn a_route_rule_redirect_answers_with_its_status_and_location() {
+        let redirect = ruvyxa_middleware::route_rules::RedirectDecision {
+            location: "/blog/first?ref=1".to_string(),
+            status: 308,
+        };
+        let response = rule_redirect_response(&redirect);
+        assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(response.headers()[header::LOCATION], "/blog/first?ref=1");
+
+        let broken = ruvyxa_middleware::route_rules::RedirectDecision {
+            location: "/bad\nvalue".to_string(),
+            status: 307,
+        };
+        assert_eq!(
+            rule_redirect_response(&broken).status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    /// `headers()` is decided before `redirects()`, and a redirect answer
+    /// carries the matching header rules — what the deployed handler does too.
+    #[test]
+    fn a_route_rule_redirect_carries_the_header_rules() {
+        let rules = ruvyxa_middleware::RouteRules::compile(
+            vec![ruvyxa_middleware::HeaderRule {
+                source: "/:path*".to_string(),
+                headers: vec![ruvyxa_middleware::route_rules::HeaderEntry {
+                    key: "x-rules".to_string(),
+                    value: "on".to_string(),
+                }],
+                has: Vec::new(),
+                missing: Vec::new(),
+            }],
+            vec![ruvyxa_middleware::RedirectRule {
+                source: "/old/:slug".to_string(),
+                destination: "/new/:slug".to_string(),
+                permanent: Some(true),
+                status_code: None,
+                has: Vec::new(),
+                missing: Vec::new(),
+            }],
+            ruvyxa_middleware::RewritePhases::default(),
+        )
+        .unwrap();
+        let headers = HeaderMap::new();
+        match route_rule_stage(&rules, "/old/a", "/old/a", &headers) {
+            RuleStage::Answer(response) => {
+                assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
+                assert_eq!(response.headers()[header::LOCATION], "/new/a");
+                assert_eq!(response.headers()["x-rules"], "on");
+            }
+            RuleStage::Continue(_) => panic!("a matching redirect must answer"),
+        }
+        match route_rule_stage(&rules, "/", "/", &headers) {
+            RuleStage::Continue(entries) => {
+                assert_eq!(entries, vec![("x-rules".to_string(), "on".to_string())]);
+            }
+            RuleStage::Answer(_) => panic!("the root is not redirected"),
+        }
+    }
+
+    /// A `rewrites()` destination is canonicalized like any request path; an
+    /// external one is refused here rather than proxied.
+    #[test]
+    fn a_route_rule_rewrite_target_is_canonical_or_refused() {
+        assert_eq!(
+            rewrite_target("/news/").unwrap(),
+            ("/news".to_string(), "/news".to_string())
+        );
+        assert_eq!(
+            rewrite_target("/a?second=b&x=1").unwrap(),
+            ("/a".to_string(), "/a?second=b&x=1".to_string())
+        );
+        let external = rewrite_target("https://old.example/blog/x").unwrap_err();
+        assert_eq!(external.status(), StatusCode::BAD_GATEWAY);
+        let traversal = rewrite_target("/a/../b").unwrap_err();
+        assert_eq!(traversal.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// `headers()` rules are set on the response, replacing a header the render
+    /// already carried, and a name or value that is not legal HTTP is skipped
+    /// rather than failing the response.
+    #[test]
+    fn route_rule_headers_replace_and_skip_illegal_values() {
+        let mut response = html_response(StatusCode::OK, "<html></html>".to_string());
+        response
+            .headers_mut()
+            .insert("x-hello", HeaderValue::from_static("there"));
+        let response = with_rule_headers(
+            response,
+            &[
+                ("x-hello".to_string(), "world".to_string()),
+                ("x-slug".to_string(), "first".to_string()),
+                ("bad header".to_string(), "value".to_string()),
+                ("x-nl".to_string(), "line\nbreak".to_string()),
+            ],
+        );
+        assert_eq!(response.headers()["x-hello"], "world");
+        assert_eq!(response.headers()["x-slug"], "first");
+        assert!(response.headers().get("bad header").is_none());
+        assert!(response.headers().get("x-nl").is_none());
     }
 
     /// A 304 for a stored document carries what a cache needs and no body.

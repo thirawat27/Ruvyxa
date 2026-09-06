@@ -36,7 +36,8 @@ const files = [
     })
       .split('\n')
       .map((file) => file.trim())
-      .filter((file) => file && !file.includes('node_modules/')),
+      // Deleted in the working tree but not yet staged is still listed.
+      .filter((file) => file && !file.includes('node_modules/') && existsSync(file)),
   ),
 ]
 

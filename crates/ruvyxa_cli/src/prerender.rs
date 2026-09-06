@@ -86,15 +86,6 @@ pub(crate) struct PrerenderHead {
     /// it emitted, so a baked page and a request-time render reference the same
     /// file rather than one carrying a copy of the CSS the other links.
     pub(crate) styles: Arc<str>,
-    /// The `<head>` fragment every plugin in the project contributes.
-    ///
-    /// The live pipeline renders these into every document it composes, and a
-    /// pre-rendered page is served from disk with nobody left to add them. A
-    /// plugin whose whole purpose is a tag in the head -- `fonts`, an analytics
-    /// snippet, a verification tag -- therefore worked under `ruvyxa dev` and
-    /// was absent from every baked page in production, which is the same shape
-    /// as the missing icon link this struct already exists to prevent.
-    pub(crate) plugin_head: Arc<str>,
     /// What a client-rendered shell says about the site.
     ///
     /// Read only by [`csr_shell_html`]. Every other document is produced by a
@@ -1290,7 +1281,6 @@ pub(crate) fn csr_shell_html(
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{title}</title>{description}
   {asset_links}
-  {plugin_head}
   {styles}
   {preload_links}
   {bootstrap}
@@ -1303,7 +1293,6 @@ pub(crate) fn csr_shell_html(
 </html>"#,
         title = escape_html(title),
         asset_links = head.asset_links,
-        plugin_head = head.plugin_head,
         styles = head.styles,
         client_src = escape_html(&client_src),
         // `params` is empty rather than the route's: this shell is written once
@@ -1315,14 +1304,12 @@ pub(crate) fn csr_shell_html(
 
 /// Put into a rendered document what the live renderer would have added.
 ///
-/// The order matches `render_page_ssg`'s head — links, then what the plugins
-/// declared, then the stylesheet — so the two documents differ only where they
-/// have to.
+/// The order matches `render_page_ssg`'s head — links, then the stylesheet —
+/// so the two documents differ only where they have to.
 pub(crate) fn inject_prerender_head(html: &str, head: &PrerenderHead) -> String {
     let head_tags = format!(
-        "{}{}{}",
+        "{}{}",
         ruvyxa_dev_server::document_head_defaults(html, &head.asset_links),
-        head.plugin_head,
         head.styles
     );
     let lower = html.to_ascii_lowercase();
@@ -1559,7 +1546,6 @@ mod csr_shell_tests {
             &BTreeMap::new(),
             &PrerenderHead {
                 asset_links: Arc::from(""),
-                plugin_head: Arc::from(""),
                 styles: Arc::from(""),
                 shell: CsrShell {
                     title: Some(Arc::from("Stress Lab")),
@@ -1589,7 +1575,6 @@ mod csr_shell_tests {
             &BTreeMap::new(),
             &PrerenderHead {
                 asset_links: Arc::from(""),
-                plugin_head: Arc::from(""),
                 styles: Arc::from(""),
                 shell: CsrShell::default(),
             },
@@ -1610,7 +1595,6 @@ mod csr_shell_tests {
             &BTreeMap::new(),
             &PrerenderHead {
                 asset_links: Arc::from(""),
-                plugin_head: Arc::from(""),
                 styles: Arc::from(""),
                 shell: CsrShell::default(),
             },

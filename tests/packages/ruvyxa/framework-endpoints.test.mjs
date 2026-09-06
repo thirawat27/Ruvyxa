@@ -8,8 +8,8 @@ const workspaceRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta
 const runtimeUrl = (file) =>
   `file://${path.join(workspaceRoot, 'packages/ruvyxa/runtime', file).replaceAll('\\', '/')}`
 
-const { RESERVED_FRAMEWORK_PATHS, createPluginRegistry } = await import(
-  runtimeUrl('plugin-http.mjs')
+const { RESERVED_FRAMEWORK_PATHS, normalizeCollabConfig, normalizeRealtimeConfig } = await import(
+  runtimeUrl('framework-paths.mjs')
 )
 const { createHandler } = await import(runtimeUrl('serverless-handler.mjs'))
 const contract = JSON.parse(
@@ -115,41 +115,32 @@ describe('framework endpoint conformance', () => {
     assert.deepEqual([...RESERVED_FRAMEWORK_PATHS], reserved)
   })
 
-  // The socket transports a plugin may claim. This half runs first, inside the
-  // plugin host; the Axum half re-checks the descriptor it is handed, because
-  // a bad path there panics matchit inside `Router::route` rather than
-  // producing a diagnostic. Both halves were a denylist of the axum 0.7
-  // wildcard alphabet while the workspace ran axum 0.8, so `/{room}` passed
-  // both. The Rust replay is
+  // The socket transport paths `config.realtime` / `config.collab` may name.
+  // This half runs first, in the config renderer; the Axum half re-checks the
+  // config it is handed, because a bad path there panics matchit inside
+  // `Router::route` rather than producing a diagnostic. Both halves were a
+  // denylist of the axum 0.7 wildcard alphabet while the workspace ran axum
+  // 0.8, so `/{room}` passed both. The Rust replay is
   // `a_transport_path_is_accepted_or_refused_as_the_contract_says`.
-  it('agrees with the native host on which transport paths a plugin may claim', async () => {
+  it('agrees with the native host on which transport paths the config may name', () => {
     assert.ok(contract.transportPaths.length > 0, 'the transport path table must not be empty')
 
-    for (const capability of ['realtime@1', 'presence@1']) {
+    for (const [key, normalize] of [
+      ['realtime', normalizeRealtimeConfig],
+      ['collab', normalizeCollabConfig],
+    ]) {
       for (const { path: claimed, valid, why } of contract.transportPaths) {
-        const registry = createPluginRegistry({
-          plugins: [
-            {
-              name: 'transport',
-              register({ native }) {
-                native.claim(capability, { path: claimed })
-              },
-            },
-          ],
-        })
-
         if (valid) {
-          const built = await registry
           assert.equal(
-            built.capabilities.get(capability).path,
+            normalize({ path: claimed }).path,
             claimed,
-            `${capability} must accept ${claimed}: ${why}`,
+            `${key} must accept ${claimed}: ${why}`,
           )
         } else {
-          await assert.rejects(
-            registry,
+          assert.throws(
+            () => normalize({ path: claimed }),
             TypeError,
-            `${capability} must refuse ${JSON.stringify(claimed)}: ${why}`,
+            `${key} must refuse ${JSON.stringify(claimed)}: ${why}`,
           )
         }
       }
@@ -314,55 +305,6 @@ describe('framework endpoint conformance', () => {
         )
       }
     }
-  })
-
-  it('decides the framework endpoints ahead of the plugin stage', async () => {
-    // RTMS-05. On the native host the framework endpoints are axum routes and
-    // the plugin-bearing handler is the fallback, so a reserved path never
-    // reaches `apply_request_plugins`. This host wrapped the plugin stage around
-    // everything, so an `http.onRequest({ match: ['*'] })` hook guarded
-    // `POST /__ruvyxa/action` when deployed and did not guard it under
-    // `dev`/`start` -- the dangerous direction for a security plugin, whose
-    // author develops against the host that does not exercise the guard.
-    //
-    // `handlerWithNoRoutes` builds its handler with no `pluginHttp` at all,
-    // which is why the contract could not see this.
-    const seen = []
-    const handler = createHandler({
-      routes: [],
-      importPage: async () => ({ render: async () => '<html></html>' }),
-      importApi: async () => ({}),
-      importAction: async () => null,
-      optimizeImage: async () => new Response('image', { status: 200 }),
-      pluginHttp: async (request) => {
-        seen.push(new URL(request.url).pathname)
-        return new Response('plugin', { status: 418 })
-      },
-    })
-
-    for (const endpoint of dispatched) {
-      for (const probe of endpoint.probes ?? [endpoint.probe ?? {}]) {
-        const query = probe.query ? `?${probe.query}` : ''
-        const response = await handler(
-          new Request(`https://${PROBE_HOST}${endpoint.path}${query}`, {
-            method: probe.method ?? 'GET',
-            headers: probeHeaders(endpoint, probe),
-          }),
-        )
-        assert.notEqual(
-          response.status,
-          418,
-          `${endpoint.path} was answered by a plugin; the framework owns this path`,
-        )
-      }
-    }
-    assert.deepEqual(seen, [], 'no reserved endpoint may reach the plugin stage')
-
-    // The other direction, so skipping the stage cannot become skipping it for
-    // everything: an ordinary application path still runs plugin hooks.
-    const ordinary = await handler(new Request(`https://${PROBE_HOST}/about`))
-    assert.equal(ordinary.status, 418)
-    assert.deepEqual(seen, ['/about'])
   })
 
   it('does not claim paths the contract does not list', async () => {

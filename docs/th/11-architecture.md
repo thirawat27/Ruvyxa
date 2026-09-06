@@ -16,7 +16,7 @@ flowchart TB
   CLI --> TUI[ruvyxa_tui]
   SERVER --> TUI
   BUNDLER --> RT[packages/ruvyxa runtime]
-  APP[Application + plugins] --> CLI
+  APP[Application + config] --> CLI
   APP --> REACT[@ruvyxa/react]
   APP --> CORE[@ruvyxa/core]
 ```
@@ -26,13 +26,13 @@ adapter selection และ execution ฝั่ง package `ruvyxa_graph` ค้
 rendering intent `ruvyxa_bundler` compile TypeScript/JSX, resolve/link module, split chunk, minify,
 เขียน source map, จัดการ style, cache แบบ incremental และตรวจ server/client boundary
 `ruvyxa_dev_server` ให้ Axum serving, routing, HMR, worker pool, render cache/pipeline, static
-asset, i18n, image handling และ plugin bridge/head integration
+asset, i18n, image handling และ bridge ไปยัง project worker
 
-`ruvyxa_middleware` เป็นเจ้าของ built-in middleware configuration/stack และ plugin host
-`ruvyxa_diagnostics` เก็บ diagnostic reporting ที่ใช้ร่วมกัน ส่วน `ruvyxa_tui` เป็นเจ้าของ primitive
-สำหรับ terminal layout, progress, mascot และ theme ที่ CLI กับ command output ฝั่ง server ใช้ร่วมกัน
-JavaScript runtime ใน `packages/ruvyxa/runtime/` ทำ rendering/compiler/worker/adapter ณ boundary ที่
-Rust เรียก TypeScript/React
+`ruvyxa_middleware` เป็นเจ้าของ built-in middleware configuration/stack, route-rule evaluator
+ที่ใช้ร่วมกัน และ project worker host `ruvyxa_diagnostics` เก็บ diagnostic reporting ที่ใช้ร่วมกัน
+ส่วน `ruvyxa_tui` เป็นเจ้าของ primitive สำหรับ terminal layout, progress, mascot และ theme ที่ CLI
+กับ command output ฝั่ง server ใช้ร่วมกัน JavaScript runtime ใน `packages/ruvyxa/runtime/` ทำ
+rendering/compiler/worker/adapter ณ boundary ที่ Rust เรียก TypeScript/React
 
 ## Request lifecycle
 
@@ -40,7 +40,7 @@ Rust เรียก TypeScript/React
 sequenceDiagram
   participant C as Client
   participant S as Dev/prod server
-  participant M as Middleware/plugins
+  participant M as Middleware/route rules
   participant R as Router/render pipeline
   participant W as Worker pool
   C->>S: Request
@@ -52,10 +52,11 @@ sequenceDiagram
   M-->>C: Response
 ```
 
-request และ response hook แทนค่าหรือ continue ได้ plugin response middleware buffer TypeScript
-response ภายใต้ `security.pluginLimit` จึงต้องกำหนดขนาดและทดสอบ response streaming ขนาดใหญ่ให้รอบคอบ
-worker setting เป็น process control ไม่ใช่ dependency-injection container; ไม่พบหลักฐานของ public DI
-API ทั่วไป, queue system, scheduler หรือ framework-managed event bus
+`headers()`, `redirects()`, `rewrites()` และ `proxy.handler` จาก config รันตามลำดับคงที่ก่อน
+routing; คำตอบหรือการส่งต่อของ `proxy.handler` ข้าม process boundary หนึ่งครั้งบน native host
+และไม่ข้ามเลยใน deployed build worker setting เป็น process control ไม่ใช่ dependency-injection
+container; ไม่พบหลักฐานของ public DI API ทั่วไป, queue system, scheduler หรือ framework-managed
+event bus
 
 ## ขอบเขตของ worker pool
 
@@ -91,7 +92,7 @@ refresh handler ไว้ — จะ fallback ไปที่ `location.reload()
 
 ## Build lifecycle
 
-build validate config และ graph, compile route/client code, รัน build plugin hook, prerender
+build validate config และ graph, compile route/client code, รัน project worker, prerender
 SSG/ISR/PPR route ที่เข้าเกณฑ์, สร้าง site discovery file, บันทึก manifest และ commit staging output
 เข้าที่ artifact cache fingerprint input ที่เกี่ยวข้องและ reuse final prerendered HTML ได้เมื่อเปิด
 `build.prerenderCache` (ค่าเริ่มต้น) static adapter ต้องการ prerendered page ที่สร้างแล้ว

@@ -286,198 +286,16 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicUsize;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use ruvyxa_dev_server::{
     JavaScriptRuntime, MAX_ACTION_BODY_LIMIT_BYTES, MAX_ACTION_RATE_LIMIT_REQUESTS,
-    MAX_ACTION_RATE_LIMIT_WINDOW_SECS, MAX_API_BODY_LIMIT_BYTES,
-    MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES, TrustedProxies, find_runtime_script,
+    MAX_ACTION_RATE_LIMIT_WINDOW_SECS, MAX_API_BODY_LIMIT_BYTES, TrustedProxies,
 };
 use ruvyxa_graph::{DiscoverOptions, RenderStrategy, RouteParams, discover_routes};
 
 use super::*;
-
-#[test]
-fn plugin_create_scaffolds_the_canonical_plugin() {
-    let temp = tempfile::tempdir().unwrap();
-
-    scaffold_plugin(PluginCreateArgs {
-        name: "request-logger".to_string(),
-        root: temp.path().to_path_buf(),
-        dir: None,
-    })
-    .unwrap();
-
-    let plugin_dir = temp.path().join("request-logger");
-    let source = fs::read_to_string(plugin_dir.join("src/index.ts")).unwrap();
-    assert!(source.contains("import { definePlugin } from 'ruvyxa/plugin'"));
-    assert!(source.contains("name: 'request-logger'"));
-    assert!(source.contains("headers: { 'x-request-logger': 'active' }"));
-    assert!(!source.contains("register({ http })"));
-    let package: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(plugin_dir.join("package.json")).unwrap())
-            .unwrap();
-    assert_eq!(package["name"], "ruvyxa-plugin-request-logger");
-    assert!(package.get("ruvyxa").is_none());
-    assert_eq!(package["devDependencies"]["typescript"], "^7.0.2");
-    assert_eq!(
-        package["peerDependencies"]["ruvyxa"],
-        format!("^{}", env!("CARGO_PKG_VERSION"))
-    );
-    assert_eq!(package["scripts"]["prepublishOnly"], "npm test");
-    assert!(plugin_dir.join("tsconfig.json").exists());
-    assert!(plugin_dir.join("test/plugin.test.mjs").exists());
-    assert!(plugin_dir.join(".gitignore").exists());
-    let readme = fs::read_to_string(plugin_dir.join("README.md")).unwrap();
-    assert!(readme.contains("ruvyxa-plugin-request-logger"));
-    assert!(readme.contains("x-request-logger: active"));
-    assert!(!temp.path().join("plugins").exists());
-}
-
-#[test]
-fn plugin_create_leaves_no_authoring_literal_behind() {
-    // Every other scaffold test uses `request-logger`, which is also the name
-    // the templates were authored against. That makes a hardcoded literal
-    // indistinguishable from a correctly substituted placeholder, and one did
-    // survive in the generated test until it was caught by scaffolding under a
-    // different name. Scaffold under a name that shares nothing with the
-    // authoring name so any residue fails loudly.
-    let temp = tempfile::tempdir().unwrap();
-
-    scaffold_plugin(PluginCreateArgs {
-        name: "audit-trail".to_string(),
-        root: temp.path().to_path_buf(),
-        dir: None,
-    })
-    .unwrap();
-
-    let plugin_dir = temp.path().join("audit-trail");
-    for (relative_path, _) in PLUGIN_TEMPLATE_FILES {
-        let contents = fs::read_to_string(plugin_dir.join(relative_path))
-            .unwrap_or_else(|error| panic!("{relative_path} should be scaffolded: {error}"));
-
-        // A leftover authoring name means the template hardcoded a value where
-        // it should have used a placeholder.
-        assert!(
-            !contents.contains("request-logger") && !contents.contains("request_logger"),
-            "{relative_path} still carries the authoring plugin name:\n{contents}"
-        );
-        // An unsubstituted placeholder means a token was misspelled.
-        assert!(
-            !contents.contains("__PLUGIN_NAME__")
-                && !contents.contains("__PLUGIN_IDENTIFIER__")
-                && !contents.contains("__RUVYXA_VERSION__"),
-            "{relative_path} has an unsubstituted placeholder:\n{contents}"
-        );
-    }
-}
-
-#[test]
-fn plugin_create_scaffolds_into_a_custom_directory() {
-    let temp = tempfile::tempdir().unwrap();
-
-    scaffold_plugin(PluginCreateArgs {
-        name: "request-logger".to_string(),
-        root: temp.path().to_path_buf(),
-        dir: Some(PathBuf::from("tools/my-logger")),
-    })
-    .unwrap();
-
-    let plugin_dir = temp.path().join("tools/my-logger");
-    assert!(plugin_dir.join("src/index.ts").exists());
-    assert!(!temp.path().join("plugins").exists());
-    let package: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(plugin_dir.join("package.json")).unwrap())
-            .unwrap();
-    assert_eq!(package["name"], "ruvyxa-plugin-request-logger");
-}
-
-#[test]
-fn plugin_create_rejects_custom_directory_traversal() {
-    let temp = tempfile::tempdir().unwrap();
-    let error = scaffold_plugin(PluginCreateArgs {
-        name: "request-logger".to_string(),
-        root: temp.path().to_path_buf(),
-        dir: Some(PathBuf::from("../outside")),
-    })
-    .unwrap_err()
-    .to_string();
-
-    assert!(error.contains("--dir must not contain `..`"));
-}
-
-#[test]
-fn plugin_create_rejects_absolute_custom_directory() {
-    let root = tempfile::tempdir().unwrap();
-    let outside = tempfile::tempdir().unwrap();
-    let target = outside.path().join("plugin");
-
-    let error = scaffold_plugin(PluginCreateArgs {
-        name: "request-logger".to_string(),
-        root: root.path().to_path_buf(),
-        dir: Some(target.clone()),
-    })
-    .unwrap_err()
-    .to_string();
-
-    assert!(error.contains("--dir must be relative to --root"));
-    assert!(!target.exists());
-}
-
-#[test]
-fn plugin_create_rejects_unsafe_names() {
-    let temp = tempfile::tempdir().unwrap();
-    let error = scaffold_plugin(PluginCreateArgs {
-        name: "../escape".to_string(),
-        root: temp.path().to_path_buf(),
-        dir: None,
-    })
-    .unwrap_err()
-    .to_string();
-
-    assert!(error.contains("plugin name must use lowercase"));
-    assert!(!temp.path().join("escape").exists());
-}
-
-#[test]
-fn plugin_create_rejects_repeated_hyphens() {
-    let temp = tempfile::tempdir().unwrap();
-    let error = scaffold_plugin(PluginCreateArgs {
-        name: "request--logger".to_string(),
-        root: temp.path().to_path_buf(),
-        dir: None,
-    })
-    .unwrap_err()
-    .to_string();
-
-    assert!(error.contains("single hyphens"));
-    assert!(!temp.path().join("request--logger").exists());
-}
-
-#[test]
-fn plugin_cli_exposes_only_create_without_a_template_selector() {
-    let cli = Cli::try_parse_from(["ruvyxa", "plugin", "create", "request-logger"])
-        .expect("plugin create should parse");
-    let Command::Plugin(plugin) = cli.command else {
-        panic!("expected plugin command");
-    };
-    assert!(matches!(plugin.command, PluginCommand::Create(_)));
-
-    assert!(Cli::try_parse_from(["ruvyxa", "plugin", "unsupported", "request-logger"]).is_err());
-    assert!(
-        Cli::try_parse_from([
-            "ruvyxa",
-            "plugin",
-            "create",
-            "request-logger",
-            "--template",
-            "http"
-        ])
-        .is_err()
-    );
-}
 
 /// The adapter runs last and can be checked first.
 ///
@@ -1374,7 +1192,6 @@ fn server_configs_apply_action_security_options() {
         "security": {
             "actionLimit": 8192,
             "apiLimit": 16384,
-            "pluginLimit": 32768,
             "actionRateLimit": { "max": 240, "window": 30 },
             "sameOrigin": false,
             "fetchMeta": false,
@@ -1390,7 +1207,6 @@ fn server_configs_apply_action_security_options() {
     ] {
         assert_eq!(server.action_body_limit_bytes, 8192);
         assert_eq!(server.api_body_limit_bytes, 16384);
-        assert_eq!(server.plugin_response_body_limit_bytes, 32768);
         assert_eq!(server.action_rate_limit_max, 240);
         assert_eq!(server.action_rate_limit_window, Duration::from_secs(30));
         assert!(!server.same_origin_actions);
@@ -1431,13 +1247,13 @@ fn rejects_unknown_rust_config_fields() {
 fn rejects_zero_security_limits() {
     let config: ProjectConfig = serde_json::from_value(json!({
         "security": {
-            "pluginLimit": 0
+            "actionLimit": 0
         }
     }))
     .unwrap();
 
     let error = config.validate_paths().unwrap_err();
-    assert!(error.to_string().contains("security.pluginLimit"));
+    assert!(error.to_string().contains("security.actionLimit"));
 }
 
 #[test]
@@ -1597,27 +1413,6 @@ fn accepts_documented_cidr_trusted_proxy_ranges() {
 }
 
 #[test]
-fn rejects_excessive_plugin_response_limit() {
-    let accepted: ProjectConfig = serde_json::from_value(json!({
-        "security": {
-            "pluginLimit": MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES
-        }
-    }))
-    .unwrap();
-    assert!(accepted.validate_paths().is_ok());
-
-    let config: ProjectConfig = serde_json::from_value(json!({
-        "security": {
-            "pluginLimit": MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES + 1
-        }
-    }))
-    .unwrap();
-
-    let error = config.validate_paths().unwrap_err();
-    assert!(error.to_string().contains("must not exceed"));
-}
-
-#[test]
 fn parses_ruvyxa_bundler_build_options() {
     assert!(matches!(
         parse_jsx_runtime(None).unwrap(),
@@ -1647,25 +1442,6 @@ fn parses_ruvyxa_bundler_build_options() {
     assert_eq!(config.emit_chunk_manifest, Some(true));
     assert_eq!(config.prebundle_dependencies, Some(false));
     assert_eq!(config.prerender_cache, Some(false));
-}
-
-#[test]
-fn parses_js_build_plugin_metadata() {
-    let config: ProjectConfig = serde_json::from_value(json!({
-        "plugins": [
-            {
-                "name": "banner"
-            }
-        ]
-    }))
-    .unwrap();
-
-    assert_eq!(config.plugins.len(), 1);
-    assert_eq!(config.plugins[0].name, "banner");
-
-    let manifest = build_plugin_manifest(&config.plugins);
-    assert_eq!(manifest[0]["name"], "banner");
-    assert_eq!(manifest[0].as_object().unwrap().len(), 1);
 }
 
 #[test]
@@ -1819,7 +1595,6 @@ fn an_emitted_bundle_and_its_source_map_agree_after_the_shared_import() {
         &manifest,
         &client_dir,
         &build,
-        &[],
         RuvyxaBuildCache {
             dependency_hash: "no-config",
             directory: &root.join(".ruvyxa/cache/bundler"),
@@ -1980,7 +1755,6 @@ fn the_shared_chunk_keeps_the_order_the_routes_evaluate_in() {
         &manifest,
         &client_dir,
         &build,
-        &[],
         RuvyxaBuildCache {
             dependency_hash: "no-config",
             directory: &root.join(".ruvyxa/cache/bundler"),
@@ -2045,7 +1819,6 @@ fn emit_client_bundles_writes_chunk_manifest_when_enabled() {
         &manifest,
         &client_dir,
         &build,
-        &[],
         RuvyxaBuildCache {
             dependency_hash: "no-config",
             directory: &root.join(".ruvyxa/cache/bundler"),
@@ -2098,7 +1871,6 @@ fn client_manifest_attaches_shared_chunks_to_affected_routes() {
         &manifest,
         &client_dir,
         &build,
-        &[],
         RuvyxaBuildCache {
             dependency_hash: "no-config",
             directory: &root.join(".ruvyxa/cache/bundler"),
@@ -2175,7 +1947,6 @@ fn client_manifest_attaches_shared_chunks_to_affected_routes() {
         &manifest,
         &client_dir,
         &build,
-        &[],
         RuvyxaBuildCache {
             dependency_hash: "no-config",
             directory: &root.join(".ruvyxa/cache/bundler"),
@@ -2197,7 +1968,6 @@ fn client_manifest_attaches_shared_chunks_to_affected_routes() {
         &manifest,
         &client_dir,
         &build,
-        &[],
         RuvyxaBuildCache {
             dependency_hash: "no-config",
             directory: &root.join(".ruvyxa/cache/bundler"),
@@ -2253,7 +2023,6 @@ fn client_artifact_cache_invalidates_dynamic_import_dependencies() {
             &manifest,
             &client_dir,
             &build,
-            &[],
             RuvyxaBuildCache {
                 dependency_hash: "no-config",
                 directory: &cache_dir,
@@ -2342,18 +2111,12 @@ fn prerender_deferred_hydration_loads_bundle_only_through_loader() {
 /// no such file. Every production page load logged a 404 that `ruvyxa dev`,
 /// which renders through the pipeline that injects these, never showed.
 ///
-/// A plugin's declared head is the same shape and was missing for the same
-/// reason. `render_page_ssg` composes `defaults + plugin head + stylesheet`;
-/// this composed `defaults + stylesheet`, so `fonts`, an analytics snippet, or
-/// a site-verification tag rendered under `ruvyxa dev` and appeared in no baked
-/// page at all — and static is what most pages are.
 #[test]
 fn prerender_html_includes_the_document_head_the_live_renderer_composes() {
     let html = inject_prerender_head(
         "<!doctype html><html><head><title>Docs</title></head><body><main>Guide</main></body></html>",
         &PrerenderHead {
             asset_links: Arc::from(r#"<link rel="icon" type="image/png" href="/ruvyxa.png">"#),
-            plugin_head: Arc::from(r#"<link rel="stylesheet" href="/fonts/fonts.css">"#),
             // The finished tag, which is what a build now hands over: it links
             // the stylesheet it emitted rather than inlining the rule text, so
             // a baked page and a request-time render reference one file.
@@ -2364,158 +2127,12 @@ fn prerender_html_includes_the_document_head_the_live_renderer_composes() {
 
     assert!(html.contains(r#"<link rel="stylesheet" href="/__ruvyxa/client/styles.abc.css">"#));
     assert!(html.contains(r#"<link rel="icon" type="image/png" href="/ruvyxa.png">"#));
-    assert!(html.contains(r#"<link rel="stylesheet" href="/fonts/fonts.css">"#));
     assert!(
         html.contains(r#"<meta name="viewport" content="width=device-width, initial-scale=1">"#)
     );
     assert!(html.find("stylesheet").unwrap() < html.find("</head>").unwrap());
     assert!(html.find(r#"rel="icon""#).unwrap() < html.find("</head>").unwrap());
-    assert!(html.find("/fonts/fonts.css").unwrap() < html.find("</head>").unwrap());
     assert!(html.contains("<main>Guide</main>"));
-}
-
-/// The head a build composes is read from the project's own configuration.
-///
-/// The test above holds the composition; this one holds the wiring, which is
-/// the half that was actually missing. `config.plugins[].head` was parsed,
-/// carried through config load, and read by exactly the two server hosts —
-/// never by the build — so every field in it existed and none of it reached a
-/// file. Going through `prerender_head` from a real loaded config is what makes
-/// that reachable-but-unread state fail here instead of in production.
-#[test]
-fn a_plugin_head_declaration_reaches_the_pages_a_build_bakes() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    std::fs::create_dir_all(root.join("app")).unwrap();
-    std::fs::write(
-        root.join("ruvyxa.config.ts"),
-        r#"
-import { config } from "ruvyxa/config"
-import { definePlugin } from "ruvyxa/plugin"
-
-export default config({
-  plugins: [definePlugin({
-name: "analytics",
-head: [{ tag: "script", attrs: { src: "https://example.test/a.js", defer: true } }],
-  })],
-})
-"#,
-    )
-    .unwrap();
-
-    let config = load_project_config(root).unwrap();
-    let head =
-        crate::build::prerender_head(&config, &root.join("assets"), None, "", CsrShell::default());
-
-    let rendered = inject_prerender_head(
-        "<!doctype html><html><head><title>Docs</title></head><body><main>Guide</main></body></html>",
-        &head,
-    );
-    assert!(
-        rendered.contains(r#"src="https://example.test/a.js""#),
-        "a rendered page must carry the plugin's tag: {rendered}"
-    );
-    assert!(rendered.find("example.test").unwrap() < rendered.find("</head>").unwrap());
-
-    // And the shell, which is a separate template rather than an injection into
-    // a rendered document, so the two can be missing it independently.
-    let shell = csr_shell_html("/", &BTreeMap::new(), &head);
-    assert!(
-        shell.contains(r#"src="https://example.test/a.js""#),
-        "a client-rendered shell must carry it too: {shell}"
-    );
-}
-
-#[test]
-fn native_client_build_applies_js_config_transform_plugin() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    let app = root.join("app");
-    let client_dir = root.join(".ruvyxa").join("client");
-    std::fs::create_dir_all(&app).unwrap();
-    std::fs::create_dir_all(&client_dir).unwrap();
-    std::fs::write(
-        app.join("page.tsx"),
-        "import { virtualLabel } from 'virtual:label'; export default function Page() { return <main>{virtualLabel} Before</main>; }",
-    )
-    .unwrap();
-    std::fs::write(
-        root.join("ruvyxa.config.ts"),
-        r#"
-import { config } from "ruvyxa/config"
-import { definePlugin } from "ruvyxa/plugin"
-import path from "node:path"
-
-export default config({
-  build: {
-minify: false,
-map: true,
-manifest: true,
-  },
-  plugins: [definePlugin({
-name: "replace-before",
-register({ build }) {
-  build.onResolve(({ id, root }) =>
-    id === "virtual:label" ? path.join(root, "virtual-label.ts") : undefined
-  )
-  build.onLoad(({ id }) =>
-    id.endsWith("virtual-label.ts")
-      ? 'export const virtualLabel = "LoadedByPlugin"'
-      : undefined
-  )
-  build.onTransform(({ code, id, environment }) => {
-    if (environment !== "client" || !id.endsWith("page.tsx")) return null
-    return {
-      code: code.replace("Before", "After"),
-      map: {
-        version: 3,
-        sources: ["plugin-original.tsx"],
-        sourcesContent: [code],
-        names: [],
-        mappings: "AAAA",
-      },
-    }
-  })
-},
-  })],
-})
-"#,
-    )
-    .unwrap();
-
-    let config = load_project_config(root).unwrap();
-    let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
-    let client_manifest = emit_client_bundles(
-        root,
-        &app,
-        &manifest,
-        &client_dir,
-        &config.build,
-        &config.plugins,
-        RuvyxaBuildCache {
-            dependency_hash: &config.build_dependency_hash,
-            directory: &build_cache_dir(root, &config.cache),
-        },
-    )
-    .unwrap();
-    let route_file = client_manifest["routes"][0]["file"].as_str().unwrap();
-    let output = std::fs::read_to_string(client_dir.join(route_file)).unwrap();
-
-    assert!(output.contains("After"), "{output}");
-    assert!(output.contains("LoadedByPlugin"), "{output}");
-    assert!(!output.contains("Before"), "{output}");
-    assert_eq!(client_manifest["plugins"][0]["name"], "replace-before");
-    let source_map_file = client_manifest["routes"][0]["sourceMap"].as_str().unwrap();
-    let source_map: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(client_dir.join(source_map_file)).unwrap())
-            .unwrap();
-    assert!(
-        source_map["sources"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|source| source.as_str() == Some("plugin-original.tsx"))
-    );
 }
 
 /// `.env` is a build input, so editing one has to invalidate compiled bytes.
@@ -2748,96 +2365,6 @@ fn clean_removes_the_default_out_directory_only_once() {
 }
 
 #[test]
-fn imported_plugin_change_invalidates_compile_cache_without_clean() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    let app = root.join("app");
-    let client_dir = root.join(".ruvyxa").join("client");
-    let plugin_file = root.join("build-plugin.ts");
-    std::fs::create_dir_all(&app).unwrap();
-    std::fs::create_dir_all(&client_dir).unwrap();
-    std::fs::write(
-        app.join("page.tsx"),
-        "export default function Page() { return <main>Before</main>; }",
-    )
-    .unwrap();
-    std::fs::write(
-        root.join("ruvyxa.config.ts"),
-        r#"
-import { plugin } from "./build-plugin.js"
-export default { build: { minify: false }, plugins: [plugin] }
-"#,
-    )
-    .unwrap();
-
-    let write_plugin = |replacement: &str| {
-        std::fs::write(
-            &plugin_file,
-            format!(
-                r#"import {{ definePlugin }} from "ruvyxa/plugin"
-export const plugin = definePlugin({{
-  name: "replace-label",
-  register({{ build }}) {{
-build.onTransform(({{ code, id }}) => {{
-  if (!id.endsWith("page.tsx")) return null
-return {{ code: code.replace("Before", "{replacement}") }}
-}})
-  }}
-}})
-"#
-            ),
-        )
-        .unwrap();
-    };
-
-    write_plugin("FirstBuild");
-    let first_config = load_project_config(root).unwrap();
-    let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
-    let cache_dir = build_cache_dir(root, &first_config.cache);
-    let first_manifest = emit_client_bundles(
-        root,
-        &app,
-        &manifest,
-        &client_dir,
-        &first_config.build,
-        &first_config.plugins,
-        RuvyxaBuildCache {
-            dependency_hash: &first_config.build_dependency_hash,
-            directory: &cache_dir,
-        },
-    )
-    .unwrap();
-    let first_file = first_manifest["routes"][0]["file"].as_str().unwrap();
-    let first_output = std::fs::read_to_string(client_dir.join(first_file)).unwrap();
-
-    write_plugin("SecondRun");
-    let second_config = load_project_config(root).unwrap();
-    assert_ne!(
-        first_config.build_dependency_hash,
-        second_config.build_dependency_hash
-    );
-    let second_manifest = emit_client_bundles(
-        root,
-        &app,
-        &manifest,
-        &client_dir,
-        &second_config.build,
-        &second_config.plugins,
-        RuvyxaBuildCache {
-            dependency_hash: &second_config.build_dependency_hash,
-            directory: &cache_dir,
-        },
-    )
-    .unwrap();
-    let second_file = second_manifest["routes"][0]["file"].as_str().unwrap();
-    let second_output = std::fs::read_to_string(client_dir.join(second_file)).unwrap();
-
-    assert!(first_output.contains("FirstBuild"), "{first_output}");
-    assert!(second_output.contains("SecondRun"), "{second_output}");
-    assert!(!second_output.contains("FirstBuild"), "{second_output}");
-}
-
-#[test]
 fn native_client_build_compiles_mdx_with_configured_unified_plugins() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
@@ -2869,21 +2396,15 @@ export default config({
 
     let config = load_project_config(root).unwrap();
     let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
-    let session = TypeScriptPluginBuildSession::new(
-        root,
-        &config.plugins,
-        config.javascript_runtime(),
-        config.markdown_enabled(),
-        config.react_compiler.unwrap_or(false),
-    )
-    .unwrap();
+    let session =
+        BuildWorkerSession::new(root, config.javascript_runtime(), config.worker_options())
+            .unwrap();
     let client_manifest = emit_client_bundles_with_session(
         root,
         &app,
         &manifest,
         &client_dir,
         &config.build,
-        &config.plugins,
         RuvyxaBuildCache {
             dependency_hash: &config.build_dependency_hash,
             directory: &build_cache_dir(root, &config.cache),
@@ -2901,78 +2422,7 @@ export default config({
 }
 
 #[test]
-fn typescript_plugin_bridge_reuses_worker_state() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    std::fs::write(
-        root.join("ruvyxa.config.mjs"),
-        r#"
-import { definePlugin } from "ruvyxa/plugin"
-let calls = 0
-export default {
-  plugins: [definePlugin({
-name: "counter",
-register({ build }) {
-  build.onTransform(({ code }) => {
-    calls += 1
-    return {
-      code: `${code}\nexport const pluginCall = ${calls}`,
-      map: {
-        version: 3,
-        sources: ["counter-input.ts"],
-        sourcesContent: [code],
-        names: [],
-        mappings: "AAAA",
-      },
-    }
-  })
-},
-  })],
-}
-"#,
-    )
-    .unwrap();
-
-    let runner = find_runtime_script(root, "plugin-runtime.mjs").unwrap();
-    let bridge = TypeScriptPluginBridge {
-        project_root: root.to_path_buf(),
-        workers: Arc::new(vec![Mutex::new(
-            TypeScriptPluginWorker::spawn(&runner, root, JavaScriptRuntime::Node).unwrap(),
-        )]),
-        next_worker: Arc::new(AtomicUsize::new(0)),
-        content_compiler_enabled: false,
-        transformed_modules: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
-    };
-    let context = ruvyxa_bundler::hooks::BuildHookContext {
-        project_root: root.to_path_buf(),
-        importer: None,
-        target: ruvyxa_bundler::BundleTarget::Client,
-    };
-
-    let first = ruvyxa_bundler::hooks::BuildHooks::transform(
-        &bridge,
-        "export const value = 1",
-        &root.join("first.ts"),
-        &context,
-    )
-    .unwrap()
-    .unwrap();
-    let second = ruvyxa_bundler::hooks::BuildHooks::transform(
-        &bridge,
-        "export const value = 2",
-        &root.join("second.ts"),
-        &context,
-    )
-    .unwrap()
-    .unwrap();
-
-    assert!(first.code.contains("pluginCall = 1"));
-    assert!(second.code.contains("pluginCall = 2"));
-    assert!(second.map.unwrap().contains("counter-input.ts"));
-}
-
-#[test]
-fn native_content_bridge_runs_configured_mdx_plugins() {
+fn the_worker_compiles_mdx_with_the_configured_unified_plugins() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     std::fs::write(
@@ -2992,16 +2442,16 @@ export default { markdown: { remarkPlugins: [remarkConfigured] } }
     )
     .unwrap();
 
-    let runner = find_runtime_script(root, "plugin-runtime.mjs").unwrap();
-    let bridge = TypeScriptPluginBridge {
-        project_root: root.to_path_buf(),
-        workers: Arc::new(vec![Mutex::new(
-            TypeScriptPluginWorker::spawn(&runner, root, JavaScriptRuntime::Node).unwrap(),
-        )]),
-        next_worker: Arc::new(AtomicUsize::new(0)),
-        content_compiler_enabled: true,
-        transformed_modules: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
-    };
+    let session = BuildWorkerSession::new(
+        root,
+        JavaScriptRuntime::Node,
+        WorkerOptions {
+            markdown: true,
+            ..WorkerOptions::default()
+        },
+    )
+    .unwrap();
+    let bridge = session.bridge().unwrap();
     let context = ruvyxa_bundler::hooks::BuildHookContext {
         project_root: root.to_path_buf(),
         importer: None,
@@ -3009,7 +2459,7 @@ export default { markdown: { remarkPlugins: [remarkConfigured] } }
     };
 
     let compiled = ruvyxa_bundler::hooks::BuildHooks::compile_content(
-        &bridge,
+        bridge,
         "# Original heading",
         &root.join("page.mdx"),
         &context,
@@ -3022,114 +2472,6 @@ export default { markdown: { remarkPlugins: [remarkConfigured] } }
 }
 
 #[test]
-fn typescript_plugin_build_complete_runs_after_output_commit() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    let out_dir = root.join(".ruvyxa");
-    std::fs::create_dir_all(&out_dir).unwrap();
-    std::fs::write(
-        root.join("ruvyxa.config.mjs"),
-        r#"
-import { definePlugin } from "ruvyxa/plugin"
-export default {
-  plugins: [definePlugin({
-name: "complete",
-register({ build }) {
-  build.onComplete(async ({ outDir, manifest }) => {
-    await import("node:fs/promises").then(({ writeFile }) =>
-      writeFile(`${outDir}/plugin-complete.json`, JSON.stringify(manifest)))
-  })
-},
-  })],
-}
-"#,
-    )
-    .unwrap();
-    let plugins = vec![BuildPluginConfig {
-        name: "complete".to_string(),
-        head: Vec::new(),
-    }];
-
-    let session =
-        TypeScriptPluginBuildSession::new(root, &plugins, JavaScriptRuntime::Node, false, false)
-            .unwrap();
-    session
-        .run_complete(&out_dir, &serde_json::json!({ "routes": 1 }))
-        .unwrap();
-
-    let marker = std::fs::read_to_string(out_dir.join("plugin-complete.json")).unwrap();
-    assert!(marker.contains("\"routes\":1"));
-}
-
-#[test]
-fn typescript_plugin_build_session_reuses_worker_across_lifecycle_hooks() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    let out_dir = root.join(".ruvyxa");
-    std::fs::create_dir_all(&out_dir).unwrap();
-    std::fs::write(
-        root.join("ruvyxa.config.mjs"),
-        r#"
-import { definePlugin } from "ruvyxa/plugin"
-let phase = "registered"
-export default {
-  plugins: [definePlugin({
-name: "lifecycle-state",
-register({ build }) {
-  build.onStart(() => { phase = "started" })
-  build.onTransform(({ code }) => {
-    const observed = phase
-    phase = "transformed"
-    return `${code}\nexport const lifecyclePhase = ${JSON.stringify(observed)}`
-  })
-  build.onComplete(async ({ outDir }) => {
-    const { writeFile } = await import("node:fs/promises")
-    await writeFile(`${outDir}/plugin-phase.txt`, phase)
-  })
-},
-  })],
-}
-"#,
-    )
-    .unwrap();
-    let plugins = vec![BuildPluginConfig {
-        name: "lifecycle-state".to_string(),
-        head: Vec::new(),
-    }];
-    let session =
-        TypeScriptPluginBuildSession::new(root, &plugins, JavaScriptRuntime::Node, false, false)
-            .unwrap();
-
-    session.run_start(&out_dir).unwrap();
-    let context = ruvyxa_bundler::hooks::BuildHookContext {
-        project_root: root.to_path_buf(),
-        importer: None,
-        target: ruvyxa_bundler::BundleTarget::Client,
-    };
-    let transformed = ruvyxa_bundler::hooks::BuildHooks::transform(
-        session.bridge().unwrap(),
-        "export const value = 1",
-        &root.join("page.ts"),
-        &context,
-    )
-    .unwrap()
-    .unwrap();
-    session
-        .run_complete(&out_dir, &serde_json::json!({ "routes": 1 }))
-        .unwrap();
-
-    assert!(
-        transformed.code.contains("lifecyclePhase = \"started\""),
-        "{}",
-        transformed.code
-    );
-    assert_eq!(
-        std::fs::read_to_string(out_dir.join("plugin-phase.txt")).unwrap(),
-        "transformed"
-    );
-}
-
-#[test]
 fn production_session_runs_opt_in_react_compiler_before_oxc() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
@@ -3139,8 +2481,15 @@ fn production_session_runs_opt_in_react_compiler_before_oxc() {
     )
     .unwrap();
 
-    let session =
-        TypeScriptPluginBuildSession::new(root, &[], JavaScriptRuntime::Node, false, true).unwrap();
+    let session = BuildWorkerSession::new(
+        root,
+        JavaScriptRuntime::Node,
+        WorkerOptions {
+            react_compiler: true,
+            ..WorkerOptions::default()
+        },
+    )
+    .unwrap();
     let context = ruvyxa_bundler::hooks::BuildHookContext {
         project_root: root.to_path_buf(),
         importer: None,
@@ -3172,7 +2521,6 @@ fn top_level_help_uses_framework_name_and_command_descriptions() {
     assert!(help.contains("dev          Run the development server with hot reload"));
     assert!(help.contains("build        Build the application for production output"));
     assert!(help.contains("check        Run app-level production readiness checks"));
-    assert!(help.contains("plugin       Create a publishable plugin package"));
     assert!(help.contains("test:parity  Compare dev/prod routes and smoke-render page routes"));
 }
 
@@ -3987,15 +3335,15 @@ fn server_only_compatibility_gate_passes_only_for_api_only_node_builds() {
     assert!(ensure_server_only_supported(BuildTarget::Node, &empty).is_ok());
 }
 
-/// A plugin worker that never answers must fail the build, not hang it.
+/// A worker that never answers must fail the build, not hang it.
 ///
 /// This is the defect the timeout exists for: the hook protocol used to read
-/// the response with a blocking `read_line`, so a plugin with an unresolved
+/// the response with a blocking `read_line`, so a config with an unresolved
 /// promise or a blocking loop stalled the whole build with no diagnostic and no
 /// way out but killing the CLI.
 #[test]
-fn a_plugin_hook_that_never_answers_fails_the_build_instead_of_hanging() {
-    use crate::plugins::TypeScriptPluginWorker;
+fn a_worker_call_that_never_answers_fails_the_build_instead_of_hanging() {
+    use crate::worker::BuildWorker;
     use ruvyxa_dev_server::JavaScriptRuntime;
     use std::time::{Duration, Instant};
 
@@ -4007,7 +3355,7 @@ fn a_plugin_hook_that_never_answers_fails_the_build_instead_of_hanging() {
     let temp = tempfile::tempdir().unwrap();
     let runner = temp.path().join("never-answers.mjs");
     // Reads its request but never writes a response line, and holds the event
-    // loop open — exactly how a plugin awaiting a promise that never settles
+    // loop open — exactly how a config awaiting a promise that never settles
     // presents to the host.
     std::fs::write(
         &runner,
@@ -4015,8 +3363,7 @@ fn a_plugin_hook_that_never_answers_fails_the_build_instead_of_hanging() {
     )
     .unwrap();
 
-    let mut worker =
-        TypeScriptPluginWorker::spawn(&runner, temp.path(), JavaScriptRuntime::Node).unwrap();
+    let mut worker = BuildWorker::spawn(&runner, temp.path(), JavaScriptRuntime::Node).unwrap();
 
     let started = Instant::now();
     let error = worker
@@ -4045,15 +3392,15 @@ fn a_plugin_hook_that_never_answers_fails_the_build_instead_of_hanging() {
         )
         .expect_err("a poisoned worker must not accept another hook");
     assert!(
-        reused.to_string().contains("earlier hook timed out"),
+        reused.to_string().contains("earlier call timed out"),
         "{reused}"
     );
 }
 
 /// A worker that exits without answering is reported as an exit, not a timeout.
 #[test]
-fn a_plugin_worker_that_exits_without_answering_is_reported_immediately() {
-    use crate::plugins::TypeScriptPluginWorker;
+fn a_worker_that_exits_without_answering_is_reported_immediately() {
+    use crate::worker::BuildWorker;
     use ruvyxa_dev_server::JavaScriptRuntime;
     use std::time::{Duration, Instant};
 
@@ -4066,8 +3413,7 @@ fn a_plugin_worker_that_exits_without_answering_is_reported_immediately() {
     let runner = temp.path().join("exits.mjs");
     std::fs::write(&runner, "process.exit(3);\n").unwrap();
 
-    let mut worker =
-        TypeScriptPluginWorker::spawn(&runner, temp.path(), JavaScriptRuntime::Node).unwrap();
+    let mut worker = BuildWorker::spawn(&runner, temp.path(), JavaScriptRuntime::Node).unwrap();
 
     // Generous budget: reaching it would mean the exit was detected by timing
     // out rather than by the closed pipe, which is the distinction under test.
@@ -4566,7 +3912,6 @@ fn a_flight_export_is_recorded_when_the_build_runs_from_another_directory() {
         &manifest,
         &client_dir,
         &config.build,
-        &config.plugins,
         RuvyxaBuildCache {
             dependency_hash: &config.build_dependency_hash,
             directory: &build_cache_dir(root, &config.cache),
@@ -4858,7 +4203,7 @@ fn the_unprobed_config_sections_are_the_ones_rust_forwards_whole() {
         "`markdown` reaches Rust as the single boolean the renderer collapses it to"
     );
     assert_eq!(
-        config._content,
+        config.content,
         Some(serde_json::json!({ "engine": { "anything": ["at", "all"] } })),
         "`content` reaches Rust as opaque JSON, so its keys are the renderer's to police"
     );
@@ -4929,7 +4274,7 @@ fn the_configured_image_max_width_reaches_the_optimizer() {
 ///
 /// It carries the absolute source paths of the build machine, the module graph
 /// of every shared chunk and route, the bundler cache location, the configured
-/// plugin list, and per-route byte counts — and it was written into the one
+/// per-route byte counts — and it was written into the one
 /// directory the native server maps every flat `/__ruvyxa/client/<name>`
 /// request into and every static deployment copies wholesale to a CDN. The lean
 /// `route-manifest.json` beside it exists precisely so none of that has to
@@ -5047,7 +4392,6 @@ async fn a_fully_warm_prerender_reads_each_artifact_once_and_starts_no_worker() 
     let head = PrerenderHead {
         asset_links: "".into(),
         styles: "".into(),
-        plugin_head: "".into(),
         shell: CsrShell::default(),
     };
 

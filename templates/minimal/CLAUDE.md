@@ -24,7 +24,6 @@ Available scripts in `package.json`:
 - `npm run trace -- /` — inspect one route-manifest entry
 - `npm run bench` — benchmark discovery, analysis, and build
 - `npm run test:parity` — compare dev and production routes
-- `npm run plugin -- create my-plugin` — scaffold a plugin package
 
 Pass every argument for a framework command after `--`, for example
 `npm run analyze -- --format sarif --output reports/ruvyxa.sarif`.

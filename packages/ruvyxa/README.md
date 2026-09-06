@@ -111,9 +111,11 @@ import {
 import type {
   Adapter,
   BuildContext,
-  PluginRegistrationApi,
+  HeaderRule,
+  ProxyConfig,
+  RedirectRule,
+  RewriteRule,
   RuvyxaConfig,
-  RuvyxaPlugin,
   TransformResult,
 } from 'ruvyxa'
 ```
@@ -152,7 +154,6 @@ export default config({
   security: {
     actionLimit: 1024 * 1024,
     apiLimit: 10 * 1024 * 1024,
-    pluginLimit: 32 * 1024 * 1024,
     actionRateLimit: { max: 600, window: 60 },
     sameOrigin: true,
     fetchMeta: true,
@@ -173,81 +174,54 @@ export default config({
 })
 ```
 
-Register application middleware with the concise `http` section. Use `register()` for build, dev,
-diagnostics, native, or advanced composition:
+Cross-cutting request behaviour is declared on the same config object and evaluated identically
+under `ruvyxa dev`, `ruvyxa start`, and every deployed build:
 
 ```ts
 import { config } from 'ruvyxa/config'
-import { definePlugin } from 'ruvyxa/plugin'
 
 export default config({
-  plugins: [
-    definePlugin({
-      name: 'auth-guard',
-      http: {
-        match: ['/api/*'],
-        onRequest({ request }) {
-          return request.headers.get('authorization')
-            ? undefined
-            : new Response('Unauthorized', { status: 401 })
-        },
-      },
-    }),
-  ],
+  headers: [{ source: '/api/:path*', headers: [{ key: 'cache-control', value: 'no-store' }] }],
+  redirects: [{ source: '/old/:path*', destination: '/new/:path*', permanent: true }],
+  proxy: {
+    matcher: '/api/:path*',
+    handler(request) {
+      return request.headers.get('authorization')
+        ? undefined
+        : new Response('Unauthorized', { status: 401 })
+    },
+  },
 })
 ```
 
-## Built-in Plugins
+`headers()`, `redirects()`, and `rewrites()` take path-to-regexp sources with `has`/`missing`
+conditions and run in a fixed order ahead of routing. `proxy.handler` runs for the paths
+`proxy.matcher` names and may answer with a `Response` or continue with a rewritten `Request`.
+Anything that used to generate a file is a `route.ts` under `app/`; startup work is `register()` in
+`instrumentation.ts`. See the Request pipeline guide for the whole pipeline.
+
+## Content engine and state packages
 
 For production stateful features, Ruvyxa also ships `@ruvyxa/database`, `@ruvyxa/auth`, and
 `@ruvyxa/realtime`. Database and auth use explicit durable adapters rather than process-global
-state. Native realtime is action-driven and supported on self-hosted Node/Bun; unsupported static,
-edge, and serverless targets fail during build instead of deploying a dead socket.
+state. Native realtime is action-driven and served by the Axum host; every adapter build reports
+`RUV2205` because no build artifact serves the socket.
 
-`ruvyxa/plugins` provides typed first-party plugins without extra packages:
-
-- Runtime: `observability()`, `securityHeaders()`, and `cacheRules()`
-- Content and app delivery: `contentEngine()`, `pwa()`, `feed()`, `searchIndex()`, and `openApi()`
-- Routing/build utilities: `redirects()`, `headers()`, `sitemap()`, `robots()`, `alias()`,
-  `bundleBudget()`, and `requireEnv()`
-
-```ts
-import { config } from 'ruvyxa/config'
-import { cacheRules, observability, securityHeaders } from 'ruvyxa/plugins'
-
-export default config({
-  site: {
-    url: 'https://example.com',
-    title: 'Example',
-    description: 'Latest articles',
-    language: 'en',
-  },
-  content: true,
-  plugins: [
-    observability({ routes: ['/api/*'] }),
-    securityHeaders({ contentSecurityPolicy: { 'default-src': ["'self'"] } }),
-    cacheRules([{ source: '/api/*', browser: 'no-store' }]),
-  ],
-})
-```
-
-`content: true` automatically enables Content Engine without duplicate plugin wiring. The explicit
-`contentEngine(options)` plugin remains available for programmatic composition. Content Engine also
-publishes explicit answer metadata and an `/llms.txt` agent discovery index from the same
-Markdown/MDX graph. Build-generated files are written before adapters materialize deployment
-artifacts, so PWA, RSS, search-index, OpenAPI, sitemap, robots, and `llms.txt` outputs ship with
-static and hybrid adapters. See the English and Thai plugin guides for complete options, including
-independent OpenAI search/training crawler policy.
+`content: true` turns the content engine on: `/content.json`, the search index, the RSS feed, and
+`/llms.txt` are derived from the same Markdown/MDX graph, served live under `ruvyxa dev` and written
+under `assets/` by `ruvyxa build` so they ship with static and hybrid adapters. The engine reuses
+`site.url`, `site.title`, `site.description`, and `site.language`. `ruvyxa/content-engine` exports
+`contentEngine()` and `createContentEngine()` for programmatic use.
 
 ## Runtime Architecture
 
 The `ruvyxa` package includes a persistent Node/Bun render worker pool (`runtime/worker-pool.mjs`)
-and the plugin runtime (`runtime/plugin-runtime.mjs`). Each plugin host loads `ruvyxa.config.ts`
-once and serves validated NDJSON calls; dev HTTP hooks can use 1–8 processes, while one build-owned
-host serves the complete start, resolve/load/transform, and complete lifecycle of each production
-build. Module state is shared only inside one process. Dev middleware calls default to a 30-second
-timeout, and repeated HTTP headers survive the native bridge. Plugin transform source maps are
-forwarded into generated client maps.
+and the project worker (`runtime/project-worker.mjs`). Each worker loads `ruvyxa.config.ts` once and
+serves validated NDJSON calls: `proxy.handler` and dev content artifacts for the native server, and
+MDX compilation, React-compiler transforms, and content-artifact writes for a production build. The
+native server can use 1–8 processes for `proxy.handler`; module state is shared only inside one
+process. Calls default to a 30-second timeout, and repeated HTTP headers survive the native bridge.
+React-compiler source maps are forwarded into generated client maps.
 
 The runtime files included in this package:
 
@@ -258,7 +232,7 @@ The runtime files included in this package:
 | `runtime/compiler.mjs`        | Oxc-backed runtime compiler used by all Node/Bun renderers                       |
 | `runtime/api-renderer.mjs`    | Standalone API route fallback used when the worker pool is unavailable           |
 | `runtime/config-renderer.mjs` | Config file loading                                                              |
-| `runtime/plugin-runtime.mjs`  | Persistent plugin registry and hook worker                                       |
+| `runtime/project-worker.mjs`  | Persistent project worker: proxy, MDX, React compiler, content engine            |
 
 ## Ruvyxa CLI
 

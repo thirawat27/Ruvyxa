@@ -47,25 +47,19 @@ pub(crate) fn analyze_client_bundle(
         prebundle_dependencies: config.build.prebundle_dependencies,
         prerender_cache: config.build.prerender_cache,
     };
-    let plugin_session = TypeScriptPluginBuildSession::new(
-        root,
-        &config.plugins,
-        config.javascript_runtime(),
-        config.markdown_enabled(),
-        config.react_compiler.unwrap_or(false),
-    )?;
+    let worker_session =
+        BuildWorkerSession::new(root, config.javascript_runtime(), config.worker_options())?;
     let client_manifest = emit_client_bundles_with_session(
         root,
         &root.join(config.app_dir()),
         manifest,
         &client_dir,
         &build,
-        &config.plugins,
         RuvyxaBuildCache {
             dependency_hash: &config.build_dependency_hash,
             directory: &build_cache_dir(root, &config.cache),
         },
-        &plugin_session,
+        &worker_session,
         // The analyzer has no worker to ask for a server-components entry, so
         // those routes are absent from its report rather than measured wrong.
         // `ruvyxa analyze` reports on the bundles it can build without a

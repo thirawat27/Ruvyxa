@@ -3,12 +3,11 @@ import { describe, it } from 'node:test'
 
 import {
   createDatabase,
-  databasePlugin,
   dynamoAdapter,
   prismaAdapter,
+  requireDatabaseEnv,
   type DatabaseAdapter,
 } from '../../../packages/@ruvyxa/database/dist/index.js'
-import { databasePlugin as databasePluginEntry } from '../../../packages/@ruvyxa/database/dist/plugin.js'
 
 interface TestSchema {
   users: { id: string; age: number; name: string }
@@ -96,30 +95,22 @@ describe('@ruvyxa/database', () => {
     await assert.rejects(() => missing.posts.findMany(), /no configured table/)
   })
 
-  it('rejects public secrets and reports missing private environment at build time', () => {
+  it('rejects public secrets and names missing private environment at startup', () => {
     assert.throws(
-      () => databasePlugin({ requiredEnv: ['RUVYXA_PUBLIC_DATABASE_URL'] }),
+      () => requireDatabaseEnv(['RUVYXA_PUBLIC_DATABASE_URL']),
       /refuses public database variable/,
     )
-    assert.equal(databasePluginEntry, databasePlugin)
-    const plugin = databasePluginEntry({ requiredEnv: ['RUVYXA_TEST_DATABASE_URL'] })
-    let hook: (() => void) | undefined
-    plugin.register({
-      environment: 'production',
-      http: { onRequest() {}, onResponse() {}, route() {} },
-      build: {
-        onStart() {},
-        onResolve() {},
-        onLoad() {},
-        onTransform() {},
-        onComplete(value) {
-          hook = value as () => void
-        },
-      },
-      dev: { onFileChange() {} },
-      diagnostics: { report() {} },
-      native: { claim() {} },
-    })
-    assert.throws(() => hook?.(), /RUV3001.*RUVYXA_TEST_DATABASE_URL/)
+    assert.throws(() => requireDatabaseEnv(['not-a-name']), /not a valid variable name/)
+    delete process.env.RUVYXA_TEST_DATABASE_URL
+    assert.throws(
+      () => requireDatabaseEnv(['RUVYXA_TEST_DATABASE_URL']),
+      /RUV3001|missing private database environment variables: RUVYXA_TEST_DATABASE_URL/,
+    )
+    process.env.RUVYXA_TEST_DATABASE_URL = 'postgres://example'
+    try {
+      assert.doesNotThrow(() => requireDatabaseEnv(['RUVYXA_TEST_DATABASE_URL']))
+    } finally {
+      delete process.env.RUVYXA_TEST_DATABASE_URL
+    }
   })
 })

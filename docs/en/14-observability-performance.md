@@ -6,27 +6,22 @@
 
 ## Observability
 
-Use the first-party `observability()` plugin to add a request identifier, W3C `traceparent`,
-`Server-Timing`, and a structured record per response. Default request-id header is `x-request-id`;
-trace context, server timing, and logging default to enabled. You can scope it to
-exact/trailing-star routes and provide a custom logger.
+The built-in middleware adds a request identifier and a timing header, and logs one structured
+record per response: `middleware.builtin.log` records method, path, status, and duration under an
+`x-request-id` taken from the incoming header or generated; `middleware.builtin.timing` adds
+`Server-Timing`. Both run on every host.
 
 ```ts
 import { config } from 'ruvyxa/config'
-import { observability } from 'ruvyxa/plugins'
 
 export default config({
-  plugins: [
-    observability({ routes: ['/api/*'], logger: (entry) => console.info(JSON.stringify(entry)) }),
-  ],
+  middleware: { builtin: { log: true, timing: true } },
 })
 ```
 
-The record has `requestId`, `traceparent`, `method`, `pathname`, `status`, and `durationMs`. A
-failed logger is isolated so it cannot turn a valid response into an HTTP failure. Treat this as a
-foundation for your telemetry sink, not a complete metrics/tracing backend. In a generated
-application, `npm run analyze:html` provides a local build/route analysis page; `npm run trace -- /`
-inspects a route manifest entry.
+Treat this as a foundation for your telemetry sink, not a complete metrics/tracing backend. In a
+generated application, `npm run analyze:html` provides a local build/route analysis page;
+`npm run trace -- /` inspects a route manifest entry.
 
 For correlated development traces, enable `debug.traces` and run `ruvyxa dev`. The existing
 `/__ruvyxa/trace?path=/docs` response continues to inspect one route. Use
@@ -41,8 +36,8 @@ a durable telemetry backend.
 
 A file named `instrumentation.ts` (or `.js`/`.mjs`) at the project root is run once per server
 process, before the first request is served. It is where a process-wide observability SDK is
-installed — the `observability()` plugin above shapes individual responses, while this runs the
-setup an SDK needs before anything is shaped.
+installed — the built-in middleware above shapes individual responses, while this runs the setup an
+SDK needs before anything is shaped.
 
 ```ts
 // instrumentation.ts
@@ -109,9 +104,9 @@ stops speculative warmups. Keys with active build locks are not eviction candida
 
 The core cache prevents unbounded growth at 1024 entries and can serve stale values while one
 background refresh runs. A stale producer error keeps stale data when present; a cold failure still
-throws. Plugin middleware workers do not share module state. Realtime reconnect behavior is
-client-side and a serverless adapter cannot host native WebSocket realtime. These constraints matter
-when scaling past one process.
+throws. Project workers do not share module state. Realtime reconnect behavior is client-side and a
+serverless adapter cannot host native WebSocket realtime. These constraints matter when scaling past
+one process.
 
 **Previous:** [Security](13-security.md) · **Next:**
 [Deploy, run, and operate in production](15-deploy-run-and-operate.md)

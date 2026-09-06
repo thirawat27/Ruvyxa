@@ -14,18 +14,18 @@ normalize — หน้านี้ไม่เขียนซ้ำ และ `
 starter ทุกตัวเตรียมไว้และ copy-paste ได้จริง โดยเฉพาะให้ใช้ `routes:json` และ `analyze:html`
 แทนการประกอบ flag หลัง script ขึ้นเอง
 
-| คำสั่งใน application                                                                                                                  | สิ่งที่รัน                              | วัตถุประสงค์                                                             |
-| ------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- | ------------------------------------------------------------------------ |
-| `npm run dev`                                                                                                                         | `ruvyxa dev`                            | route watching และ hot reload                                            |
-| `npm run build`                                                                                                                       | `ruvyxa build`                          | สร้าง production output                                                  |
-| `npm run check`                                                                                                                       | `ruvyxa check`                          | ตรวจความพร้อมของ application                                             |
-| `npm run start` / `npm run preview`                                                                                                   | `ruvyxa start` / `preview`              | serve หรือ preview local ของ build ที่มีอยู่                             |
-| `npm run routes`                                                                                                                      | `ruvyxa routes`                         | route table แบบอ่านง่าย                                                  |
-| `npm run routes:json`                                                                                                                 | route JSON command ที่ starter กำหนด    | route output สำหรับเครื่องอ่าน                                           |
-| `npm run analyze`                                                                                                                     | `ruvyxa analyze`                        | validate route, import และ server/client boundary                        |
-| `npm run analyze:html`                                                                                                                | HTML analysis command ที่ starter กำหนด | หน้าวิเคราะห์แบบ interactive ในเครื่อง                                   |
-| `npm run adds -- form`                                                                                                                | `ruvyxa adds form`                      | scaffold application flow ที่รองรับ                                      |
-| `npm run doctor`, `npm run clean`, `npm run trace -- /`, `npm run bench`, `npm run test:parity`, `npm run plugin -- create my-plugin` | `ruvyxa` command ที่ตรงกัน              | diagnose, ลบ output, ตรวจ route, benchmark, ตรวจ parity หรือสร้าง plugin |
+| คำสั่งใน application                                                                            | สิ่งที่รัน                              | วัตถุประสงค์                                               |
+| ----------------------------------------------------------------------------------------------- | --------------------------------------- | ---------------------------------------------------------- |
+| `npm run dev`                                                                                   | `ruvyxa dev`                            | route watching และ hot reload                              |
+| `npm run build`                                                                                 | `ruvyxa build`                          | สร้าง production output                                    |
+| `npm run check`                                                                                 | `ruvyxa check`                          | ตรวจความพร้อมของ application                               |
+| `npm run start` / `npm run preview`                                                             | `ruvyxa start` / `preview`              | serve หรือ preview local ของ build ที่มีอยู่               |
+| `npm run routes`                                                                                | `ruvyxa routes`                         | route table แบบอ่านง่าย                                    |
+| `npm run routes:json`                                                                           | route JSON command ที่ starter กำหนด    | route output สำหรับเครื่องอ่าน                             |
+| `npm run analyze`                                                                               | `ruvyxa analyze`                        | validate route, import และ server/client boundary          |
+| `npm run analyze:html`                                                                          | HTML analysis command ที่ starter กำหนด | หน้าวิเคราะห์แบบ interactive ในเครื่อง                     |
+| `npm run adds -- form`                                                                          | `ruvyxa adds form`                      | scaffold application flow ที่รองรับ                        |
+| `npm run doctor`, `npm run clean`, `npm run trace -- /`, `npm run bench`, `npm run test:parity` | `ruvyxa` command ที่ตรงกัน              | diagnose, ลบ output, ตรวจ route, benchmark หรือตรวจ parity |
 
 ## เลือก JavaScript runtime
 
@@ -50,11 +50,11 @@ npm run adds -- auth
 npm run adds -- form data-table auth
 ```
 
-| Scaffold     | ไฟล์ที่สร้าง                                                                          | สิ่งที่แสดงให้เห็น                                                                                                 | สิ่งที่ต้องเติมก่อน production                                                                                      |
-| ------------ | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
-| `form`       | `app/form-example/page.tsx`, `app/form-example/action.ts`                             | native POST form, การ validate email/message ฝั่ง server, action handler และ `invalidate('contacts')`              | แทน action ตัวอย่างด้วย persistence, authorization, anti-abuse control และ success/error UX ของคุณ                  |
-| `data-table` | `app/_components/ruvyxa/data-table.tsx`                                               | generic client component ที่ filter ข้อความ, click เพื่อ sort column, ระบุ row key และ custom cell renderer ได้    | ส่ง row/column จริงเข้าไป; เพิ่ม pagination, server filtering, authorization และ mutation เมื่อแอปต้องใช้           |
-| `auth`       | `app/_server/auth.ts`, `app/__ruvyxa/auth/[...path]/route.ts`, `app/sign-in/page.tsx` | UI credentials sign-in, auth route สำหรับ GET/POST และ in-memory auth/rate-limit store สำหรับ development เท่านั้น | ติดตั้ง `@ruvyxa/auth`, register `auth.plugin`, ตั้ง environment ที่ต้องใช้ และแทน demo credential กับ memory store |
+| Scaffold     | ไฟล์ที่สร้าง                                                                          | สิ่งที่แสดงให้เห็น                                                                                                 | สิ่งที่ต้องเติมก่อน production                                                                            |
+| ------------ | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `form`       | `app/form-example/page.tsx`, `app/form-example/action.ts`                             | native POST form, การ validate email/message ฝั่ง server, action handler และ `invalidate('contacts')`              | แทน action ตัวอย่างด้วย persistence, authorization, anti-abuse control และ success/error UX ของคุณ        |
+| `data-table` | `app/_components/ruvyxa/data-table.tsx`                                               | generic client component ที่ filter ข้อความ, click เพื่อ sort column, ระบุ row key และ custom cell renderer ได้    | ส่ง row/column จริงเข้าไป; เพิ่ม pagination, server filtering, authorization และ mutation เมื่อแอปต้องใช้ |
+| `auth`       | `app/_server/auth.ts`, `app/__ruvyxa/auth/[...path]/route.ts`, `app/sign-in/page.tsx` | UI credentials sign-in, auth route สำหรับ GET/POST และ in-memory auth/rate-limit store สำหรับ development เท่านั้น | ติดตั้ง `@ruvyxa/auth`, ตั้ง environment ที่ต้องใช้ และแทน demo credential กับ memory store               |
 
 ### Form: action ที่สร้างรับค่าอะไร
 
@@ -103,13 +103,8 @@ export default function UsersPage() {
 npm install @ruvyxa/auth
 ```
 
-```ts
-// ruvyxa.config.ts
-import { config } from 'ruvyxa/config'
-import { auth } from './app/_server/auth'
-
-export default config({ plugins: [auth.plugin] })
-```
+`app/__ruvyxa/auth/[...path]/route.ts` ที่ scaffold ให้ mount endpoint ด้วยการ re-export
+`auth.handlers`; ไม่มีอะไรใน `ruvyxa.config.ts` ต้องเปลี่ยน
 
 ```dotenv
 # .env — ห้าม commit ค่าเหล่านี้
@@ -137,7 +132,7 @@ npm run adds -- form --force
 ## Build เฉพาะ API ด้วย `build --server-only`
 
 `ruvyxa build --server-only` สร้าง artifact สำหรับแอปที่มีเฉพาะ API โดยยังทำ configuration loading,
-route discovery, validation, plugin build hook, server staging และ deploy adapter เหมือน build ปกติ
+route discovery, validation, project worker, server staging และ deploy adapter เหมือน build ปกติ
 ทุกประการ และข้ามงานที่มีเฉพาะหน้า HTML เท่านั้นที่ใช้:
 
 | สร้าง                                             | ข้าม                                               |
@@ -244,7 +239,7 @@ cargo run -p ruvyxa_cli -- check --root examples/demo
 
 เมื่อดูแล framework เอง ให้รัน `cargo run -p ruvyxa_cli -- <command> --help` CLI ที่ตรวจแล้วมี
 `dev`, `build`, `check`, `start`, `preview`, `routes`, `analyze`, `adds`, `doctor`, `clean`,
-`trace`, `bench`, `test:parity` และ `plugin create`
+`trace`, `bench` และ `test:parity`
 
 ## Repository script
 
@@ -253,7 +248,7 @@ root `package.json` กำหนด `build`, `check`, `test`, `prepare`, `check:
 `format:staged`, `release:validate`, `release:bump`, `pack:smoke`, `test:full-flow` และ
 `publish:dry-run` `check:unused` รัน [Knip](https://knip.dev) ตรวจ workspace ฝั่ง
 JavaScript/TypeScript ทั้งหมด และ fail เมื่อพบไฟล์, export, type หรือ dependency ที่ไม่ได้ใช้;
-`release:validate` ก็รันด้วย Ruvyxa โหลดโค้ดจำนวนมากตาม convention — route ใน `app/`, `plugins/`,
+`release:validate` ก็รันด้วย Ruvyxa โหลดโค้ดจำนวนมากตาม convention — route ใน `app/`,
 `ruvyxa.config.ts`, runtime file ที่ native CLI resolve ด้วย path — `knip.json`
 จึงประกาศสิ่งเหล่านี้เป็น entry point แทนที่จะถือว่า ไม่ได้ใช้ TypeScript package ที่เผยแพร่กำหนด
 `build`, `check`, `test`, `format` และ `prepack` อย่างสม่ำเสมอ; ดู package manifest

@@ -45,9 +45,6 @@ importers:
       '@ruvyxa/react':
         specifier: workspace:*
         version: link:../../packages/@ruvyxa/react
-      '@ruvyxa/realtime':
-        specifier: workspace:*
-        version: link:../../packages/@ruvyxa/realtime
       react:
         specifier: 19.2.8
         version: 19.2.8
@@ -196,10 +193,6 @@ importers:
         version: 24.13.3
 
   packages/@ruvyxa/auth:
-    dependencies:
-      '@ruvyxa/core':
-        specifier: workspace:^
-        version: link:../core
     devDependencies:
       '@types/node':
         specifier: 24.13.3
@@ -218,10 +211,6 @@ importers:
   packages/@ruvyxa/core: {}
 
   packages/@ruvyxa/database:
-    dependencies:
-      '@ruvyxa/core':
-        specifier: workspace:^
-        version: link:../core
     devDependencies:
       '@types/node':
         specifier: 24.13.3

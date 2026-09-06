@@ -219,30 +219,21 @@ export const REGISTRY = [
     why: 'Part of the endpoint conformance table both hosts replay.',
   },
   {
+    name: 'SEGMENT',
+    kind: 'fixture',
+    held: 'tests/fixtures/route-rules-conformance.json',
+    why: 'The character class one `:name` captures, in both path-to-regexp compilers. A split would make `/blog/:slug` match a different set of paths on the native host than in a deployed build, which the conformance table names case by case.',
+  },
+  {
+    name: 'TOKEN',
+    kind: 'unrelated',
+    why: 'Two local scratch names. `tests.rs` holds the literal a source-map fixture plants in generated code so the test can find its position; `route-rules.ts` holds the regex that finds `:name` in a rewrite destination. Nothing is meant to agree.',
+  },
+  {
     name: 'SERVER_ACTION_HEADER',
     kind: 'fixture',
     held: 'tests/fixtures/framework-endpoint-conformance.json',
     why: 'Part of the endpoint conformance table both hosts replay.',
-  },
-  {
-    name: 'SITEMAP_FOOTER',
-    kind: 'sameValue',
-    why: 'Two sitemap writers close the document; one that closed it differently would emit a sitemap the other language considers malformed.',
-  },
-  {
-    name: 'SITEMAP_MAX_BYTES',
-    kind: 'sameValue',
-    why: "The sitemap protocol's per-document byte ceiling. A split writes a document one writer considers valid and the protocol does not.",
-  },
-  {
-    name: 'SITEMAP_MAX_LOCATION_CHARS',
-    kind: 'sameValue',
-    why: 'The protocol ceiling on one `<loc>`. A split drops a URL in one writer and keeps it in the other.',
-  },
-  {
-    name: 'SITEMAP_MAX_URLS',
-    kind: 'sameValue',
-    why: 'The protocol ceiling on entries per document, and what decides where a sitemap is split into several.',
   },
   {
     name: 'STATIC_ASSET_EXTENSIONS',
@@ -296,13 +287,17 @@ export const SOURCE_PATHSPEC = [
  * package's own directory, which is exactly the caller it was silent for.
  */
 export function trackedSources() {
-  return execFileSync('git', ['ls-files', ...SOURCE_PATHSPEC], {
-    encoding: 'utf8',
-    cwd: REPO_ROOT,
-  })
-    .split('\n')
-    .filter(Boolean)
-    .filter((file) => !file.includes('/dist/') && !file.endsWith('.d.ts'))
+  return (
+    execFileSync('git', ['ls-files', ...SOURCE_PATHSPEC], {
+      encoding: 'utf8',
+      cwd: REPO_ROOT,
+    })
+      .split('\n')
+      .filter(Boolean)
+      // A file deleted in the working tree and not yet staged is still listed.
+      .filter((file) => existsSync(path.join(REPO_ROOT, file)))
+      .filter((file) => !file.includes('/dist/') && !file.endsWith('.d.ts'))
+  )
 }
 
 /**

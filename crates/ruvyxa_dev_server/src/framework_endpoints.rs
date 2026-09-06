@@ -36,12 +36,12 @@ use crate::action_security::{
 use crate::devtools::dashboard_html;
 use crate::dynamic_image::{self, DynamicImageError};
 use crate::html_document::{hydration_loader_source, public_internal_error, url_encode_component};
-use crate::plugin_bridge::canonical_request_path;
 use crate::render_pipeline::{
     apply_revalidations, client_artifact_version, render_client_bundle_pooled,
     render_server_action_pooled, runtime_trace_cached, stamp_client_artifact,
 };
 use crate::response::{json_response, with_security_headers};
+use crate::worker_bridge::canonical_request_path;
 use crate::worker_pool::RenderFlightRequest;
 use crate::{AppState, ServerConfig, render_pipeline, static_assets, trace};
 

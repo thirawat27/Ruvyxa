@@ -277,48 +277,6 @@ describe('serverless request body limits', () => {
     assert.equal(response.status, 200)
     assert.deepEqual(await response.json(), { data: '12345', invalidated: [] })
   })
-
-  it('reapplies the endpoint limit when a plugin forwards a new request', async () => {
-    const chunk = new TextEncoder().encode('abc')
-    let producedBytes = 0
-    const forwardedBody = new ReadableStream({
-      pull(controller) {
-        if (producedBytes >= 300) {
-          controller.close()
-          return
-        }
-        producedBytes += chunk.byteLength
-        controller.enqueue(chunk)
-      },
-    })
-    const handler = createHandler({
-      routes: [],
-      importPage: async () => ({}),
-      importApi: async () => ({}),
-      importAction: async () => ({}),
-      security: { actionLimit: 4, apiLimit: 1024 },
-      pluginHttp: (_request, next) =>
-        next(
-          new Request('http://localhost/__ruvyxa/action?path=/target&name=submit', {
-            method: 'POST',
-            headers: {
-              'content-type': 'application/json',
-              host: 'localhost',
-              origin: 'http://localhost',
-              'sec-fetch-site': 'same-origin',
-            },
-            body: forwardedBody,
-            duplex: 'half',
-          }),
-        ),
-    })
-
-    const response = await handler(new Request('http://localhost/proxy'))
-
-    assert.equal(response.status, 413)
-    assert.equal(await response.text(), 'Action payload is too large')
-    assert.ok(producedBytes < 300, 'the forwarded body bypassed the action stream limit')
-  })
 })
 
 describe('serverless handler route matching', () => {
@@ -1669,40 +1627,6 @@ describe('deployed document validators', () => {
     assert.equal(response.headers.get('etag'), null)
   })
 
-  /**
-   * The validator has to describe the bytes that leave, not the bytes the
-   * strategy layer read.
-   *
-   * A plugin `http.onResponse` hook may replace the document body — the
-   * first-party `pwa` plugin injects into every HTML response — so a validator
-   * written where the document is read would name bytes nobody received, and
-   * answer 304 for a document that changed.
-   */
-  it('validates the body a plugin actually left behind', async () => {
-    const injected = '<html><body>stored+plugin</body></html>'
-    const handler = documentHandler('ssg', {
-      pluginHttp: async (request, next) => {
-        const response = await next(request)
-        if (!response.headers.get('content-type')?.includes('text/html')) return response
-        const headers = new Headers(response.headers)
-        await response.text()
-        return new Response(injected, { status: response.status, headers })
-      },
-    })
-
-    const first = await get(handler)
-    assert.equal(await first.text(), injected)
-    const etag = first.headers.get('etag')
-    assert.ok(etag)
-
-    // The validator the strategy layer would have produced must not match.
-    const stale = await documentValidatorOf(storedDocument)
-    assert.notEqual(etag, stale, 'the validator must describe the injected body')
-
-    assert.equal((await get(handler, { 'if-none-match': etag })).status, 304)
-    assert.equal((await get(handler, { 'if-none-match': stale })).status, 200)
-  })
-
   it('publishes no internal marker header on a validated document', async () => {
     const response = await get(documentHandler('ssg'))
     const published = [...response.headers.keys()].filter(
@@ -1710,15 +1634,6 @@ describe('deployed document validators', () => {
     )
     assert.deepEqual(published, [])
   })
-
-  /** The validator this handler computes for a body, recomputed independently. */
-  async function documentValidatorOf(body) {
-    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(body))
-    const hex = Array.from(new Uint8Array(digest, 0, 8), (byte) =>
-      byte.toString(16).padStart(2, '0'),
-    ).join('')
-    return `W/"${hex}"`
-  }
 })
 
 /**

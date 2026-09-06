@@ -308,9 +308,9 @@ larger batch across requests so no invalidation is silently dropped.
 `revalidateTag()` is the sibling call and does a different job:
 [it clears tagged cache entries](#invalidate-by-tag-instead-of-by-key), while `revalidatePath()`
 re-renders a stored document. Ruvyxa tags a value you cached yourself with `cache().tags(...)`,
-which is not what a Next.js tag labels — there is no `fetch()` cache here for a tag to attach to,
-and a tag does not name a route. Clearing the data a page reads does not by itself rewrite HTML the
-build already wrote; call `revalidatePath()` when the document has to change.
+which is not a `fetch()` cache tag — there is no `fetch()` cache here for a tag to attach to, and a
+tag does not name a route. Clearing the data a page reads does not by itself rewrite HTML the build
+already wrote; call `revalidatePath()` when the document has to change.
 
 On a serverless deployment, `revalidatePath` clears the calling function instance and the next
 request rewrites the stored document for every later request. A different instance that is already

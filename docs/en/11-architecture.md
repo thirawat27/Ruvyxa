@@ -16,7 +16,7 @@ flowchart TB
   CLI --> TUI[ruvyxa_tui]
   SERVER --> TUI
   BUNDLER --> RT[packages/ruvyxa runtime]
-  APP[Application + plugins] --> CLI
+  APP[Application + config] --> CLI
   APP --> REACT[@ruvyxa/react]
   APP --> CORE[@ruvyxa/core]
 ```
@@ -26,13 +26,13 @@ selection, and package-facing execution. `ruvyxa_graph` discovers and validates 
 and rendering intent. `ruvyxa_bundler` compiles TypeScript/JSX, resolves/links modules, splits
 chunks, minifies, writes source maps, handles styles, caches incrementally, and checks server/client
 boundaries. `ruvyxa_dev_server` supplies Axum serving, routing, HMR, worker pools, render
-cache/pipeline, static assets, i18n, image handling, and plugin bridge/head integration.
+cache/pipeline, static assets, i18n, image handling, and the bridge to the project worker.
 
-`ruvyxa_middleware` owns built-in middleware configuration/stack and plugin host behavior.
-`ruvyxa_diagnostics` holds shared diagnostic reporting. `ruvyxa_tui` owns shared terminal layout,
-progress, mascot, and theme primitives used by both the CLI and server-facing command output.
-JavaScript runtime files in `packages/ruvyxa/runtime/` execute rendering/compiler/worker/adapters at
-the boundary where Rust invokes TypeScript/React work.
+`ruvyxa_middleware` owns built-in middleware configuration/stack, the shared route-rule evaluator,
+and the project worker host. `ruvyxa_diagnostics` holds shared diagnostic reporting. `ruvyxa_tui`
+owns shared terminal layout, progress, mascot, and theme primitives used by both the CLI and
+server-facing command output. JavaScript runtime files in `packages/ruvyxa/runtime/` execute
+rendering/compiler/worker/adapters at the boundary where Rust invokes TypeScript/React work.
 
 ## Request lifecycle
 
@@ -40,7 +40,7 @@ the boundary where Rust invokes TypeScript/React work.
 sequenceDiagram
   participant C as Client
   participant S as Dev/prod server
-  participant M as Middleware/plugins
+  participant M as Middleware/route rules
   participant R as Router/render pipeline
   participant W as Worker pool
   C->>S: Request
@@ -52,11 +52,11 @@ sequenceDiagram
   M-->>C: Response
 ```
 
-Request and response hooks can replace values or continue. Plugin response middleware buffers
-TypeScript responses under `security.pluginLimit`, so large streaming responses require careful
-sizing and testing. Worker settings are process controls, not a dependency-injection container; no
-codebase evidence exposes a general public DI API, queue system, scheduler, or framework-managed
-event bus.
+`headers()`, `redirects()`, `rewrites()`, and `proxy.handler` from the config run in a fixed order
+ahead of routing; a `proxy.handler` answer or forward crosses one process boundary on the native
+host and none in a deployed build. Worker settings are process controls, not a dependency-injection
+container; no codebase evidence exposes a general public DI API, queue system, scheduler, or
+framework-managed event bus.
 
 ## Worker-pool boundary
 
@@ -92,7 +92,7 @@ rather than a failure mode.
 
 ## Build lifecycle
 
-Build validates config and graph, compiles route/client code, runs build plugin hooks, prerenders
+Build validates config and graph, compiles route/client code, runs the project worker, prerenders
 eligible SSG/ISR/PPR routes, emits site discovery files, records a manifest, and commits staging
 output into place. The artifact cache fingerprints relevant inputs and can reuse final prerendered
 HTML when `build.prerenderCache` is enabled (the default). Static adapters require generated

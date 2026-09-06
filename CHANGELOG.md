@@ -1,5 +1,69 @@
 # Changelog
 
+## Unreleased
+
+### The plugin system is gone; the config object, file conventions, and route handlers replace it
+
+**Breaking.** `plugins`, `definePlugin`, `RuvyxaPlugin`, `ruvyxa/plugin`, `ruvyxa/plugins`, and
+`ruvyxa/plugin-harness` are removed, together with the sixteen first-party plugins, the plugin host
+in `ruvyxa_middleware`, the plugin bridge and head injector in `ruvyxa_dev_server`, and
+`ruvyxa plugin create` with the `templates/plugin` scaffold.
+
+Every plugin behaviour existed twice — once in the Axum host, once in `serverless-handler.mjs` — and
+every request matching an `http.onRequest` scope crossed a process boundary on the native host with
+its body base64'd both ways. What replaces it is one config object evaluated from one shared table,
+so a rule cannot apply under `ruvyxa start` and not once deployed. `headers()`, `redirects()`,
+`rewrites()`, and `proxy.matcher` compile to regexes natively in both hosts, held to
+`tests/fixtures/route-rules-conformance.json`, which the Rust evaluator and
+`packages/@ruvyxa/core/src/route-rules.ts` both replay. `proxy.handler` is the only part that stays
+code: the native host runs it in the project worker for the paths the matcher names, and every
+deployed build compiles it into the function bundle and runs it in-process.
+
+| Removed                                                                    | Replacement                                                                              |
+| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `plugins: [...]`, `definePlugin`, `ruvyxa/plugin`, `ruvyxa/plugin-harness` | keys on the config object; compose with an ordinary `withX(config)` function             |
+| `http.onRequest` / `onResponse` / `http.routes`                            | `proxy: { matcher, handler }` in `ruvyxa.config.ts`                                      |
+| `redirects()`, `headers()`, `securityHeaders()`, `cacheRules()` plugins    | `redirects`, `headers`, `rewrites` config keys with `has`/`missing` conditions           |
+| `sitemap()`, `robots()`                                                    | `site.sitemap` and `site.robots`, written by `ruvyxa build`                              |
+| `contentEngine()`, `searchIndex()`, `feed()`, `llmsTxt()`, `pwa()`         | `content: true`; `ruvyxa/content-engine` exports the engine for programmatic use         |
+| `openApi()`, `healthCheck()`, `wellKnown()`, `originGuard()`               | a `route.ts` under `app/`; `originGuard` is a `proxy.handler` recipe                     |
+| `requireEnv()`                                                             | `register()` in `instrumentation.ts`; `@ruvyxa/database` ships `requireDatabaseEnv()`    |
+| `alias()`                                                                  | `paths` in `tsconfig.json`, already honoured by both compilers                           |
+| `bundleBudget()`                                                           | removed; `ruvyxa analyze` reports the same sizes                                         |
+| `observability()`                                                          | `middleware.builtin.log` and `middleware.builtin.timing`                                 |
+| `auth.plugin`                                                              | `export const { GET, POST } = auth.handlers` from `app/__ruvyxa/auth/[...path]/route.ts` |
+| `realtime()`, `collab()` from `@ruvyxa/realtime`                           | `realtime: true` and `collab: true` config keys                                          |
+| `security.pluginLimit`                                                     | removed; `middleware.timeoutMs` still bounds a `proxy.handler` call                      |
+| `build.onResolve` / `onLoad` / `onTransform`, `dev.onFileChange`, `head`   | removed; no equivalent outside bundler loaders                                           |
+
+Rules are evaluated in a fixed order on both hosts: `headers()`, `redirects()`, `proxy.handler`,
+`rewrites().beforeFiles`, files and pages, `afterFiles`, dynamic routes, `fallback`. Framework
+endpoints under `/__ruvyxa/` are decided ahead of all of it, so no rule can redirect
+`/__ruvyxa/action` and `proxy.handler` never sees it. A static adapter refuses a build carrying a
+`proxy.handler` with `RUV2204`.
+
+### The plugin worker became the project worker
+
+`runtime/plugin-runtime.mjs` is now `runtime/project-worker.mjs`, and it keeps the two jobs that
+were never plugin hooks: MDX compilation through unified, and the React compiler transform. It
+gained `proxy` and the content engine's artifact hooks. `PluginHost` is `WorkerHost`
+(`crates/ruvyxa_middleware/src/worker_host.rs`) and `TypeScriptPluginBuildSession` is
+`BuildWorkerSession` (`crates/ruvyxa_cli/src/worker.rs`). The native host starts a worker only when
+`proxy` is set, or in development when the content engine is on; a build starts one only for
+`markdown`, `reactCompiler`, or `content`.
+
+Under `ruvyxa dev` the content engine's artifacts (`/content.json`, the search index, the RSS feed,
+`/llms.txt`) are derived from the content tree per request, so an edited page shows without a
+restart; `ruvyxa build` writes them under `assets/` after the staged output is committed, which is
+why they ship with static and hybrid adapters.
+
+### Documentation
+
+`docs/en|th/08-plugins-middleware.md` are replaced by `docs/en|th/08-request-pipeline.md`. Every
+guide, `README.md`, `ARCHITECTURE.md`, `AGENTS.md`, and `CONTRIBUTING.md` were rewritten off the
+plugin vocabulary, and the documentation no longer names another framework to explain a Ruvyxa
+convention.
+
 ## v1.1.5 (2026-09-05)
 
 ### `@ruvyxa/realtime` claims; the host that serves decides

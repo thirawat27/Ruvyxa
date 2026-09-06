@@ -34,8 +34,8 @@ nested source types.
 | Image         | `optimize`, `quality`, `lossless`, `keepOriginal`, `variantWidths`, `workers`, `effort`, `onDemand.enabled`, `onDemand.maxWidth` | Defaults are optimize true, quality 82, lossless false, keep-original false, no prebuilt variants, workers 0 (available CPU count), and effort 4. This produces one WebP per source. Object-form on-demand mode defaults enabled with max width 3840.                                                                                                                                                                                                                                                                                      |
 | i18n          | `locales`, `defaultLocale`, `localeParam`, `detectLocale`, `cookie`                                                              | `locales` and `defaultLocale` are required when i18n is set. Default param is `lang`, detection true, cookie `RUVYXA_LOCALE`.                                                                                                                                                                                                                                                                                                                                                                                                              |
 | Site          | `site.url`, `site.sitemap`, `site.robots`                                                                                        | Sitemap may set `exclude`, `additionalPaths`, `defaults`, and enriched `entries`; robots may set rules, sitemap URLs, and host.                                                                                                                                                                                                                                                                                                                                                                                                            |
-| Middleware    | `builtin.cors`, `builtin.timing`, `builtin.log`, `builtin.rate`, `builtin.headers`, `workers`, `timeoutMs`                       | CORS has origins/methods/headers/credentials/maxAge. Built-in rate needs `max`, `window`, optional `key`. Plugin workers are 1–8; timeout is 30,000 ms by default and at most 300,000.                                                                                                                                                                                                                                                                                                                                                     |
-| Integration   | `adapter`, `adapterOptions`, `plugins`                                                                                           | `adapter` holds a constructed adapter; `adapterOptions` configures one selected by name instead (see [Configuring an adapter selected by name](#configuring-an-adapter-selected-by-name)). Setting both is an error. `plugins` is an array of `RuvyxaPlugin` values.                                                                                                                                                                                                                                                                       |
+| Middleware    | `builtin.cors`, `builtin.timing`, `builtin.log`, `builtin.rate`, `builtin.headers`, `workers`, `timeoutMs`                       | CORS has origins/methods/headers/credentials/maxAge. Built-in rate needs `max`, `window`, optional `key`. Project workers are 1–8; timeout is 30,000 ms by default and at most 300,000.                                                                                                                                                                                                                                                                                                                                                    |
+| Integration   | `adapter`, `adapterOptions`                                                                                                      | `adapter` holds a constructed adapter; `adapterOptions` configures one selected by name instead (see [Configuring an adapter selected by name](#configuring-an-adapter-selected-by-name)). Setting both is an error.                                                                                                                                                                                                                                                                                                                       |
 
 ## Runtime selection
 
@@ -44,7 +44,7 @@ For JavaScript processes, use `node`, `bun`, or `deno`. `--runtime` has the high
 launching through `bun run` or `deno task` is a hint; otherwise detection prefers Node, then Bun,
 then Deno. `edge` and `static` are build targets, not JavaScript worker hosts.
 
-Deno executes trusted local project configuration and plugins with the permissions they require
+Deno executes trusted local project configuration with the permissions it requires
 (`deno run -A --no-prompt --node-modules-dir=manual`). Do not select it for untrusted project code.
 
 ## Listening address
@@ -104,7 +104,6 @@ values are all supported option names; replace the example origin before release
 
 ```ts
 import { config } from 'ruvyxa/config'
-import { requireEnv, securityHeaders } from 'ruvyxa/plugins'
 
 export default config({
   site: {
@@ -118,16 +117,19 @@ export default config({
   content: true,
   build: { minify: true, map: false, treeShake: true, split: 'route', prerenderCache: true },
   security: { actionLimit: 1_048_576, apiLimit: 10_485_760, sameOrigin: true, fetchMeta: true },
-  plugins: [
-    requireEnv(['DATABASE_URL', 'RUVYXA_AUTH_SECRET']),
-    securityHeaders({ contentSecurityPolicy: { 'default-src': ["'self'"] } }),
+  headers: [
+    {
+      source: '/:path*',
+      headers: [{ key: 'content-security-policy', value: "default-src 'self'" }],
+    },
   ],
 })
 ```
 
-`requireEnv` validates names at the end of the production build, so configure its required values in
-the same build environment. It does not read a secret into browser code. A CSP commonly needs extra
-sources for analytics, images, fonts, or APIs; test every route after tightening it.
+Required environment is checked where the process starts — `register()` in `instrumentation.ts` (see
+[Observability](14-observability-performance.md#instrumentationts)) — so a deployment missing a
+secret fails at startup with the name listed. A CSP commonly needs extra sources for analytics,
+images, fonts, or APIs; test every route after tightening it.
 
 ```ts
 import { config } from 'ruvyxa/config'
@@ -178,24 +180,25 @@ localized footnote and bridge settings. See
 [Routing and rendering](04-routing-rendering.md#markdown-mdx-and-shared-components) for a complete
 example and the frontmatter/heading contracts.
 
-## Security, middleware, site, and plugins
+## Security, middleware, site, and route rules
 
 `security.actionLimit` defaults to 1,048,576 bytes; `security.apiLimit` defaults to 10,485,760
-bytes; `security.pluginLimit` defaults to 33,554,432 and is capped at 268,435,456.
-`security.actionRateLimit` defaults to 600 requests in 60 seconds. `trustedProxyIps` accepts exact
-IPv4/IPv6 addresses or CIDR ranges; only configured non-loopback proxies may supply forwarded
+bytes. `security.actionRateLimit` defaults to 600 requests in 60 seconds. `trustedProxyIps` accepts
+exact IPv4/IPv6 addresses or CIDR ranges; only configured non-loopback proxies may supply forwarded
 client/protocol headers.
 
-`middleware` contains built-ins (`cors`, `timing`, `log`, `rate`, `headers`) and TypeScript plugin
-`build.workers` is best left unset. Unset, route bundling is sized to the machine: the smaller of
-its core count (honouring `RAYON_NUM_THREADS`) and what free memory can hold. A pinned number caps a
-large machine — a value of 4 uses four workers on a 16-core host — and the starter templates no
-longer ship one. Setting it lowers the CPU budget only; the memory bound still applies, so a value
-copied from another project cannot make a memory-limited CI container ask for more than it has.
+`middleware` contains built-ins (`cors`, `timing`, `log`, `rate`, `headers`) and the project
+worker's `build.workers` is best left unset. Unset, route bundling is sized to the machine: the
+smaller of its core count (honouring `RAYON_NUM_THREADS`) and what free memory can hold. A pinned
+number caps a large machine — a value of 4 uses four workers on a 16-core host — and the starter
+templates no longer ship one. Setting it lowers the CPU budget only; the memory bound still applies,
+so a value copied from another project cannot make a memory-limited CI container ask for more than
+it has.
 
-`workers` (1–8) and `timeoutMs` (default 30,000, maximum 300,000). `site` configures build-time
-`sitemap.xml` and `robots.txt`; an exact app route or same-named `public/` file suppresses the core
-generator. `plugins` is the array of `RuvyxaPlugin` objects.
+`workers` (1–8) and `timeoutMs` (default 30,000, maximum 300,000), which bound `proxy.handler` on
+the native host. `site` configures build-time `sitemap.xml` and `robots.txt`; an exact app route or
+same-named `public/` file suppresses the core generator. `headers`, `redirects`, `rewrites`, and
+`proxy` declare the request pipeline — see [Request pipeline](08-request-pipeline.md).
 
 ## Sitemap and robots entries
 
@@ -227,12 +230,12 @@ The exported types — `SiteSitemapConfig`, `SiteSitemapEntry`, `SiteSitemapVide
 `SiteRobotsConfig`, `SiteRobotsRule` — are the checked spelling of this table; see the
 [Public API reference](17-public-api-reference.md).
 
-## Content artifacts without plugin wiring
+## Content artifacts
 
 Markdown and MDX routes work without `content`. Enable `content: true` only when the site also needs
 `/content.json`, `/search-index.json`, `/rss.xml`, `/sitemap.xml`, and `/llms.txt`. The content
 engine reuses `site.url`, `site.title`, `site.description`, and `site.language`, so it does not
-require a second plugin import or duplicate site identity.
+duplicate the site identity.
 
 ```ts
 export default config({
@@ -265,8 +268,9 @@ export default config({
 | `llmsPath`           | `"/llms.txt"`          | Agent discovery index. `false` disables it.                             |
 | `language`           | `site.language`        | Feed language, when it differs from the search locale.                  |
 
-The existing `contentEngine(options)` plugin remains supported for advanced or programmatic plugin
-composition. Do not configure both forms in the same application.
+Under `ruvyxa dev` the artifacts are derived from the content tree on request, so an edited page is
+reflected without a restart; `ruvyxa build` writes them under `assets/` and every production host
+serves those files.
 
 ## Environment variables
 
@@ -409,8 +413,7 @@ anything the application can. It is not loaded at build time.
 Both exports are optional: supply `read` alone and the platform still writes where it would have.
 Declare nothing and every host keeps the behaviour it has.
 
-This is the seam Next.js exposes as `cacheHandler` in `next.config.js`, and it exists for the same
-reason — the framework cannot pick an application's shared store for it.
+This seam exists because the framework cannot pick an application's shared store for it.
 
 `revalidateTag()` clears this process's own `cache()` entries immediately, as it always has. When a
 handler exports `revalidateTag`, the tags a request queued are additionally handed to it after the
@@ -446,8 +449,7 @@ Each entry carries an exact key and a prefix because they are not derivable from
 call clears the deployment's whole namespace, which the prefix alone says. Both values already carry
 this deployment's build id, so apply them as they arrive.
 
-The same module can back `cache()` itself, which is the other half of what Next.js puts behind
-`cacheHandler`:
+The same module can back `cache()` itself:
 
 ```js
 export async function readData(key) {
@@ -463,9 +465,9 @@ export async function writeData(key, entry) {
 }
 ```
 
-The process's own in-memory store still answers first — it is the fast tier, and it is where
-Next.js's `cacheMaxMemorySize` sits too. Only a local miss consults the shared one, and only a miss
-in both runs the producer. Writes are published without the request waiting on them.
+The process's own in-memory store still answers first — it is the fast tier. Only a local miss
+consults the shared one, and only a miss in both runs the producer. Writes are published without the
+request waiting on them.
 
 A store that throws is a slower cache, not a failed request: the error is reported and the producer
 runs. Declaring none costs nothing at all — the no-handler path does not even allocate a promise.
@@ -485,9 +487,8 @@ That is the setting to reach for once a deployment runs several instances behind
 per-instance copy in front of a shared one is the thing that makes two instances answer the same key
 differently, and turning it off trades one round trip for one answer.
 
-Next.js spells this decision `cacheMaxMemorySize`, and `0` means the same there. The unit differs on
-purpose — this store counts entries and has no size accounting to answer a byte budget with, and a
-budget that estimated would be one nobody could rely on.
+The unit is entries on purpose — this store has no size accounting to answer a byte budget with, and
+a budget that estimated would be one nobody could rely on.
 
 A value that is not a whole number of entries is reported and ignored: an unusable bound must not
 quietly become "no cache" or "unbounded", which are the two directions that hurt and both look like
@@ -502,8 +503,8 @@ export default {
 ```
 
 `maxEntries` bounds how many values are held; it says nothing about how large they are. A thousand
-entries of ten megabytes is ten gigabytes. `maxBytes` defaults to fifty megabytes — the same budget
-Next.js defaults `cacheMaxMemorySize` to — and evicts least-recently-used until the total fits.
+entries of ten megabytes is ten gigabytes. `maxBytes` defaults to fifty megabytes and evicts
+least-recently-used until the total fits.
 
 Each value is measured by its serialized length. That is an approximation, and it is the one
 available: every cached value has already been proved serializable, so it is always measurable this
@@ -531,4 +532,4 @@ deliberate trade rather than an oversight:
   prefixed key.
 
 **Previous:** [UI, navigation, metadata, and assets](06-ui-navigation-metadata-and-assets.md) ·
-**Next:** [Plugins and middleware](08-plugins-middleware.md)
+**Next:** [Request pipeline](08-request-pipeline.md)

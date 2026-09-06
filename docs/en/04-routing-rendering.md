@@ -92,15 +92,15 @@ export default function Post({ params }: PageProps<{ slug: string }>) {
 ```
 
 `generateStaticParams` and `staticParams` are accepted as names for the same export, so a page
-brought over from Next.js declares its parameters without being renamed.
+brought over from another app-router framework declares its parameters without being renamed.
 
 ## Overriding the rendering strategy
 
-Ruvyxa picks a strategy automatically, and `export const dynamic` overrides it — the same route
-segment config Next.js uses, with the same precedence. `'force-dynamic'` takes the route off the
-pre-render path even if it also exports `revalidate`; `'force-static'` and `'error'` put it on;
-`'auto'` is the default. `export const revalidate = <seconds>` opts into ISR and
-`export const ppr = true` into partial pre-rendering.
+Ruvyxa picks a strategy automatically, and `export const dynamic` overrides it — the route segment
+config convention, with the usual precedence. `'force-dynamic'` takes the route off the pre-render
+path even if it also exports `revalidate`; `'force-static'` and `'error'` put it on; `'auto'` is the
+default. `export const revalidate = <seconds>` opts into ISR and `export const ppr = true` into
+partial pre-rendering.
 
 `export const metadata` is **not** read: Next's metadata object is nested where Ruvyxa's `meta` is
 flat, so the two are not interchangeable. Use `export const meta` below.
@@ -109,7 +109,7 @@ flat, so the two are not interchangeable. Use `export const meta` below.
 
 `export const runtime = 'edge'` declares that a route uses only what a Web-standards runtime offers
 — `Request`, `Response`, `fetch`, `URL`, `crypto`. `'nodejs'` is the default and does not need
-writing. Both are spelled the way Next.js spells them.
+writing. Both spellings are the conventional ones.
 
 ```tsx
 // app/ping/route.ts

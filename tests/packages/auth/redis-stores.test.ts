@@ -295,23 +295,22 @@ describe('createAuth() over Redis', () => {
       'the session lives in Redis under the prefix',
     )
 
-    let hook: ((context: unknown) => void | Promise<void>) | undefined
-    await auth.plugin.register({
-      environment: 'production',
-      http: { onRequest() {}, onResponse() {}, route() {} },
-      build: {
-        onStart() {},
-        onResolve() {},
-        onLoad() {},
-        onTransform() {},
-        onComplete(value) {
-          hook = value as typeof hook
-        },
-      },
-      dev: { onFileChange() {} },
-      diagnostics: { report() {} },
-      native: { claim() {} },
-    })
-    await assert.doesNotReject(async () => hook?.({ manifest: { profile: 'production' } }))
+    // Durable on both sides, so a production process accepts these stores.
+    const previous = process.env.NODE_ENV
+    process.env.NODE_ENV = 'production'
+    try {
+      assert.doesNotThrow(() =>
+        createAuth({
+          secret: 'test-secret-that-is-at-least-thirty-two-characters',
+          origin,
+          store: redisAuthStore(redis),
+          rateLimitStore: redisRateLimitStore(redis),
+          providers: { email: { type: 'credentials', authorize: async () => null } },
+        }),
+      )
+    } finally {
+      if (previous === undefined) delete process.env.NODE_ENV
+      else process.env.NODE_ENV = previous
+    }
   })
 })

@@ -31,7 +31,6 @@ const starterScripts = {
   trace: 'ruvyxa trace',
   bench: 'ruvyxa bench',
   'test:parity': 'ruvyxa test:parity',
-  plugin: 'ruvyxa plugin',
 }
 
 describe('detectPackageManager', () => {

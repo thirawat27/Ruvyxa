@@ -14,18 +14,18 @@ In a generated Ruvyxa application, use the npm scripts below. They are the stabl
 interface provided by every starter; in particular, use `routes:json` and `analyze:html` rather than
 reconstructing the flags behind those scripts.
 
-| Application command                                                                                                                   | Runs                                  | Purpose                                                                                |
-| ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- | -------------------------------------------------------------------------------------- |
-| `npm run dev`                                                                                                                         | `ruvyxa dev`                          | Route watching and hot reload.                                                         |
-| `npm run build`                                                                                                                       | `ruvyxa build`                        | Production output.                                                                     |
-| `npm run check`                                                                                                                       | `ruvyxa check`                        | Application readiness checks.                                                          |
-| `npm run start` / `npm run preview`                                                                                                   | `ruvyxa start` / `preview`            | Serve or locally preview an existing build.                                            |
-| `npm run routes`                                                                                                                      | `ruvyxa routes`                       | Human-readable route table.                                                            |
-| `npm run routes:json`                                                                                                                 | Starter-defined route JSON command    | Machine-readable route output.                                                         |
-| `npm run analyze`                                                                                                                     | `ruvyxa analyze`                      | Validate routes, imports, and server/client boundaries.                                |
-| `npm run analyze:html`                                                                                                                | Starter-defined HTML analysis command | Interactive local analysis page.                                                       |
-| `npm run adds -- form`                                                                                                                | `ruvyxa adds form`                    | Scaffold a supported application flow.                                                 |
-| `npm run doctor`, `npm run clean`, `npm run trace -- /`, `npm run bench`, `npm run test:parity`, `npm run plugin -- create my-plugin` | Matching `ruvyxa` command             | Diagnose, clean output, inspect a route, benchmark, verify parity, or create a plugin. |
+| Application command                                                                             | Runs                                  | Purpose                                                               |
+| ----------------------------------------------------------------------------------------------- | ------------------------------------- | --------------------------------------------------------------------- |
+| `npm run dev`                                                                                   | `ruvyxa dev`                          | Route watching and hot reload.                                        |
+| `npm run build`                                                                                 | `ruvyxa build`                        | Production output.                                                    |
+| `npm run check`                                                                                 | `ruvyxa check`                        | Application readiness checks.                                         |
+| `npm run start` / `npm run preview`                                                             | `ruvyxa start` / `preview`            | Serve or locally preview an existing build.                           |
+| `npm run routes`                                                                                | `ruvyxa routes`                       | Human-readable route table.                                           |
+| `npm run routes:json`                                                                           | Starter-defined route JSON command    | Machine-readable route output.                                        |
+| `npm run analyze`                                                                               | `ruvyxa analyze`                      | Validate routes, imports, and server/client boundaries.               |
+| `npm run analyze:html`                                                                          | Starter-defined HTML analysis command | Interactive local analysis page.                                      |
+| `npm run adds -- form`                                                                          | `ruvyxa adds form`                    | Scaffold a supported application flow.                                |
+| `npm run doctor`, `npm run clean`, `npm run trace -- /`, `npm run bench`, `npm run test:parity` | Matching `ruvyxa` command             | Diagnose, clean output, inspect a route, benchmark, or verify parity. |
 
 ## Select a JavaScript runtime
 
@@ -49,11 +49,11 @@ npm run adds -- auth
 npm run adds -- form data-table auth
 ```
 
-| Scaffold     | Created files                                                                         | What it demonstrates                                                                                           | What you must supply before production                                                                                               |
-| ------------ | ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `form`       | `app/form-example/page.tsx`, `app/form-example/action.ts`                             | A native POST form, server-side email/message validation, an action handler, and `invalidate('contacts')`.     | Replace the example action with your persistence, authorization, anti-abuse controls, and success/error UX.                          |
-| `data-table` | `app/_components/ruvyxa/data-table.tsx`                                               | A generic client component with text filtering, click-to-sort columns, a row key, and optional cell renderers. | Provide real rows and columns; add pagination, server filtering, authorization, and mutations if your app needs them.                |
-| `auth`       | `app/_server/auth.ts`, `app/__ruvyxa/auth/[...path]/route.ts`, `app/sign-in/page.tsx` | Credentials sign-in UI, GET/POST auth route, and a development-only in-memory auth/rate-limit store.           | Install `@ruvyxa/auth`, register `auth.plugin`, set the required environment values, and replace demo credentials and memory stores. |
+| Scaffold     | Created files                                                                         | What it demonstrates                                                                                           | What you must supply before production                                                                                |
+| ------------ | ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `form`       | `app/form-example/page.tsx`, `app/form-example/action.ts`                             | A native POST form, server-side email/message validation, an action handler, and `invalidate('contacts')`.     | Replace the example action with your persistence, authorization, anti-abuse controls, and success/error UX.           |
+| `data-table` | `app/_components/ruvyxa/data-table.tsx`                                               | A generic client component with text filtering, click-to-sort columns, a row key, and optional cell renderers. | Provide real rows and columns; add pagination, server filtering, authorization, and mutations if your app needs them. |
+| `auth`       | `app/_server/auth.ts`, `app/__ruvyxa/auth/[...path]/route.ts`, `app/sign-in/page.tsx` | Credentials sign-in UI, GET/POST auth route, and a development-only in-memory auth/rate-limit store.           | Install `@ruvyxa/auth`, set the required environment values, and replace demo credentials and memory stores.          |
 
 ### Form: what the generated action accepts
 
@@ -102,13 +102,8 @@ The scaffold itself does **not** install a package or edit `ruvyxa.config.ts`.
 npm install @ruvyxa/auth
 ```
 
-```ts
-// ruvyxa.config.ts
-import { config } from 'ruvyxa/config'
-import { auth } from './app/_server/auth'
-
-export default config({ plugins: [auth.plugin] })
-```
+The scaffolded `app/__ruvyxa/auth/[...path]/route.ts` mounts the endpoints by re-exporting
+`auth.handlers`; nothing in `ruvyxa.config.ts` changes.
 
 ```dotenv
 # .env — never commit these values
@@ -136,7 +131,7 @@ npm run adds -- form --force
 ## API-only builds with `build --server-only`
 
 `ruvyxa build --server-only` produces an API-only artifact. It runs configuration loading, route
-discovery, validation, plugin build hooks, server staging, and the deploy adapter exactly as a
+discovery, validation, the project worker, server staging, and the deploy adapter exactly as a
 normal build does, and it skips the work that only a rendered HTML page consumes:
 
 | Produced                                          | Skipped                                          |
@@ -248,7 +243,7 @@ cargo run -p ruvyxa_cli -- check --root examples/demo
 
 Run `cargo run -p ruvyxa_cli -- <command> --help` when maintaining the framework itself. The checked
 CLI exposes `dev`, `build`, `check`, `start`, `preview`, `routes`, `analyze`, `adds`, `doctor`,
-`clean`, `trace`, `bench`, `test:parity`, and `plugin create`.
+`clean`, `trace`, `bench`, and `test:parity`.
 
 ## Repository scripts
 
@@ -257,10 +252,10 @@ The root `package.json` defines `build`, `check`, `test`, `prepare`, `check:carg
 `format:staged`, `release:validate`, `release:bump`, `pack:smoke`, `test:full-flow`, and
 `publish:dry-run`. `check:unused` runs [Knip](https://knip.dev) across the JavaScript/TypeScript
 workspaces and fails on unused files, exports, types, and dependencies; `release:validate` runs it
-too. Ruvyxa loads a lot of code by convention — `app/` routes, `plugins/`, `ruvyxa.config.ts`,
-runtime files the native CLI resolves by path — so `knip.json` declares those as entry points rather
-than treating every one as unused. Published TypeScript packages consistently define `build`,
-`check`, `test`, `format`, and `prepack`; consult the relevant package manifest for its test glob.
+too. Ruvyxa loads a lot of code by convention — `app/` routes, `ruvyxa.config.ts`, runtime files the
+native CLI resolves by path — so `knip.json` declares those as entry points rather than treating
+every one as unused. Published TypeScript packages consistently define `build`, `check`, `test`,
+`format`, and `prepack`; consult the relevant package manifest for its test glob.
 
 **Previous:** [Integrations](09-integrations-auth-data-and-realtime.md) · **Next:**
 [Architecture](11-architecture.md)

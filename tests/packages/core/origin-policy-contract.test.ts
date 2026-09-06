@@ -28,9 +28,9 @@ const fixture = JSON.parse(
  * The native host replays this same file in
  * `crates/ruvyxa_dev_server/src/action_security.rs`.
  *
- * Before the fixture existed, three implementations of this decision were kept
- * in step by a comment saying they mirrored each other: the action endpoint,
- * the native server, and — once it was written — the `originGuard` plugin. Two
+ * Before the fixture existed, the implementations of this decision were kept
+ * in step by a comment saying they mirrored each other: the action endpoint and
+ * the native server. Two
  * other cross-language tables held that way (`STATIC_CONTENT_TYPES`,
  * `DEFAULT_SECURITY_HEADERS`) had already drifted in production before gaining
  * a fixture of their own.

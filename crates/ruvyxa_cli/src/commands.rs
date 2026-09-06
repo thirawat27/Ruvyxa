@@ -807,7 +807,7 @@ pub(crate) async fn test_parity(args: ProjectArgs) -> anyhow::Result<()> {
     );
     println!();
 
-    failures.extend(capability_parity(&args.root, &config, &dev_manifest));
+    failures.extend(capability_parity(&config, &dev_manifest));
 
     failures.extend(smoke_render_parity(
         &dev_server_config(
@@ -891,11 +891,7 @@ pub(crate) fn parity_route(manifest: &RouteManifest, route: &RouteEntry) -> Pari
 /// records, per capability, whether the native host and a build artifact can
 /// serve it; anything the project uses that a build artifact cannot is reported
 /// here rather than in production.
-pub(crate) fn capability_parity(
-    root: &Path,
-    config: &ProjectConfig,
-    manifest: &RouteManifest,
-) -> Vec<String> {
+pub(crate) fn capability_parity(config: &ProjectConfig, manifest: &RouteManifest) -> Vec<String> {
     const CONTRACT: &str =
         include_str!("../../../tests/fixtures/framework-endpoint-conformance.json");
     let contract: serde_json::Value = match serde_json::from_str(CONTRACT) {
@@ -919,55 +915,16 @@ pub(crate) fn capability_parity(
         used.push(("actions".to_string(), action_routes.join(", ")));
     }
 
-    // Config-declared rather than plugin-declared, and the only capability in
-    // this table that is. A plugin announces itself through `describe`; this one
-    // is a boolean in `ruvyxa.config.ts`, and the endpoint it turns on exists
-    // only on the Axum host.
+    // Config-declared: each is a key in `ruvyxa.config.ts`, and the endpoint
+    // it turns on exists only on the Axum host.
     if config.images.on_demand.enabled() {
         used.push(("images@1".to_string(), "/__ruvyxa/image".to_string()));
     }
-
-    match describe_project_plugins(root, config) {
-        Ok(Some(description)) => {
-            let http = &description["http"];
-            let hooks =
-                http["request"].as_u64().unwrap_or(0) + http["response"].as_u64().unwrap_or(0);
-            if hooks > 0 {
-                used.push(("pluginHttp".to_string(), format!("{hooks} hook(s)")));
-            }
-            for capability in description["capabilities"].as_array().into_iter().flatten() {
-                // The id the plugin actually claimed, carried through unchanged.
-                // This used to fold everything that was not `realtime@1` onto
-                // `presence@1`, which meant the "unlisted capability" failure
-                // below -- the one whose comment explains that a missing entry
-                // there is how server actions came to work locally and 404
-                // everywhere else -- could never be reached through this loop.
-                // Unreachable rather than broken, because `plugin-http.mjs`
-                // validates the id against a two-entry allowlist first; but the
-                // next capability added is the one that pays for a safety net
-                // that was wired shut.
-                //
-                // An empty id is skipped rather than reported: it says a
-                // `describe` response was malformed, which is a different fault
-                // from a capability the contract has not been taught, and
-                // failing parity with a blank name would name neither.
-                if let Some(id) = capability["id"].as_str().filter(|id| !id.is_empty()) {
-                    used.push((
-                        id.to_string(),
-                        capability["path"].as_str().unwrap_or("/").to_string(),
-                    ));
-                }
-            }
-        }
-        Ok(None) => {}
-        Err(error) => {
-            // Not a parity failure: a project whose plugins cannot be described
-            // has a bigger problem, and `build` reports it with full detail.
-            println!(
-                "  {} plugin capabilities not inspected: {error}",
-                label("note")
-            );
-        }
+    if let Some(realtime) = &config.realtime {
+        used.push(("realtime".to_string(), realtime.path.clone()));
+    }
+    if let Some(collab) = &config.collab {
+        used.push(("collab".to_string(), collab.path.clone()));
     }
 
     let mut failures = Vec::new();
@@ -1072,24 +1029,6 @@ fn action_file_for_route(route: &RouteEntry) -> Option<PathBuf> {
         .into_iter()
         .map(|name| directory.join(name))
         .find(|candidate| candidate.is_file())
-}
-
-/// Ask the plugin runtime what the project's plugins registered.
-fn describe_project_plugins(
-    root: &Path,
-    config: &ProjectConfig,
-) -> anyhow::Result<Option<serde_json::Value>> {
-    let session = TypeScriptPluginBuildSession::new(
-        root,
-        &config.plugins,
-        config.javascript_runtime(),
-        config.markdown_enabled(),
-        false,
-    )?;
-    let Some(bridge) = session.bridge() else {
-        return Ok(None);
-    };
-    Ok(bridge.call_runner("describe", serde_json::json!({}))?)
 }
 
 pub(crate) fn smoke_render_parity(

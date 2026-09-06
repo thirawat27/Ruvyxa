@@ -35,7 +35,7 @@
 | [Data, Actions & API](docs/en/05-data-actions-api.md)                      | Loaders, `cache()`, server actions, API routes   |
 | [UI, Navigation & Assets](docs/en/06-ui-navigation-metadata-and-assets.md) | Components, metadata, images, fonts              |
 | [Configuration](docs/en/07-configuration.md)                               | `ruvyxa.config.ts` and environment variables     |
-| [Plugins & Middleware](docs/en/08-plugins-middleware.md)                   | Plugin hooks and the middleware chain            |
+| [Request pipeline](docs/en/08-request-pipeline.md)                         | Headers, redirects, rewrites, proxy, route files |
 | [Integrations](docs/en/09-integrations-auth-data-and-realtime.md)          | `@ruvyxa/auth`, `database`, `realtime`           |
 | [CLI](docs/en/10-cli.md)                                                   | Scripts, scaffolding, and the build loop         |
 | [Architecture](docs/en/11-architecture.md)                                 | Graph, bundler, dev server, diagnostics          |
@@ -74,17 +74,16 @@ documents: [ARCHITECTURE.md](ARCHITECTURE.md), [CHANGELOG.md](CHANGELOG.md),
 - **Parallel production bundling** — route graphs are prepared once with bounded concurrency, then
   emitted once with shared-route modules in deterministic route order. Lightweight route plans and
   final/shared artifacts are content-validated, with each shared dependency fingerprinted once per
-  build. Plugin-free cold shared output reuses prepared modules; warm builds reuse the validated
-  registry.
-- **Bounded build reuse** — Node transforms, plugin-free native dependency closures, and native
-  Markdown/MDX output reuse content-keyed results. Prerendering loads its asset index once and
-  shares immutable CSS across the bounded worker pool.
+  build. Cold shared output reuses prepared modules; warm builds reuse the validated registry.
+- **Bounded build reuse** — Node transforms, native dependency closures, and native Markdown/MDX
+  output reuse content-keyed results. Prerendering loads its asset index once and shares immutable
+  CSS across the bounded worker pool.
 - **Async I/O** — file serving uses `tokio::fs` to avoid blocking the async runtime under concurrent
   load.
 - **Persistent incremental module graph** — production builds persist content-verified dependency
   edges and reuse unchanged client resolution work on warm builds. The graph is namespaced by the
-  evaluated config dependency hash; build hooks bypass edge reuse so plugin resolution stays
-  correct. Compiled output remains content-addressed under the configured build cache.
+  evaluated config dependency hash; React-compiler transforms bypass edge reuse so their output
+  stays correct. Compiled output remains content-addressed under the configured build cache.
 - **Typed artifact task graph** — resolve, transform, analysis, chunk-plan, emit, source-map, and
   manifest records share explicit dependency edges and generation-scoped completion. Records are
   persisted atomically beside the build cache; corrupt or incompatible metadata rebuilds normally,
@@ -93,9 +92,9 @@ documents: [ARCHITECTURE.md](ARCHITECTURE.md), [CHANGELOG.md](CHANGELOG.md),
   one soft/hard hysteresis policy (`RUVYXA_BUILD_CACHE_MEMORY_MB`, 256 MiB default). Worker caches
   apply the same policy under `RUVYXA_MEMORY_LIMIT_MB` (512 MiB default), skip pinned build keys,
   stop speculative warmups at the hard limit, and expose pressure/eviction counters.
-- **plugin pipeline** — one `definePlugin({ name, register })` registry provides grouped HTTP,
-  build, dev, diagnostic, and native sockets through a versioned Node/Bun/Deno subprocess. AST-based
-  import/export extraction and CommonJS detection for npm dependencies.
+- **Config-declared request pipeline** — `headers()`, `redirects()`, `rewrites()`, and `proxy` on
+  one config object, evaluated by the native host and every deployed build from one shared table.
+  AST-based import/export extraction and CommonJS detection for npm dependencies.
 - **Gzip + Brotli compression** — all responses compressed automatically via tower-http middleware.
 - **ETag / 304 support** — static assets include BLAKE3-256-based ETags for efficient browser
   caching. Bundle names are BLAKE3-content-addressed for deterministic cache busting.
@@ -223,25 +222,26 @@ documents: [ARCHITECTURE.md](ARCHITECTURE.md), [CHANGELOG.md](CHANGELOG.md),
 - **Config safety** — unknown configuration keys fail intentionally; typos never silently change
   deployment behavior.
 
-### Middleware & plugins
+### Middleware & request pipeline
 
 - **Tower-based middleware** — composable CORS, timing, logging, rate limiting, and custom headers
   via `ruvyxa.config.ts`. Route-scoped middleware targets specific path patterns.
-- **Plugin middleware** — application modules register route-scoped Fetch `Request`/`Response` hooks
-  alongside build transforms and completion callbacks.
-- **16 Built-in Plugins** — Drop-in solutions from `ruvyxa/plugins` for advanced functionality:
-  Content Engine (Markdown/MDX to API + `llms.txt`), OpenAPI generator, Bundle Budget enforcer,
-  PWA/Manifest, Sitemap, RSS Feeds, SEO Robots, Redirects, Security Headers, and more. All plugins
-  operate within strict execution limits and are fully extensible. See the
-  [Plugins & Middleware](docs/en/08-plugins-middleware.md).
+- **Route rules** — `headers()`, `redirects()`, and `rewrites()` with path-to-regexp sources and
+  `has`/`missing` conditions, applied in a fixed order ahead of routing on both hosts.
+- **`proxy`** — one handler for the paths `proxy.matcher` names: answer with a `Response`, or
+  continue with a rewritten `Request`. Runs in the project worker under `ruvyxa dev`/`start` and
+  in-process in every deployed build.
+- **File conventions** — `instrumentation.ts` for startup work, `route.ts` for any generated file
+  (`security.txt`, feeds, OpenAPI), `content: true` for the content engine's artifacts. See the
+  [Request pipeline](docs/en/08-request-pipeline.md).
 - **Official state packages** — `@ruvyxa/database` provides a typed adapter facade, `@ruvyxa/auth`
   provides secure provider-driven sessions, and `@ruvyxa/realtime` connects opted-in server actions
   to the native self-hosted WebSocket transport with explicit deployment guards.
 
 ### CLI & diagnostics
 
-- **14 verified commands** — `dev`, `build`, `check`, `start`, `preview`, `routes`, `analyze`,
-  `adds`, `doctor`, `clean`, `trace`, `bench`, `test:parity`, and `plugin`.
+- **13 verified commands** — `dev`, `build`, `check`, `start`, `preview`, `routes`, `analyze`,
+  `adds`, `doctor`, `clean`, `trace`, `bench`, and `test:parity`.
 - **`build`** — production output supports `--target node`, `bun`, `edge`, or `static`, plus
   `--adapter <name>` to run a deploy adapter without editing config and `--server-only` for API-only
   artifacts. Pre-renders SSG, ISR, PPR, and CSR pages at build time via parallel worker pool
@@ -315,9 +315,9 @@ Open [http://localhost:3000](http://localhost:3000).
 `pnpm`, `yarn`, `bun`, and Deno tasks work too. When no runtime is configured, Ruvyxa prefers Node,
 then falls back to Bun and Deno. Set `runtime: 'bun'` or `runtime: 'deno'`, or pass
 `--runtime bun|deno`, when that runtime should execute config, SSR, API routes, actions, adapters,
-and build plugins. Deno local tooling runs with the permissions required by trusted project config
-and plugins (`-A --no-prompt`). A scaffold can be run with `deno install && deno task dev`. The
-generated app keeps the first screen focused:
+and the project worker. Deno local tooling runs with the permissions required by trusted project
+config (`-A --no-prompt`). A scaffold can be run with `deno install && deno task dev`. The generated
+app keeps the first screen focused:
 
 ```text
 my-app/
@@ -463,11 +463,11 @@ ruvyxa/
 │   ├── ruvyxa_bundler/    # TS/JSX compile, resolve, link, minify, source maps
 │   ├── ruvyxa_dev_server/ # axum server, HMR, worker pool, router, caches
 │   ├── ruvyxa_graph/      # route discovery, validation, render strategies
-│   ├── ruvyxa_middleware/ # Tower layers and the plugin bridge
+│   ├── ruvyxa_middleware/ # Tower layers, route rules, worker host
 │   ├── ruvyxa_diagnostics/# RUV#### structured errors
 │   └── ruvyxa_tui/        # terminal layout, progress, mascot, and theme primitives
 ├── packages/          # npm packages (see the table below)
-├── templates/         # create-ruvyxa starters + plugin scaffold
+├── templates/         # create-ruvyxa starters
 ├── examples/demo/     # 23-route integration fixture
 ├── tests/             # Node tests, organized by package
 ├── docs/{en,th}/      # user-facing manual, both editions
@@ -546,35 +546,28 @@ Metadata guards, per-client/action rate limiting (600 req/min), module isolation
 
 ## Middleware
 
-Ruvyxa ships a tower-based middleware system configurable via `ruvyxa.config.ts`:
+Ruvyxa ships a tower-based middleware system configurable via `ruvyxa.config.ts`, and a `proxy` that
+runs ahead of the routes its matcher names:
 
 ```ts
 import { config } from 'ruvyxa/config'
-import { definePlugin } from 'ruvyxa/plugin'
 
 export default config({
   middleware: { builtin: { timing: true, log: true } },
-  plugins: [
-    definePlugin({
-      name: 'auth-guard',
-      register({ http }) {
-        http.onRequest({
-          match: ['/api/*'],
-          handler({ request }) {
-            return request.headers.has('authorization')
-              ? undefined
-              : new Response('Unauthorized', { status: 401 })
-          },
-        })
-      },
-    }),
-  ],
+  proxy: {
+    matcher: '/api/:path*',
+    handler(request) {
+      return request.headers.has('authorization')
+        ? undefined
+        : new Response('Unauthorized', { status: 401 })
+    },
+  },
 })
 ```
 
-Built-in middleware stays native Tower code. Plugin middleware uses Fetch primitives in the
-persistent plugin runtime; Rust validates the bridge and enforces `security.pluginLimit` for
-response buffering.
+Built-in middleware stays native Tower code. `proxy.matcher` is compiled natively on both hosts;
+`proxy.handler` runs in the persistent project worker under `ruvyxa dev`/`start`, bounded by
+`middleware.timeoutMs`, and in-process in every deployed build.
 
 ---
 
@@ -676,22 +669,21 @@ examples.
 Fourteen commands. Project commands accept `--root <dir>` (default `.`) and
 `--runtime node|bun|deno`.
 
-| Command                       | Purpose                                                                         | Additional flags                                                       |
-| ----------------------------- | ------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `ruvyxa dev`                  | Development server with HMR and file watching                                   | `--host`, `--port`                                                     |
-| `ruvyxa build`                | Build production output to `.ruvyxa/`                                           | `--target node\|bun\|deno\|edge\|static`, `--adapter`, `--server-only` |
-| `ruvyxa check`                | Production readiness gate: typecheck, build, dev/prod parity, page smoke render | —                                                                      |
-| `ruvyxa start`                | Serve production output with the same runtime semantics as dev                  | `--host`, `--port`                                                     |
-| `ruvyxa preview`              | Preview an existing production build locally (same server as `start`)           | `--host`, `--port`                                                     |
-| `ruvyxa routes`               | Print the discovered route table                                                | `--json`                                                               |
-| `ruvyxa analyze`              | Validate routes, imports, and server/client boundaries                          | `--format auto\|human\|json\|sarif\|html`, `--output`, `--html`        |
-| `ruvyxa adds <flow…>`         | Scaffold a `form`, `data-table`, or `auth` flow                                 | `--force`                                                              |
-| `ruvyxa doctor`               | Project health plus deploy-target inspection                                    | `--target`, `--adapter`, `--json`                                      |
-| `ruvyxa trace <route>`        | Inspect one route manifest entry                                                | —                                                                      |
-| `ruvyxa bench`                | Benchmark route discovery, analysis, validation, and production builds          | `--runtime`, `--samples <n>` (default 3), `--json`, `--baseline`       |
-| `ruvyxa test:parity`          | Compare dev/prod routes and smoke-render page routes                            | —                                                                      |
-| `ruvyxa plugin create <name>` | Scaffold a publishable plugin package                                           | `--dir`                                                                |
-| `ruvyxa clean`                | Remove `.ruvyxa/` build output                                                  | —                                                                      |
+| Command                | Purpose                                                                         | Additional flags                                                       |
+| ---------------------- | ------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `ruvyxa dev`           | Development server with HMR and file watching                                   | `--host`, `--port`                                                     |
+| `ruvyxa build`         | Build production output to `.ruvyxa/`                                           | `--target node\|bun\|deno\|edge\|static`, `--adapter`, `--server-only` |
+| `ruvyxa check`         | Production readiness gate: typecheck, build, dev/prod parity, page smoke render | —                                                                      |
+| `ruvyxa start`         | Serve production output with the same runtime semantics as dev                  | `--host`, `--port`                                                     |
+| `ruvyxa preview`       | Preview an existing production build locally (same server as `start`)           | `--host`, `--port`                                                     |
+| `ruvyxa routes`        | Print the discovered route table                                                | `--json`                                                               |
+| `ruvyxa analyze`       | Validate routes, imports, and server/client boundaries                          | `--format auto\|human\|json\|sarif\|html`, `--output`, `--html`        |
+| `ruvyxa adds <flow…>`  | Scaffold a `form`, `data-table`, or `auth` flow                                 | `--force`                                                              |
+| `ruvyxa doctor`        | Project health plus deploy-target inspection                                    | `--target`, `--adapter`, `--json`                                      |
+| `ruvyxa trace <route>` | Inspect one route manifest entry                                                | —                                                                      |
+| `ruvyxa bench`         | Benchmark route discovery, analysis, validation, and production builds          | `--runtime`, `--samples <n>` (default 3), `--json`, `--baseline`       |
+| `ruvyxa test:parity`   | Compare dev/prod routes and smoke-render page routes                            | —                                                                      |
+| `ruvyxa clean`         | Remove `.ruvyxa/` build output                                                  | —                                                                      |
 
 `trace` takes a **route manifest path, not a request URL**: use `ruvyxa trace "/blog/[slug]"`, not
 `ruvyxa trace /blog/hello`. It prints the route id, file, layout chain, server/client modules,
@@ -718,22 +710,21 @@ routes: 27 pages and 3 API routes — with a `--release` binary built from this 
 Scaffolding commands ran against a throwaway copy of `templates/minimal` so the fixture stayed
 clean. Timings are one machine's, not a specification; re-run them rather than quoting them.
 
-| Command         | Observed result                                                                         |
-| --------------- | --------------------------------------------------------------------------------------- |
-| `routes`        | 30 routes discovered (27 pages, 3 API), strategy resolved per route                     |
-| `doctor`        | 0 diagnostics, adapter `ruvyxa-native`, every route supported by the target, **1.17s**  |
-| `analyze`       | 0 diagnostics; 38 client modules and 4 server modules reported                          |
-| `trace`         | route id, file, layout chain, runtime, and render strategy as JSON                      |
-| `build`         | cold build of all 30 routes into `.ruvyxa/` in **8.15s**, 247 kB shared by every page   |
-| `start`         | ready in **425ms**; `GET /`, `GET /api/health`, and `GET /blog/hello-world` all → 200   |
-| `preview`       | ready and serving the same production build → 200                                       |
-| `dev`           | ready in **482ms** with HMR enabled; `GET /` → 200                                      |
-| `check`         | typecheck + build + parity + smoke render over 30 routes, **16.01s**, exit 0            |
-| `test:parity`   | parity passed for 30 routes in **14.40s**, exit 0                                       |
-| `bench`         | 6 scenarios; cold build **8.27s** against warm **657ms** — 92% of it saved by the cache |
-| `adds`          | `form` wrote `page.tsx` + `action.ts`; `data-table` wrote the generic client component  |
-| `plugin create` | created a publishable `ruvyxa-plugin-<name>` package with a harness test                |
-| `clean`         | removed `.ruvyxa/` in **141ms**                                                         |
+| Command       | Observed result                                                                         |
+| ------------- | --------------------------------------------------------------------------------------- |
+| `routes`      | 30 routes discovered (27 pages, 3 API), strategy resolved per route                     |
+| `doctor`      | 0 diagnostics, adapter `ruvyxa-native`, every route supported by the target, **1.17s**  |
+| `analyze`     | 0 diagnostics; 38 client modules and 4 server modules reported                          |
+| `trace`       | route id, file, layout chain, runtime, and render strategy as JSON                      |
+| `build`       | cold build of all 30 routes into `.ruvyxa/` in **8.15s**, 247 kB shared by every page   |
+| `start`       | ready in **425ms**; `GET /`, `GET /api/health`, and `GET /blog/hello-world` all → 200   |
+| `preview`     | ready and serving the same production build → 200                                       |
+| `dev`         | ready in **482ms** with HMR enabled; `GET /` → 200                                      |
+| `check`       | typecheck + build + parity + smoke render over 30 routes, **16.01s**, exit 0            |
+| `test:parity` | parity passed for 30 routes in **14.40s**, exit 0                                       |
+| `bench`       | 6 scenarios; cold build **8.27s** against warm **657ms** — 92% of it saved by the cache |
+| `adds`        | `form` wrote `page.tsx` + `action.ts`; `data-table` wrote the generic client component  |
+| `clean`       | removed `.ruvyxa/` in **141ms**                                                         |
 
 ---
 
@@ -755,7 +746,7 @@ clean. Timings are one machine's, not a specification; re-run them rather than q
 │                     │ orchestration, production output        │
 │ ruvyxa_dev_server   │ axum server, websocket HMR, worker      │
 │                     │ pool, radix router, render cache        │
-│ ruvyxa_middleware   │ Tower layers + plugin bridge            │
+│ ruvyxa_middleware   │ Tower layers, route rules, worker host  │
 │ ruvyxa_graph        │ route discovery, import graph, render   │
 │                     │ strategy detection, validation          │
 │ ruvyxa_diagnostics  │ structured errors with RUV#### codes    │

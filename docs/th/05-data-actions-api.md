@@ -298,10 +298,10 @@ export async function POST({ request }: { request: Request }) {
 
 `revalidateTag()` เป็นฟังก์ชันคู่กันแต่ทำคนละหน้าที่:
 [มันล้าง cache entry ที่ติด tag](#invalidate-ด้วย-tag-แทน-key) ส่วน `revalidatePath()` สั่ง render
-เอกสารที่เก็บไว้ใหม่ tag ของ Ruvyxa กำกับค่าที่คุณ cache เองด้วย `cache().tags(...)`
-ซึ่งไม่ใช่สิ่งเดียวกับ tag ของ Next.js — ที่นี่ไม่มี cache ของ `fetch()` ให้ tag ไปเกาะ และ tag
-ไม่ได้ระบุ route การล้างข้อมูลที่หน้าหนึ่งอ่านจึงไม่ได้เขียน HTML ที่ build
-สร้างไว้ใหม่ด้วยตัวมันเอง ถ้าต้องการให้เอกสารเปลี่ยน ให้เรียก `revalidatePath()`
+เอกสารที่เก็บไว้ใหม่ tag ของ Ruvyxa กำกับค่าที่คุณ cache เองด้วย `cache().tags(...)` ซึ่งไม่ใช่ tag
+ของ cache `fetch()` — ที่นี่ไม่มี cache ของ `fetch()` ให้ tag ไปเกาะ และ tag ไม่ได้ระบุ route
+การล้างข้อมูลที่หน้าหนึ่งอ่านจึงไม่ได้เขียน HTML ที่ build สร้างไว้ใหม่ด้วยตัวมันเอง
+ถ้าต้องการให้เอกสารเปลี่ยน ให้เรียก `revalidatePath()`
 
 บน deployment แบบ serverless `revalidatePath` จะล้าง function instance ที่เรียกมัน และคำขอถัดไป
 จะเขียนเอกสารที่เก็บไว้ใหม่ให้กับคำขอหลังจากนั้นทั้งหมด ส่วน instance

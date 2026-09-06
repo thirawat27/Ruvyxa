@@ -30,7 +30,6 @@ also the clearest statement of where the code is meant to run.
 | `params`                                        | `ruvyxa/server`             | Route parameters for the page being rendered, readable below the component that got props.                                                                                                                               |
 | `revalidatePath`                                | `ruvyxa/server`             | `(path: string) => void`; queue one concrete URL for re-render on its next request.                                                                                                                                      |
 | `FlightContext`, `FlightHandler`, `FlightValue` | `ruvyxa/server`             | Types for a public `flight` route export and the payload it returns.                                                                                                                                                     |
-| `definePlugin`, `withResponseHeader`            | `ruvyxa/plugin` or `ruvyxa` | Plugin definition and response-header helper.                                                                                                                                                                            |
 | `standaloneServerSource`                        | `ruvyxa`                    | Source generator for the standalone server artifact.                                                                                                                                                                     |
 
 "Both" means the name is re-exported from `ruvyxa` as well as `ruvyxa/server`; prefer
@@ -55,8 +54,9 @@ Types include `RuvyxaConfig`, `PageProps`, `GetStaticParams`, `RenderStrategy`, 
 subtypes `SiteSitemapConfig`, `SiteSitemapEntry`, `SiteSitemapEntryDefaults`, `SiteSitemapVideo`,
 `SiteRobotsConfig`, and `SiteRobotsRule`, the content subtypes `ContentConfig` and
 `ContentEngineConfig`, the deploy-manifest types `DeployManifest`, `DeployRoute`, and
-`DeployServeMode`, and plugin contracts. Use imports from `ruvyxa` for public primitives and
-`ruvyxa/config` or `ruvyxa/plugin` for explicit intent.
+`DeployServeMode`, and the route-rule types `HeaderRule`, `RedirectRule`, `RewriteRule`,
+`RewritePhases`, `ProxyConfig`, `RealtimeConfig`, and `CollabConfig`. Use imports from `ruvyxa` for
+public primitives and `ruvyxa/config` for explicit intent.
 
 ## `@ruvyxa/react`
 
@@ -108,13 +108,13 @@ resolve routes outside the React tree, such as a custom server or adapter.
 
 ## Other public packages
 
-| Package             | Exported integration                                                                                                                                       |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@ruvyxa/auth`      | `createAuth`, providers, stores, client/plugin entry points, auth types/errors, and `forwardedClientIp(request)` for rate limiting behind a trusted proxy. |
-| `@ruvyxa/database`  | `createDatabase`, operation/types, `prismaAdapter`, `dynamoAdapter`, `defineDatabaseAdapter`.                                                              |
-| `@ruvyxa/realtime`  | Plugin entry point; client exposes `createRealtimeClient`.                                                                                                 |
-| `@ruvyxa/testing`   | `mockLoader`, `mockAction`, `mockCache`.                                                                                                                   |
-| `@ruvyxa/adapter-*` | Typed build adapter packages.                                                                                                                              |
+| Package             | Exported integration                                                                                                                           |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@ruvyxa/auth`      | `createAuth` (with `handlers` for `route.ts`), providers, stores, the client entry point, auth types/errors, and `forwardedClientIp(request)`. |
+| `@ruvyxa/database`  | `createDatabase`, `requireDatabaseEnv`, operation/types, `prismaAdapter`, `dynamoAdapter`, `defineDatabaseAdapter`.                            |
+| `@ruvyxa/realtime`  | `RealtimeConfig`/`CollabConfig` types; `client` exposes `createRealtimeClient`, `collab` and `react` the room clients.                         |
+| `@ruvyxa/testing`   | `mockLoader`, `mockAction`, `mockCache`.                                                                                                       |
+| `@ruvyxa/adapter-*` | Typed build adapter packages.                                                                                                                  |
 
 For option details and defaults, use [Configuration](07-configuration.md) and the exported
 TypeScript declarations in the installed package. Public API names shown here are source-verified;

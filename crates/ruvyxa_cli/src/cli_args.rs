@@ -1,4 +1,4 @@
-//! Plugin scaffolding and command-line argument normalization.
+//! Command-line argument normalization.
 //!
 //! Clap parses the canonical spelling of every flag and command. This module
 //! rewrites common variants into that spelling first — `--root=x`, a `—root`
@@ -11,151 +11,6 @@
 //! intent.
 
 use std::ffi::OsString;
-use std::fs;
-
-use crate::*;
-
-pub(crate) fn plugin(args: PluginArgs) -> anyhow::Result<()> {
-    match args.command {
-        PluginCommand::Create(args) => scaffold_plugin(args),
-    }
-}
-
-pub(crate) const PLUGIN_TEMPLATE_FILES: &[(&str, &str)] = &[
-    (
-        "src/index.ts",
-        include_str!("../../../templates/plugin/src/index.ts"),
-    ),
-    (
-        "test/plugin.test.mjs",
-        include_str!("../../../templates/plugin/test/plugin.test.mjs"),
-    ),
-    (
-        "package.json",
-        include_str!("../../../templates/plugin/package.json"),
-    ),
-    (
-        "tsconfig.json",
-        include_str!("../../../templates/plugin/tsconfig.json"),
-    ),
-    (
-        "README.md",
-        include_str!("../../../templates/plugin/README.md"),
-    ),
-    (
-        ".gitignore",
-        include_str!("../../../templates/plugin/.gitignore"),
-    ),
-];
-
-pub(crate) fn scaffold_plugin(args: PluginCreateArgs) -> anyhow::Result<()> {
-    let plugin_name = normalize_plugin_name(&args.name)?;
-    let package_dir = match &args.dir {
-        Some(dir) => {
-            if dir.as_os_str().is_empty() {
-                anyhow::bail!("--dir must not be empty");
-            }
-            if dir
-                .components()
-                .any(|component| matches!(component, std::path::Component::ParentDir))
-            {
-                anyhow::bail!("--dir must not contain `..` components: {}", dir.display());
-            }
-            if dir.components().any(|component| {
-                matches!(
-                    component,
-                    std::path::Component::Prefix(_) | std::path::Component::RootDir
-                )
-            }) {
-                anyhow::bail!(
-                    "--dir must be relative to --root without a drive or root prefix: {}",
-                    dir.display()
-                );
-            }
-            args.root.join(dir)
-        }
-        None => args.root.join(&plugin_name),
-    };
-    if package_dir.exists() {
-        anyhow::bail!(
-            "plugin package already exists: {}; choose a different name or remove it first",
-            package_dir.display()
-        );
-    }
-
-    let plugin_identifier = plugin_name.replace('-', "_");
-    for (relative_path, template) in PLUGIN_TEMPLATE_FILES {
-        let destination = package_dir.join(relative_path);
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let contents = template
-            .replace("__PLUGIN_NAME__", &plugin_name)
-            .replace("__PLUGIN_IDENTIFIER__", &plugin_identifier)
-            .replace("__RUVYXA_VERSION__", env!("CARGO_PKG_VERSION"));
-        fs::write(destination, contents)?;
-    }
-
-    print_header("Plugin");
-    print_field("status", ok_text("created"));
-    print_field("plugin", accent(&plugin_name));
-    print_field("package", accent(format!("ruvyxa-plugin-{plugin_name}")));
-    print_field("path", path_text(&package_dir));
-    println!();
-    println!("  {}", path_text(&package_dir));
-    println!("  {} package.json", dim("├─"));
-    println!("  {} README.md", dim("├─"));
-    println!("  {} tsconfig.json", dim("├─"));
-    println!("  {} test/plugin.test.mjs", dim("├─"));
-    println!("  {} src", dim("└─"));
-    println!("     {} {}", dim("└─"), accent("index.ts"));
-    println!();
-    println!("  {}", label("next steps"));
-    println!(
-        "  {} {}",
-        dim("1."),
-        accent(format!("cd {}", package_dir.display()))
-    );
-    println!(
-        "  {} {}",
-        dim("2."),
-        accent("npm install  (or: pnpm install, bun install)")
-    );
-    println!(
-        "  {} {}",
-        dim("3."),
-        accent("npm test  (or: pnpm test, bun test)")
-    );
-    println!(
-        "  {} {}",
-        dim("4."),
-        dim("Start with headers; add direct sections only as the plugin grows.")
-    );
-    println!();
-    println!(
-        "  {} Plugin {} is ready to develop\n",
-        success(),
-        accent(&plugin_name)
-    );
-    Ok(())
-}
-
-pub(crate) fn normalize_plugin_name(value: &str) -> anyhow::Result<String> {
-    let value = value.trim();
-    if value.is_empty()
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        || value.starts_with('-')
-        || value.ends_with('-')
-        || value.contains("--")
-    {
-        anyhow::bail!(
-            "plugin name must use lowercase letters and digits separated by single hyphens (for example `request-logger`)"
-        );
-    }
-    Ok(value.to_string())
-}
 
 pub(crate) fn normalized_cli_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
     let mut args = args.into_iter().collect::<Vec<_>>();
@@ -294,7 +149,6 @@ pub(crate) fn canonical_command_name(command: &str) -> Option<&'static str> {
         // hyphenated form is what a user reaches for.
         "test-parity" => Some("test:parity"),
         "parity" => Some("parity"),
-        "plugin" => Some("plugin"),
         "adds" => Some("adds"),
         "help" => Some("help"),
         _ => None,

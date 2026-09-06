@@ -7,7 +7,7 @@ export default function Showcase() {
       <h1>Showcase</h1>
       <p>
         This section wires <code>loading.tsx</code>, <code>error.tsx</code>, and{' '}
-        <code>not-found.tsx</code> around its pages — the Next.js special-file conventions.
+        <code>not-found.tsx</code> around its pages — the route special-file conventions.
       </p>
       <ul>
         <li>

@@ -1,18 +1,18 @@
 # Integrations: authentication, data, realtime, adapters, and testing
 
 > **Tutorial goal:** connect an application concern to the framework without assuming unsupported
-> infrastructure. **Start from:** route policy in
-> [Plugins and middleware](08-plugins-middleware.md). **Checkpoint:** choose one integration,
-> implement its smallest flow, and test the failure path too.
+> infrastructure. **Start from:** route policy in [Request pipeline](08-request-pipeline.md).
+> **Checkpoint:** choose one integration, implement its smallest flow, and test the failure path
+> too.
 
 ## Authentication
 
 `@ruvyxa/auth` exports `createAuth`, provider helpers `google` and `github`, the development-only
 memory stores, the Redis stores `redisAuthStore` and `redisRateLimitStore` with their
 `nodeRedisCommandPort` and `ioredisCommandPort` client adapters, types, and `AuthError`. Its package
-exports `@ruvyxa/auth/client` and `@ruvyxa/auth/plugin` separately. Supported provider contracts
-include credentials, OAuth, magic link, and WebAuthn. The memory stores are process-local and
-refused by production builds; the Redis stores are the durable, shared implementation.
+exports `@ruvyxa/auth/client` separately. Supported provider contracts include credentials, OAuth,
+magic link, and WebAuthn. The memory stores are process-local and refused by production builds; the
+Redis stores are the durable, shared implementation.
 
 ```ts
 import { createAuth, memoryAuthStore, memoryRateLimitStore } from '@ruvyxa/auth'
@@ -27,12 +27,13 @@ const auth = createAuth({
 ```
 
 The exact `AuthOptions` contract is exported by the package; do not pass this example's placeholder
-as a real secret. Register the plugin returned by the auth runtime, then use the separate browser
-entry point only in client code:
+as a real secret. Mount the endpoints with one route handler file under `basePath`, then use the
+separate browser entry point only in client code:
 
 ```ts
-// ruvyxa.config.ts
-export default config({ plugins: [auth.plugin] })
+// app/__ruvyxa/auth/[...path]/route.ts
+import { auth } from '../../../_server/auth.js'
+export const { GET, POST } = auth.handlers
 
 // a client module
 import { createAuthClient } from '@ruvyxa/auth/client'
@@ -41,13 +42,13 @@ const authClient = createAuthClient()
 
 The default auth path is `/__ruvyxa/auth`. The client exposes `login`, `logout`, `session`, and
 `oauth`; `createAuth` also exposes `handle`, `login`, `getSession`, and `logout` for server-side
-integration. The memory stores require `{ development: true }` and deliberately fail the production
-build with `RUV3105`. Pass `redisAuthStore(port)` and `redisRateLimitStore(port)` instead, where
-`port` is `nodeRedisCommandPort(client)` for node-redis or `ioredisCommandPort(client)` for ioredis:
-`take` and `consume` each run as one Lua script, so two instances behind a load balancer cannot both
-accept one magic link or both pass one rate-limit slot. Any other `AuthStore` and
-`AuthRateLimitStore` whose `take` and `consume` are atomic satisfies the same contracts.
-`createAuthPlugin(bridge)` is available when a custom bridge is needed.
+integration. The memory stores require `{ development: true }`, and `createAuth()` refuses them when
+`NODE_ENV` is `production` with `RUV3105`. Pass `redisAuthStore(port)` and
+`redisRateLimitStore(port)` instead, where `port` is `nodeRedisCommandPort(client)` for node-redis
+or `ioredisCommandPort(client)` for ioredis: `take` and `consume` each run as one Lua script, so two
+instances behind a load balancer cannot both accept one magic link or both pass one rate-limit slot.
+Any other `AuthStore` and `AuthRateLimitStore` whose `take` and `consume` are atomic satisfies the
+same contracts.
 
 ```ts
 import { createClient } from 'redis'
@@ -88,31 +89,37 @@ application/infrastructure responsibilities.
 
 ## Realtime and adapters
 
-> **Decide hosting before you build on this.** Both realtime plugins need a process that stays alive
-> to own the WebSocket, so they are served by `ruvyxa dev`, `ruvyxa start`, and `ruvyxa preview` —
-> and by no build artifact at all: not a serverless function, and not the standalone server the
-> node, bun, deno, railway, and render adapters emit, which speaks plain HTTP with no upgrade path.
+> **Decide hosting before you build on this.** Both transports need a process that stays alive to
+> own the WebSocket, so they are served by `ruvyxa dev`, `ruvyxa start`, and `ruvyxa preview` — and
+> by no build artifact at all: not a serverless function, and not the standalone server the node,
+> bun, deno, railway, and render adapters emit, which speaks plain HTTP with no upgrade path.
 > `ruvyxa dev` prints a line naming the capability and its path, `ruvyxa build` reports `RUV2205`
 > naming the endpoint every adapter build will lack, and `ruvyxa test:parity` reports the gap — but
 > replacing the transport afterwards is an application rewrite, not a configuration change.
 
-`@ruvyxa/realtime/plugin` exports `realtime()`, which claims the native `realtime@1` capability and
-decides nothing about deployment: whether a target can serve the socket is the business of the host
-that serves it, so the plugin refuses no build. A deployment that depends on the socket runs
-`ruvyxa start` as its process. `@ruvyxa/realtime/client` exports `createRealtimeClient`; it caps
-active channels at 16 and reconnects with bounded exponential backoff.
-
-## Real-time collaboration
-
-`@ruvyxa/realtime/plugin` also exports `collab()`, which claims the native `presence@1` capability
-and serves bidirectional collaboration rooms at `/__ruvyxa/collab`. It carries the same deployment
-shape as `realtime()`: served by the Axum host, reported as `RUV2205` by every adapter build.
+`realtime: true` in `ruvyxa.config.ts` turns the transport on (`path`, `heartbeatMs`, and `capacity`
+are its options, typed as `RealtimeConfig`). The config decides nothing about deployment: whether a
+target can serve the socket is the business of the host that serves it, so no build is refused. A
+deployment that depends on the socket runs `ruvyxa start` as its process. `@ruvyxa/realtime/client`
+exports `createRealtimeClient`; it caps active channels at 16 and reconnects with bounded
+exponential backoff.
 
 ```ts
 import { config } from 'ruvyxa/config'
-import { collab } from '@ruvyxa/realtime'
 
-export default config({ plugins: [collab()] })
+export default config({ realtime: true })
+```
+
+## Real-time collaboration
+
+`collab: true` serves bidirectional collaboration rooms at `/__ruvyxa/collab` (`path` and
+`heartbeatMs` are its options, typed as `CollabConfig`). It carries the same deployment shape as
+`realtime`: served by the Axum host, reported as `RUV2205` by every adapter build.
+
+```ts
+import { config } from 'ruvyxa/config'
+
+export default config({ collab: true })
 ```
 
 A room carries two kinds of state, and they behave differently on purpose:
@@ -172,5 +179,4 @@ Railway, Render, Firebase, and AWS. Build selection is `npm run build -- --adapt
 `adapter`; see [Deploy, run, and operate](15-deploy-run-and-operate.md). `@ruvyxa/testing` exports
 `mockLoader`, `mockAction`, and `mockCache` for unit tests.
 
-**Previous:** [Plugins and middleware](08-plugins-middleware.md) · **Next:**
-[CLI reference](10-cli.md)
+**Previous:** [Request pipeline](08-request-pipeline.md) · **Next:** [CLI reference](10-cli.md)

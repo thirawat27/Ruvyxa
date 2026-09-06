@@ -121,7 +121,7 @@ function workerStrategies(kvBinding: string | null): Adapter['supports'] {
  */
 function workerHandlerSource(runtimePolicy: unknown, kvBinding: string | null): string {
   return `import { createHandler } from './serverless-handler.mjs';
-import { applyPluginHttp, loadActionModule, loadRouteModule } from './route-modules.mjs';
+import { projectProxy, loadActionModule, loadRouteModule } from './route-modules.mjs';
 // A JS module, not a JSON import: import attributes for JSON are not uniformly
 // available across bundlers and Worker compatibility dates.
 import manifest from './manifest.mjs';
@@ -170,13 +170,16 @@ async function optimizeImage(request, { src, width, quality }) {
 const handler = createHandler({
   routes: manifest.routes,
   middleware: runtimePolicy.middleware,
+  headers: runtimePolicy.headers,
+  redirects: runtimePolicy.redirects,
+  rewrites: runtimePolicy.rewrites,
   i18n: manifest.i18n,
   optimizeImage: runtimePolicy.image?.onDemand === true ? optimizeImage : undefined,
   imageQuality: runtimePolicy.image?.quality,
   importPage: loadRouteModule,
   importApi: loadRouteModule,
   importAction: loadActionModule,
-  pluginHttp: applyPluginHttp,
+  proxy: projectProxy,
   security: runtimePolicy.security,
   readPrerendered: async (pathname, revalidate = 60) => {
     // A Worker has no filesystem, so the store is KV and the read is async —

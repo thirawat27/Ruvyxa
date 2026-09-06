@@ -39,20 +39,20 @@ an explicit transport so AWS SDK v2/v3 or a DynamoDB-compatible service can exec
 normalized operations without this package pinning an AWS SDK version. Custom drivers implement
 `DatabaseAdapter` or use `defineDatabaseAdapter()`.
 
-Register build-time secret validation in `ruvyxa.config.ts`:
+Refuse to start without the private environment the database needs, where the process begins:
 
 ```ts
-import { config } from 'ruvyxa/config'
-import { databasePlugin } from '@ruvyxa/database/plugin'
+// instrumentation.ts
+import { requireDatabaseEnv } from '@ruvyxa/database'
 
-export default config({
-  plugins: [databasePlugin({ requiredEnv: ['DATABASE_URL'] })],
-})
+export function register() {
+  requireDatabaseEnv(['DATABASE_URL'])
+}
 ```
 
-The package deliberately does not export a process-global `db`: config plugins, middleware workers,
-render workers, and serverless instances have different lifecycles. Create the client in a
-server-only application module and let the selected driver own pooling for that process.
+`requireDatabaseEnv()` throws `RUV3001` naming every missing variable and refuses a `RUVYXA_PUBLIC_`
+name outright, since that prefix ships to browsers.
 
-`databasePlugin()` uses the build-complete socket. The main package also re-exports it for
-convenience; `./plugin` is the explicit lifecycle-only entry.
+The package deliberately does not export a process-global `db`: render workers and serverless
+instances have different lifecycles. Create the client in a server-only application module and let
+the selected driver own pooling for that process.

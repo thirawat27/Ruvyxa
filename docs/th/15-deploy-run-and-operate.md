@@ -61,20 +61,20 @@ build artifact รัน request pipeline เดียวกับ `ruvyxa start
 | ------------------------------------------------------------------- | --------------- | --------------------- |
 | page route และ API route                                            | ได้             | ได้                   |
 | server action (`POST /__ruvyxa/action`)                             | ได้             | ได้                   |
-| plugin `http.onRequest` / `onResponse` / `route`                    | ได้             | ได้                   |
-| `@ruvyxa/auth` (สร้างบน plugin HTTP hook)                           | ได้             | ได้                   |
+| `headers()`, `redirects()`, `rewrites()`, `proxy.handler`           | ได้             | ได้                   |
+| `@ruvyxa/auth` (mount ผ่าน `route.ts`)                              | ได้             | ได้                   |
 | on-demand image (`/__ruvyxa/image`)                                 | ได้             | ขึ้นกับ adapter       |
 | native realtime และ presence                                        | ได้             | ไม่ได้                |
 | `security.apiLimit`, `security.headers`, `security.trustedProxyIps` | ได้             | ได้                   |
 
-server action และ plugin HTTP hook ถูก compile เข้า function artifact จาก `ruvyxa.config`
+server action และ `proxy.handler` ถูก compile เข้า function artifact จาก `ruvyxa.config`
 โปรเจกต์ที่ใช้ทั้งสองอย่างจึง deploy ได้โดยไม่ต้องตั้งค่าเพิ่ม ส่วน realtime และ presence ต้องการ
 socket upgrade ซึ่ง build artifact ทำไม่ได้; `ruvyxa build` จะพิมพ์ `RUV2205` พร้อมระบุ endpoint
 ที่จะหายไป และ `ruvyxa check` รายงานเรื่องเดียวกันในแถว capability parity ให้ serve
 โปรเจกต์เหล่านั้นด้วย `ruvyxa start`
 
 การเลือก adapter ที่ให้บริการสิ่งที่โปรเจกต์ใช้ไม่ได้ จะทำให้ build ล้มเหลว แทนที่จะ deploy
-เว็บที่ตอบ 404: static adapter ที่มี server action หรือ plugin HTTP route จะรายงาน `RUV2204`
+เว็บที่ตอบ 404: static adapter ที่มี server action หรือ `proxy.handler` จะรายงาน `RUV2204`
 
 ## build output คือสัญญา
 

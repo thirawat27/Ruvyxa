@@ -1,4 +1,11 @@
 import type { DeployManifest } from './deploy-manifest.js'
+import type {
+  HeaderRule,
+  ProxyMatcher,
+  RedirectRule,
+  RewritePhases,
+  RewriteRule,
+} from './route-rules.js'
 
 /**
  * Accepted values for `build.target`.
@@ -25,7 +32,7 @@ export type EsTarget =
 export interface RuvyxaConfig {
   appDir?: string
   outDir?: string
-  /** Runtime used for config, rendering, and plugins. @default 'node' */
+  /** Runtime used for config, rendering, and the project worker. @default 'node' */
   runtime?: 'node' | 'bun' | 'deno' | 'edge' | 'static'
   /**
    * Run the stable React Compiler in inference mode before Ruvyxa's Oxc
@@ -106,12 +113,6 @@ export interface RuvyxaConfig {
     actionLimit?: number
     /** Maximum API route request payload size in bytes. @default 10485760 */
     apiLimit?: number
-    /**
-     * Maximum response size buffered by TypeScript response middleware in bytes.
-     * @default 33554432
-     * @maximum 268435456
-     */
-    pluginLimit?: number
     /** Per-client/action request ceiling; values are bounded but configurable. */
     actionRateLimit?: {
       /** Maximum requests during `window` seconds. @default 600 */
@@ -195,9 +196,8 @@ export interface RuvyxaConfig {
      * an application running several instances behind one domain — those need
      * one store all of them read. This is how you give them one.
      *
-     * The same seam Next.js exposes as `cacheHandler` in `next.config.js`, and
-     * for the same reason: the framework cannot choose an application's shared
-     * store for it.
+     * This seam exists because the framework cannot choose an application's
+     * shared store for it.
      */
     handler?: string
     /**
@@ -208,16 +208,14 @@ export interface RuvyxaConfig {
      * per-instance copy in front of a shared one is the thing that makes two
      * instances disagree about the same key.
      *
-     * Next.js spells this decision `cacheMaxMemorySize`, and `0` means the same
-     * there. The unit differs on purpose: this store counts entries and has no
-     * size accounting to answer a byte budget with, and a budget that estimated
-     * would be one nobody could rely on.
+     * The unit is entries on purpose: this store has no size accounting to
+     * answer a byte budget with, and a budget that estimated would be one
+     * nobody could rely on.
      */
     maxEntries?: number
     /**
      * Bytes the in-memory `cache()` tier holds before eviction. Defaults to
-     * 52,428,800 — fifty megabytes, the same budget Next.js defaults
-     * `cacheMaxMemorySize` to.
+     * 52,428,800 — fifty megabytes.
      *
      * The entry bound alone is not a memory bound: 1024 entries of ten
      * megabytes is ten gigabytes, and nothing stopped it. Each value is
@@ -238,9 +236,94 @@ export interface RuvyxaConfig {
    */
   content?: boolean | ContentConfig
   middleware?: MiddlewareConfig
+  /**
+   * Response headers by request path, checked before every route and file.
+   *
+   * A list, or a function returning one, of `{ source, headers, has?, missing? }`. `source` is a path-to-regexp
+   * pattern (`/blog/:slug*`), and matched parameters substitute into header
+   * keys and values. A later rule's key overrides an earlier one. Evaluated by
+   * the native host and every deployed build from one shared table.
+   */
+  headers?: RouteRuleList<HeaderRule>
+  /**
+   * Redirects by request path, checked after `headers` and before every route.
+   *
+   * `permanent: true` answers 308 and `false` 307, both of which keep the
+   * request method; `statusCode` overrides. A destination with no query
+   * inherits the request's.
+   */
+  redirects?: RouteRuleList<RedirectRule>
+  /**
+   * Rewrites by request path: serve one path's content at another URL.
+   *
+   * A bare list is `afterFiles`. The object form places rules before static
+   * files and pages (`beforeFiles`), after them but before dynamic routes
+   * (`afterFiles`), or after everything, just before the 404 (`fallback`).
+   * An `https://` destination is fetched by a deployed build; the native host
+   * serves internal destinations only.
+   */
+  rewrites?:
+    RouteRuleList<RewriteRule> | RewritePhases | (() => RewritePhases | Promise<RewritePhases>)
+  /**
+   * Code that runs before a request reaches any route, kept inside this
+   * file.
+   *
+   * `handler` receives the request and may return a `Response` to answer it, a
+   * `Request` to continue with (a different URL rewrites, different headers
+   * forward), or nothing to continue unchanged. `matcher` limits which paths
+   * reach it; without one it runs on every request. The handler is a function
+   * and so stays in this module: the native host runs it in a JavaScript
+   * worker for matching paths only, and every deployed build runs it in-process.
+   */
+  proxy?: ProxyConfig
+  /**
+   * The native realtime socket: action events fan out to subscribed browsers
+   * over one WebSocket. `true` takes every default.
+   *
+   * Served by the Axum host — `ruvyxa dev`, `ruvyxa start`, `ruvyxa preview` —
+   * and by no build artifact: a serverless function cannot hold a connection,
+   * and the generated standalone server speaks plain HTTP. `ruvyxa build`
+   * reports `RUV2205` naming the path every adapter build will lack.
+   */
+  realtime?: RealtimeConfig | boolean
+  /**
+   * The native collaboration transport: presence and sequenced shared state
+   * per room, process-local and ephemeral. Same hosting rule as `realtime`.
+   */
+  collab?: CollabConfig | boolean
   adapter?: Adapter
   adapterOptions?: Record<string, unknown>
-  plugins?: RuvyxaPlugin[]
+}
+
+/** A rule list, or a function — sync or async — that returns one. */
+export type RouteRuleList<TRule> =
+  readonly TRule[] | (() => readonly TRule[] | Promise<readonly TRule[]>)
+
+/** What `proxy.handler` may return: an answer, a request to continue with, or nothing. */
+/** `config.realtime` as written; every field has a default. */
+export interface RealtimeConfig {
+  /** WebSocket endpoint. Must be an absolute application path. @default "/__ruvyxa/realtime" */
+  path?: string
+  /** WebSocket heartbeat interval in milliseconds, 5000–120000. @default 25000 */
+  heartbeatMs?: number
+  /** Per-process broadcast queue capacity, 16–4096. @default 256 */
+  capacity?: number
+}
+
+/** `config.collab` as written; every field has a default. */
+export interface CollabConfig {
+  /** WebSocket endpoint. Must be an absolute application path. @default "/__ruvyxa/collab" */
+  path?: string
+  /** WebSocket heartbeat interval in milliseconds, 5000–120000. @default 25000 */
+  heartbeatMs?: number
+}
+
+export type ProxyResult = Response | Request | undefined | null | void
+
+export interface ProxyConfig {
+  /** Paths the handler runs for; every request when omitted. */
+  matcher?: ProxyMatcher
+  handler(request: Request): ProxyResult | Promise<ProxyResult>
 }
 
 /** A unified-compatible plugin or preset accepted by the MDX compiler. */
@@ -373,7 +456,7 @@ export interface SiteSitemapVideoUploader {
   info?: string
 }
 
-/** Video sitemap fields supported by Next.js metadata routes. */
+/** Video sitemap fields, following the sitemap video extension. */
 export interface SiteSitemapVideo {
   title: string
   thumbnail_loc: string
@@ -394,7 +477,7 @@ export interface SiteSitemapVideo {
   tag?: string | string[]
 }
 
-/** One robots.txt rule group. String arrays follow Next.js metadata semantics. */
+/** One robots.txt rule group. A string array lists several values. */
 export interface SiteRobotsRule {
   /** Crawler product token or tokens. @default "*" */
   userAgent?: string | string[]
@@ -590,15 +673,15 @@ export interface PageProps<TParams extends RouteParams = RouteParams> {
 export interface MiddlewareConfig {
   builtin?: BuiltinMiddlewareConfig
   /**
-   * TypeScript plugin middleware worker processes (1-8). Workers do not share
-   * module-level plugin state, so keep the default unless plugin middleware is
-   * stateless and a proven throughput bottleneck.
+   * Project worker processes (1-8) that run `proxy.handler` on the native
+   * host. Workers share no module-level state, so keep the default unless the
+   * handler is stateless and a proven throughput bottleneck.
    * @default 1
    */
   workers?: number
   /**
-   * Maximum duration of one TypeScript middleware hook before its worker is
-   * replaced. Timed-out hooks are not retried because they may have produced
+   * Maximum duration of one `proxy.handler` call before its worker is
+   * replaced. A timed-out call is not retried because it may have produced
    * side effects before stalling.
    * @default 30000
    * @maximum 300000
@@ -626,321 +709,6 @@ export interface RateLimitConfig {
   max: number
   window: number
   key?: string
-}
-
-export interface TransformResult {
-  code: string
-  map?: unknown
-}
-
-/** Execution target exposed to build plugin hooks. */
-export type PluginEnvironment = 'client' | 'server' | 'edge' | 'worker' | 'shared'
-
-export interface PluginTransformContext {
-  /** Absolute application root. */
-  root: string
-  environment: 'client' | 'server' | 'edge' | 'worker' | 'shared'
-}
-
-/** Exact pathname or a prefix pattern ending in `*`. */
-export type PluginRoutePattern = string
-
-export interface PluginHttpContext {
-  /** Name of the plugin that registered this hook. */
-  readonly plugin: string
-  /** Absolute application root. */
-  readonly root: string
-}
-
-export interface PluginHttpRequestContext extends PluginHttpContext {
-  readonly request: Request
-  /** Continue to the next hook, optionally with a replacement request. */
-  next(request?: Request): void
-}
-
-export interface PluginHttpResponseContext extends PluginHttpContext {
-  readonly request: Request
-  readonly response: Response
-  /** Continue to the next hook, optionally with a replacement response. */
-  next(response?: Response): void
-}
-
-export type PluginHttpRequestHandler = (
-  context: PluginHttpRequestContext,
-) => Request | Response | void | Promise<Request | Response | void>
-
-export type PluginHttpResponseHandler = (
-  context: PluginHttpResponseContext,
-) => Response | void | Promise<Response | void>
-
-export interface PluginHttpRequestRegistration {
-  /** Omit to match every application path. */
-  match?: readonly PluginRoutePattern[]
-  handler: PluginHttpRequestHandler
-}
-
-export interface PluginHttpResponseRegistration {
-  /** Omit to match every application path. */
-  match?: readonly PluginRoutePattern[]
-  handler: PluginHttpResponseHandler
-}
-
-export interface PluginHttpRouteContext extends PluginHttpContext {
-  readonly request: Request
-}
-
-export interface PluginHttpRouteRegistration {
-  /** Exact application path. */
-  path: string
-  /** One method, several methods, or every method when omitted. */
-  method?: string | readonly string[]
-  handler(context: PluginHttpRouteContext): Response | Promise<Response>
-}
-
-export interface PluginHttpSocket {
-  onRequest(registration: PluginHttpRequestRegistration | PluginHttpRequestHandler): void
-  onResponse(registration: PluginHttpResponseRegistration | PluginHttpResponseHandler): void
-  route(registration: PluginHttpRouteRegistration): void
-}
-
-/** Concise HTTP declarations accepted by `definePlugin`. */
-export interface PluginHttpDefinition {
-  /** Optional scope shared by `onRequest`, `onResponse`, and generated response headers. */
-  match?: readonly PluginRoutePattern[]
-  onRequest?: PluginHttpRequestHandler
-  onResponse?: PluginHttpResponseHandler
-  routes?: readonly PluginHttpRouteRegistration[]
-}
-
-export interface PluginBuildResolveContext extends PluginTransformContext {
-  readonly id: string
-  readonly importer?: string
-}
-
-export type PluginBuildResolveHandler = (
-  context: PluginBuildResolveContext,
-) => string | null | void | Promise<string | null | void>
-
-export interface PluginBuildLoadContext extends PluginTransformContext {
-  readonly id: string
-}
-
-export type PluginBuildLoadHandler = (
-  context: PluginBuildLoadContext,
-) => string | TransformResult | null | void | Promise<string | TransformResult | null | void>
-
-/**
- * What a `build.onTransform` hook is given.
- *
- * The hook runs in the browser compile and nowhere else, so `environment` is
- * always `'client'` here. The server render — `dev`, `start`, pre-rendering,
- * and every deployed function — reads the same module through the JavaScript
- * compiler, which runs no plugin hooks.
- *
- * That makes a transform safe for anything only the browser observes, and
- * unsafe for anything that reaches rendered markup: the server writes the
- * original text, the browser hydrates against the rewritten one, and React
- * discards the server tree and re-renders (#418). `ruvyxa build` warns when a
- * transformed module is reached by a route that both renders on the server and
- * hydrates.
- */
-export interface PluginBuildTransformContext extends PluginTransformContext {
-  readonly code: string
-  readonly id: string
-}
-
-export type PluginBuildTransformHandler = (
-  context: PluginBuildTransformContext,
-) => string | TransformResult | null | void | Promise<string | TransformResult | null | void>
-
-export interface PluginBuildContext {
-  /** Absolute application root. */
-  root: string
-  /** Absolute build output directory. */
-  outDir: string
-  /** Parsed application build manifest. */
-  manifest: Readonly<Record<string, unknown>>
-}
-
-export type PluginBuildCompleteHook = (context: PluginBuildContext) => void | Promise<void>
-
-export interface PluginBuildStartContext {
-  readonly root: string
-  readonly outDir: string
-}
-
-export type PluginBuildStartHook = (context: PluginBuildStartContext) => void | Promise<void>
-
-export interface PluginBuildSocket {
-  onStart(hook: PluginBuildStartHook): void
-  onResolve(hook: PluginBuildResolveHandler): void
-  onLoad(hook: PluginBuildLoadHandler): void
-  onTransform(hook: PluginBuildTransformHandler): void
-  onComplete(hook: PluginBuildCompleteHook): void
-}
-
-/** Concise build declarations accepted by `definePlugin`. Use `register` for repeated hooks. */
-export interface PluginBuildDefinition {
-  onStart?: PluginBuildStartHook
-  onResolve?: PluginBuildResolveHandler
-  onLoad?: PluginBuildLoadHandler
-  onTransform?: PluginBuildTransformHandler
-  onComplete?: PluginBuildCompleteHook
-}
-
-/** Native self-hosted realtime transport requested by a first-party plugin. */
-export interface RealtimePluginOptions {
-  /** WebSocket endpoint. Must be an absolute application path. @default "/__ruvyxa/realtime" */
-  path?: string
-  /** WebSocket heartbeat interval in milliseconds. @default 25000 */
-  heartbeatMs?: number
-  /** Per-process broadcast queue capacity. @default 256 */
-  capacity?: number
-}
-
-/**
- * Native self-hosted collaboration transport requested by a first-party plugin.
- *
- * Unlike {@link RealtimePluginOptions}, this transport is bidirectional: peers
- * publish presence and write shared state, and the server sequences every
- * write. Rooms are process-local and ephemeral, so a multi-process deployment
- * gives each process its own rooms.
- */
-export interface PresencePluginOptions {
-  /** WebSocket endpoint. Must be an absolute application path. @default "/__ruvyxa/collab" */
-  path?: string
-  /** WebSocket heartbeat interval in milliseconds. @default 25000 */
-  heartbeatMs?: number
-}
-
-export interface PluginDevFileChangeContext {
-  readonly root: string
-  readonly paths: readonly string[]
-}
-
-export type PluginDevFileChangeHandler = (
-  context: PluginDevFileChangeContext,
-) => void | Promise<void>
-
-export interface PluginDevFileChangeRegistration {
-  /** Optional path patterns, relative to the application root. */
-  match?: readonly string[]
-  handler: PluginDevFileChangeHandler
-}
-
-export interface PluginDevSocket {
-  onFileChange(registration: PluginDevFileChangeRegistration | PluginDevFileChangeHandler): void
-}
-
-/** Concise development declarations accepted by `definePlugin`. */
-export interface PluginDevDefinition {
-  onFileChange?: PluginDevFileChangeRegistration | PluginDevFileChangeHandler
-}
-
-export type PluginDiagnosticLevel = 'info' | 'warning' | 'error'
-
-export interface PluginDiagnostic {
-  level: PluginDiagnosticLevel
-  code: string
-  message: string
-}
-
-export interface PluginDiagnosticsSocket {
-  report(diagnostic: PluginDiagnostic): void
-}
-
-export type PluginNativeCapability = 'realtime@1' | 'presence@1'
-
-export interface PluginNativeSocket {
-  claim(capability: 'realtime@1', options?: RealtimePluginOptions): void
-  claim(capability: 'presence@1', options?: PresencePluginOptions): void
-}
-
-/** Framework-owned native capabilities requested declaratively by a plugin. */
-export interface PluginNativeDefinition {
-  /** Enable the self-hosted realtime capability; `true` uses its defaults. */
-  realtime?: RealtimePluginOptions | true
-  /** Enable the self-hosted collaboration capability; `true` uses its defaults. */
-  presence?: PresencePluginOptions | true
-}
-
-/** Grouped extension sockets available while a plugin registers itself. */
-/**
- * Which environment the plugin host is serving.
- *
- * Unrelated to `PluginEnvironment`, which names the bundle a build hook is
- * transforming for (`client`, `server`, `edge`, ...). This is `ruvyxa dev`
- * versus a server or function answering real traffic.
- */
-export type PluginHostEnvironment = 'development' | 'production'
-
-export interface PluginRegistrationApi {
-  /**
-   * The environment this host serves.
-   *
-   * Available at registration rather than per request on purpose: a plugin
-   * that only makes sense in one environment declines to register its hooks at
-   * all, so the other environment pays nothing. A host that does not state an
-   * environment reports `production`, so development-only behaviour is never
-   * enabled by omission.
-   */
-  readonly environment: PluginHostEnvironment
-  readonly http: PluginHttpSocket
-  readonly build: PluginBuildSocket
-  readonly dev: PluginDevSocket
-  readonly diagnostics: PluginDiagnosticsSocket
-  readonly native: PluginNativeSocket
-}
-
-/**
- * One element a plugin contributes to every rendered document's `<head>`.
- *
- * Declared once at config load and injected by the server, so a plugin adds an
- * analytics snippet, a preconnect, or a verification tag without paying for a
- * per-request round trip into the plugin host.
- *
- * Only elements that are legal in `<head>` are accepted, and attribute values
- * are HTML-escaped. To contribute per-route metadata instead, export `meta`
- * from the route — a plugin cannot know which route is rendering.
- */
-export interface PluginHeadEntry {
-  tag: 'link' | 'meta' | 'noscript' | 'script' | 'style'
-  /** Attribute names and values. Values are escaped before they are written. */
-  attrs?: Record<string, string | number | boolean>
-  /**
-   * Text content for `script`, `style`, and `noscript`.
-   *
-   * Written verbatim: these elements have raw-text content models, so escaping
-   * would corrupt them. A plugin is trusted project code — do not build this
-   * string from untrusted input.
-   */
-  children?: string
-}
-
-/**
- * Input accepted by `definePlugin`.
- *
- * Prefer concise declarations for common behavior. `register(api)` remains the escape hatch for
- * multiple hooks of the same kind or advanced composition.
- */
-export interface RuvyxaPluginDefinition {
-  name: string
-  headers?: HeadersInit
-  head?: PluginHeadEntry | readonly PluginHeadEntry[]
-  http?: PluginHttpDefinition
-  build?: PluginBuildDefinition
-  dev?: PluginDevDefinition
-  diagnostics?: PluginDiagnostic | readonly PluginDiagnostic[]
-  native?: PluginNativeDefinition
-  register?(api: PluginRegistrationApi): void | Promise<void>
-}
-
-/** The sole plugin object accepted by `config({ plugins })`. */
-export interface RuvyxaPlugin {
-  readonly name: string
-  /** Head elements this plugin contributes to every rendered document. */
-  readonly head?: readonly PluginHeadEntry[]
-  register(api: PluginRegistrationApi): void | Promise<void>
 }
 
 export interface BuildContext {
@@ -1005,10 +773,9 @@ export interface AdapterOutput {
    * absorbs the union — TypeScript collapses it to `string` and the editor
    * stops offering `vercel` at all — so the sentence above would still read
    * true while being false. Static analysers report the intersection as an
-   * empty type worth deleting; it is the same deliberate idiom as `purpose` in
-   * `packages/ruvyxa/src/plugins/pwa.ts`, and nothing but this comment can
-   * hold it, because the two spellings are structurally identical and no test
-   * can tell them apart.
+   * empty type worth deleting; it is deliberate, and nothing but this comment
+   * can hold it, because the two spellings are structurally identical and no
+   * test can tell them apart.
    */
   platform?: AdapterPlatform | (string & {})
   /** Runtime expected by the deployment entrypoint. */

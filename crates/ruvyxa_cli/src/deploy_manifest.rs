@@ -113,25 +113,22 @@ pub(crate) struct DeployManifestInput<'a> {
     pub(crate) client_assets: Vec<String>,
     pub(crate) base_path: String,
     pub(crate) adapter: Option<&'a str>,
-    /// The head fragments a deployed request-time render has to add for
+    /// The head fragment a deployed request-time render has to add for
     /// itself, computed here and carried rather than recomputed.
     ///
     /// A deployed function renders pages the build never baked, and it has no
-    /// `public/` to stat and no plugin host to ask — so whatever the build knew
-    /// has to travel with the deployment or the document goes without it.
-    /// Passing the finished strings keeps `public_asset_links` and
-    /// `render_plugin_head` as the only implementations of either rule; the
+    /// `public/` to stat — so whatever the build knew has to travel with the
+    /// deployment or the document goes without it. Passing the finished string
+    /// keeps `public_asset_links` the only implementation of the rule; the
     /// deployment holds bytes, not a second copy of the logic.
     pub(crate) document_head: DocumentHeadDefaults<'a>,
 }
 
-/// Head fragments the build resolved that a deployed render cannot re-derive.
+/// The head fragment the build resolved that a deployed render cannot re-derive.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct DocumentHeadDefaults<'a> {
     /// The icon link derived from what the build published, or empty.
     pub(crate) asset_links: &'a str,
-    /// Every plugin's declared head, rendered.
-    pub(crate) plugin_head: &'a str,
 }
 
 /// Build the deployment manifest.
@@ -248,7 +245,6 @@ pub(crate) fn deploy_manifest(input: &DeployManifestInput<'_>) -> serde_json::Va
         // written to disk.
         "documentHead": {
             "assetLinks": input.document_head.asset_links,
-            "pluginHead": input.document_head.plugin_head,
         },
         "assetClasses": {
             "client": CLIENT_CACHE_CONTROL,

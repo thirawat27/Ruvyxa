@@ -328,7 +328,7 @@ describe('vercel', () => {
         path.join(root, 'route-modules.mjs'),
         'export async function loadRouteModule() { return null }\n' +
           'export async function loadActionModule() { return null }\n' +
-          'export const applyPluginHttp = undefined\n' +
+          'export const projectProxy = undefined\n' +
           'export const documentCacheHandler = null\n',
       )
       for (const runtimeFile of handlerRuntimeFiles) {
@@ -420,7 +420,7 @@ describe('vercel', () => {
         // The generated registry exports these too; the Vercel handler imports
         // all three, so a stub that omits them fails at module load.
         export async function loadActionModule() { return null }
-        export const applyPluginHttp = undefined
+        export const projectProxy = undefined
         export const documentCacheHandler = null
         `,
       )

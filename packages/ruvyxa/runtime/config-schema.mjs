@@ -39,9 +39,14 @@ export const CONFIG_KEY_SCHEMA = Object.freeze({
     'site',
     'content',
     'middleware',
+    'headers',
+    'redirects',
+    'rewrites',
+    'proxy',
+    'realtime',
+    'collab',
     'adapter',
     'adapterOptions',
-    'plugins',
   ],
   'config.css': ['entries'],
   'config.markdown': [
@@ -82,7 +87,6 @@ export const CONFIG_KEY_SCHEMA = Object.freeze({
   'config.security': [
     'actionLimit',
     'apiLimit',
-    'pluginLimit',
     'actionRateLimit',
     'sameOrigin',
     'fetchMeta',
@@ -145,6 +149,35 @@ export const CONFIG_KEY_SCHEMA = Object.freeze({
   'config.middleware.builtin': ['cors', 'timing', 'log', 'rate', 'headers'],
   'config.middleware.builtin.cors': ['origins', 'methods', 'headers', 'credentials', 'maxAge'],
   'config.middleware.builtin.rate': ['max', 'window', 'key'],
+  // Route rules. `headers`, `redirects`, and `rewrites` may be written as a
+  // function; the renderer resolves it before these element schemas apply, so
+  // what is described here is the list each one returns.
+  'config.headers[]': ['source', 'headers', 'has', 'missing'],
+  'config.headers[].headers[]': ['key', 'value'],
+  'config.headers[].has[]': ['type', 'key', 'value'],
+  'config.headers[].missing[]': ['type', 'key', 'value'],
+  'config.redirects[]': ['source', 'destination', 'permanent', 'statusCode', 'has', 'missing'],
+  'config.redirects[].has[]': ['type', 'key', 'value'],
+  'config.redirects[].missing[]': ['type', 'key', 'value'],
+  // A bare list is `afterFiles`; the renderer reduces it to this object.
+  'config.rewrites': ['beforeFiles', 'afterFiles', 'fallback'],
+  'config.rewrites.beforeFiles[]': ['source', 'destination', 'has', 'missing'],
+  'config.rewrites.beforeFiles[].has[]': ['type', 'key', 'value'],
+  'config.rewrites.beforeFiles[].missing[]': ['type', 'key', 'value'],
+  'config.rewrites.afterFiles[]': ['source', 'destination', 'has', 'missing'],
+  'config.rewrites.afterFiles[].has[]': ['type', 'key', 'value'],
+  'config.rewrites.afterFiles[].missing[]': ['type', 'key', 'value'],
+  'config.rewrites.fallback[]': ['source', 'destination', 'has', 'missing'],
+  'config.rewrites.fallback[].has[]': ['type', 'key', 'value'],
+  'config.rewrites.fallback[].missing[]': ['type', 'key', 'value'],
+  // `handler` is a function and never leaves the config module; a bare string
+  // matcher is reduced to one `{ source }` entry.
+  'config.proxy': ['matcher', 'handler'],
+  'config.proxy.matcher[]': ['source', 'has', 'missing'],
+  'config.proxy.matcher[].has[]': ['type', 'key', 'value'],
+  'config.proxy.matcher[].missing[]': ['type', 'key', 'value'],
+  'config.realtime': ['path', 'heartbeatMs', 'capacity'],
+  'config.collab': ['path', 'heartbeatMs'],
 })
 
 /**

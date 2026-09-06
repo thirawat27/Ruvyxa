@@ -28,9 +28,10 @@
 ## Ruvyxa System Overview
 
 **Philosophy**: Rust owns discovery, validation, compilation orchestration, caching, and HTTP
-serving; a JavaScript runtime owns project configuration, React rendering, API routes, and plugins.
-The supported local runtimes are Node, Bun, and Deno. This keeps framework-critical work in Rust
-while preserving the JavaScript ecosystem at the application boundary.
+serving; a JavaScript runtime owns project configuration, React rendering, API routes, and the
+project worker (the `proxy` handler, MDX, the React compiler, and the content engine). The supported
+local runtimes are Node, Bun, and Deno. This keeps framework-critical work in Rust while preserving
+the JavaScript ecosystem at the application boundary.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -65,7 +66,7 @@ on no other workspace crate.
 | `ruvyxa_diagnostics` | none                                                   | diagnostic types, `RUV####` codes, SARIF                 |
 | `ruvyxa_tui`         | none                                                   | terminal layout, progress, mascot, theme                 |
 | `ruvyxa_bundler`     | `diagnostics`                                          | Oxc compiler, resolver, linker, minifier, CSS modules    |
-| `ruvyxa_middleware`  | `diagnostics`                                          | Tower middleware, plugin bridge                          |
+| `ruvyxa_middleware`  | `diagnostics`                                          | Tower middleware, route rules, worker host               |
 | `ruvyxa_graph`       | `bundler`, `diagnostics`                               | route discovery, validation, manifest                    |
 | `ruvyxa_dev_server`  | `bundler`, `graph`, `middleware`, `tui`, `diagnostics` | Axum serving, HMR, cache, worker pool, router            |
 | `ruvyxa_cli`         | every crate above                                      | command orchestration, build pipeline, clap binary entry |
@@ -146,9 +147,7 @@ ruvyxa (CLI + re-exports)
 
 - `ruvyxa/config` → `@ruvyxa/core/config`
 - `ruvyxa/server` → `@ruvyxa/core/server`
-- `ruvyxa/plugin` → `@ruvyxa/core/plugin`
-- `ruvyxa/plugins` → built-in plugins (redirects, headers, sitemap, PWA, etc.)
-- `ruvyxa/plugin-harness` → `@ruvyxa/core/plugin-harness`, the in-process plugin test harness
+- `ruvyxa/content-engine` → the content engine (`contentEngine`, `createContentEngine`)
 
 ---
 
@@ -219,7 +218,6 @@ The `blog`, `crud`, and `api` starters add their own routes on top of this shape
 | `ruvyxa trace`       | Inspect one route manifest entry by path                      |
 | `ruvyxa bench`       | Benchmark route discovery, analysis, and production build     |
 | `ruvyxa test:parity` | Dev/prod route comparison + smoke renders                     |
-| `ruvyxa plugin`      | Create a publishable plugin package                           |
 
 ---
 
@@ -299,9 +297,9 @@ reviewed as a contract change rather than a local refactor.
 | Runtime server                    | `crates/ruvyxa_dev_server`                               | Axum routes, HMR, router, caching, worker lifecycle, actions, static assets, style collection  | Preserve HTTP and worker protocol behavior; keep production and development paths aligned.                              |
 | Source understanding              | `crates/ruvyxa_graph`                                    | Route discovery, conventions, render-strategy inference, manifest validation                   | Add fixtures/tests before changing route semantics; no server should invent a second discovery rule.                    |
 | Compilation                       | `crates/ruvyxa_bundler`                                  | Oxc parsing/transforms, resolution, linking, minification, source maps, boundary checks        | Maintain client/server safety checks and the Oxc Rust/JS lockstep.                                                      |
-| HTTP extension layer              | `crates/ruvyxa_middleware`                               | Tower composition, built-in middleware config, TypeScript plugin bridge                        | Keep hooks bounded and failure-isolated; do not let plugin behavior bypass core security policy.                        |
+| HTTP extension layer              | `crates/ruvyxa_middleware`                               | Tower composition, built-in middleware config, route rules, project worker host                | Keep worker calls bounded and failure-isolated; do not let `proxy.handler` bypass core security policy.                 |
 | Diagnostics and terminal UI       | `crates/ruvyxa_diagnostics`, `crates/ruvyxa_tui`         | RUV#### diagnostic records/SARIF and terminal presentation primitives                          | Treat diagnostic codes and machine-readable fields as compatibility surface.                                            |
-| Public application API            | `packages/@ruvyxa/core`, `@ruvyxa/react`                 | Typed config, server helpers, adapters, plugin API, route helpers, React integration           | Export only deliberate stable contracts; preserve types and runtime behavior together.                                  |
+| Public application API            | `packages/@ruvyxa/core`, `@ruvyxa/react`                 | Typed config, server helpers, adapters, route rules, route helpers, React integration          | Export only deliberate stable contracts; preserve types and runtime behavior together.                                  |
 | Optional product features         | `packages/@ruvyxa/{auth,database,realtime,testing}`      | Auth, data contracts, native realtime, test doubles                                            | Keep browser/server entry points explicit; enforce deployment capabilities at build time.                               |
 | Distribution runtime              | `packages/ruvyxa`                                        | npm CLI launcher, bundled runtime scripts, default adapter packages, platform binary selection | Any shared route-matching behavior must be synced to the committed runtime copy; package contents are release-critical. |
 | Scaffolding and fixtures          | `packages/create-ruvyxa`, `templates/*`, `examples/demo` | New-project output and broad integration coverage                                              | Template and demo mirrors must remain byte-identical where the repository declares them as mirrors.                     |
@@ -309,10 +307,10 @@ reviewed as a contract change rather than a local refactor.
 
 #### Published TypeScript package boundaries
 
-`@ruvyxa/core` is the lowest public TypeScript layer. It owns config, server utilities, plugin
-contracts, adapters, and route matching. `@ruvyxa/react` depends on it and supplies React-facing
-integration without becoming a second server runtime. `@ruvyxa/auth`, `database`, and `realtime`
-also build on core; `testing` provides framework-aware doubles for code using those contracts.
+`@ruvyxa/core` is the lowest public TypeScript layer. It owns config, server utilities, route rules,
+adapters, and route matching. `@ruvyxa/react` depends on it and supplies React-facing integration
+without becoming a second server runtime. `@ruvyxa/auth`, `database`, and `realtime` also build on
+core; `testing` provides framework-aware doubles for code using those contracts.
 
 The `ruvyxa` package is different: it is a distribution package, not the source of framework policy.
 It packages the launcher, native-binary selection, runtime scripts such as the compiler, worker
@@ -347,7 +345,7 @@ silently corrupting a larger process and makes operational limits explicit.
 | Worker admission queue                | One worker; active request plus bounded FIFO waiters    | Request completion or shutdown                  | Overflow is `RUV1705`; shutdown rejects parked work rather than preserving it indefinitely.          |
 | Retained ESM module graphs            | One JavaScript worker process                           | Telemetry-driven worker replacement             | Bounds non-reclaimable graphs across long dev/HMR sessions and isolated prerender builds.            |
 | HMR reverse dependency map            | Dev server process                                      | Recomputed/refreshed on source changes          | Unknown/untracked changes choose a full reload, favoring correctness over a narrow update.           |
-| Plugin process and hook state         | Plugin host/build session                               | Hook timeout, lifecycle stop, or process exit   | A plugin fault becomes a framework error; it must not hang the Rust host forever.                    |
+| Project worker process and call state | Worker host/build session                               | Call timeout, lifecycle stop, or process exit   | A worker fault becomes a framework error; it must not hang the Rust host forever.                    |
 | Build output                          | Temporary staging directory until commit                | Atomic replacement or cleanup guard             | Failed materialization preserves the last completed output rather than leaving a partial deployment. |
 
 #### Compatibility rules that require coordinated changes
@@ -371,7 +369,7 @@ silently corrupting a larger process and makes operational limits explicit.
 #### Operational failure posture
 
 The server uses a “fail closed when correctness or safety is uncertain” rule. Invalid routes,
-server/client boundary violations, private environment access in browser code, malformed plugin
+server/client boundary violations, private environment access in browser code, malformed route-rule
 configuration, incompatible adapter capabilities, and invalid security limits stop the relevant
 command. At runtime, a bounded operation may fail a single request—such as a worker timeout,
 `RUV1705` overload rejection, an action payload limit, or a streaming API worker failure—without
@@ -428,7 +426,7 @@ alphabetically. The table below maps each user-visible concern to its primary so
 | Route discovery and validation    | `crates/ruvyxa_graph/src/`                                                       | File conventions, manifests, rendering detection, boundary diagnostics | [Route Discovery](#route-discovery-and-validation)  |
 | Client compilation and linking    | `crates/ruvyxa_bundler/src`                                                      | AST scanning, resolution, boundary checks, output                      | [Bundler](#bundler)                                 |
 | HTTP serving and rendering        | `crates/ruvyxa_dev_server/src`                                                   | Axum routes, request dispatch, HMR, render cache, security application | [Dev Server](#dev-server)                           |
-| Middleware and plugin bridge      | `crates/ruvyxa_middleware/src` and `packages/ruvyxa/runtime/plugin-runtime.mjs`  | Middleware stacking and JavaScript-plugin communication                | [Middleware](#middleware)                           |
+| Middleware and project worker     | `crates/ruvyxa_middleware/src` and `packages/ruvyxa/runtime/project-worker.mjs`  | Middleware stacking, route rules, and worker communication             | [Middleware](#middleware)                           |
 | Public TypeScript contract        | `packages/@ruvyxa/core/src`, `packages/@ruvyxa/react/src`                        | Config, server helpers, React components/hooks                         | [API Reference](docs/en/17-public-api-reference.md) |
 
 #### Boundary Walkthrough: One Request
@@ -436,8 +434,8 @@ alphabetically. The table below maps each user-visible concern to its primary so
 For a page request, the dev server obtains or refreshes the route manifest from `ruvyxa_graph`,
 matches the request, and sends rendering work through its worker/runtime path. The bundler and graph
 share source-scanning facts for imports and environment reads so a `check` result and a build are
-less likely to disagree about a client/server boundary. Plugins and middleware wrap the HTTP path;
-they are not a substitute for route discovery or rendering strategy selection.
+less likely to disagree about a client/server boundary. Route rules, the proxy, and middleware wrap
+the HTTP path; they are not a substitute for route discovery or rendering strategy selection.
 
 When investigating a framework issue, start with the user-visible symptom and follow this order:
 
@@ -453,7 +451,7 @@ never discovered, or changing a page when the failure is a module boundary viola
 - [Compilation Pipeline](#bundler) — resolver → compiler → linker → minifier
 - [Dev Server](#dev-server) — Axum serving, HMR protocol, render cache
 - [CLI & Build Pipeline](#cli-architecture) — command structure, config loading, staging
-- [Middleware](#middleware) — Tower stack, plugin bridge
+- [Middleware](#middleware) — Tower stack, route rules, worker host
 - [Worker Pool](#worker-pool) — Node/Bun/Deno workers, protocol, recovery
 - [Diagnostics](#diagnostics) — RUV#### error catalog
 - [Protocols](#protocols) — NDJSON, WebSocket HMR, Fetch
@@ -478,11 +476,11 @@ in a sibling module, and the modules reach each other through crate-root re-expo
 | `client_bundle`                                    | per-route browser bundles and the shared chunk                                   |
 | `prerender`                                        | static HTML generation, job planning, path safety                                |
 | `artifact_cache`                                   | content-addressed caching of every build artifact                                |
-| `plugins`                                          | the TypeScript build-plugin worker bridge                                        |
+| `worker`                                           | the build-owned project worker session (MDX, React compiler, content engine)     |
 | `add`                                              | the `adds` command's form, data-table, and authentication scaffolding            |
 | `config`                                           | `ruvyxa.config.*` loading and validation                                         |
 | `runtime_config`                                   | args + config → `ServerConfig`, adapter and runtime selection                    |
-| `cli_args`                                         | argument spelling normalization, plugin scaffolding                              |
+| `cli_args`                                         | argument spelling normalization                                                  |
 | `commands`                                         | `routes`, `analyze`, `check`, `doctor`, `clean`, `trace`, `bench`, `test:parity` |
 | `analyzer_html`                                    | the self-contained `analyze --html` report                                       |
 | `environment`                                      | toolchain and dependency probing for `doctor`                                    |
@@ -520,7 +518,6 @@ styled ANSI output.
 | `Trace`      | `TraceArgs`   | Inspect one route manifest entry by route path, print as JSON                                          |
 | `Bench`      | `BenchArgs`   | Benchmark route discovery + analysis + production build over N samples                                 |
 | `TestParity` | `ProjectArgs` | Build then compare dev vs production route manifests + smoke render (alias: `parity`)                  |
-| `Plugin`     | `PluginArgs`  | Subcommand `PluginCommand::Create(PluginCreateArgs)` — scaffold plugin package                         |
 
 ### Args Structs
 
@@ -534,9 +531,6 @@ struct AddArgs              { templates: Vec<AddTemplate>, root: PathBuf, runtim
 struct DoctorArgs           { root: PathBuf, target: Option<BuildTarget>, adapter: Option<String>, runtime: Option<CliRuntime>, json: bool }
 struct TraceArgs            { route: String, root: PathBuf }
 struct BenchArgs            { root: PathBuf, samples: usize, json: bool }
-struct PluginArgs           { command: PluginCommand }
-  enum PluginCommand        { Create(PluginCreateArgs) }
-    struct PluginCreateArgs { name: String, root: PathBuf, dir: Option<PathBuf> }
 ```
 
 ### Key Enums
@@ -567,21 +561,20 @@ uses `CliRuntime` (Node | Bun | Deno) and maps to `JavaScriptRuntime` (from `ruv
 Config types (all `#[serde(deny_unknown_fields)]`):
 
 ```
-ProjectConfig        { app_dir, out_dir, runtime, rendering, server, css, build, debug, images, security, cache, site, middleware, plugins, adapter, adapter_options }
+ProjectConfig        { app_dir, out_dir, runtime, rendering, server, css, build, debug, images, security, cache, site, content, middleware, headers, redirects, rewrites, proxy, realtime, collab, adapter, adapter_options }
 ServerConfigOptions  { host, port }
 CssConfigOptions     { entries: Vec<String> }
 BuildConfigOptions   { minify, sourcemap, tree_shaking, split_strategy, parallelism, jsx_runtime, es_target, emit_chunk_manifest, prebundle_dependencies, prerender_cache }
 RenderingConfigOptions { default_strategy, default_revalidate }
 DebugConfigOptions   { overlay, traces }
-SecurityConfigOptions  { action_body_limit, api_body_limit, plugin_response_body_limit, action_rate_limit, same_origin, fetch_metadata, trusted_proxy_ips, security_headers }
+SecurityConfigOptions  { action_body_limit, api_body_limit, action_rate_limit, same_origin, fetch_metadata, trusted_proxy_ips, security_headers }
 CacheConfigOptions   { route_manifest, css, build_dir }
-BuildPluginConfig    { name, head: Vec<PluginHeadEntry> }
 ```
 
 ### Config Override Priority
 
 `--runtime` CLI flag → `RUVYXA_RUNTIME` → `config.runtime` → invoker hint → automatic detection. The
-CLI flag persists process-wide so all config, plugin, and render processes agree. The `--adapter`
+CLI flag persists process-wide so all config, worker, and render processes agree. The `--adapter`
 CLI flag parses the 11 built-in names (node, bun, deno, static, vercel, netlify, cloudflare,
 railway, render, firebase, aws) or a valid npm package name. Platform auto-detection reads eight
 environment variables (`VERCEL`, `NETLIFY`, `CF_PAGES`, `WORKERS_CI`, `RAILWAY_PROJECT_ID`,
@@ -595,8 +588,9 @@ are separate products that set separate variables.
 1. **Config load** — `load_project_config()`
 2. **Route discovery** — `discover_project_routes()` → `RouteManifest`
 3. **Validation** — `validate_app()` → fails on any diagnostic
-4. **Plugin start** — `TypeScriptPluginBuildSession::run_start(out_dir)` — spawns a persistent
-   selected-runtime worker running `plugin-runtime.mjs`
+4. **Worker start** — `BuildWorkerSession::new(root, runtime, options)` — spawns a persistent
+   selected-runtime worker running `project-worker.mjs` when `markdown`, `reactCompiler`, or
+   `content` needs one
 5. **Staging dir** — atomic temp directory under `out_dir`; cleanup guard on drop
 6. **Asset preparation** (parallel thread scope):
    - Style collection → `collect_styles()`
@@ -623,7 +617,8 @@ are separate products that set separate variables.
 11. **Build info JSON** — writes `staging/build.json`
 12. **Commit staging** — `commit_staged_build_outputs()`:
     - Backup existing output → rename staging → remove backup (with Windows retry)
-13. **Plugin complete** — `TypeScriptPluginBuildSession::run_complete(out_dir, manifest)`
+13. **Content artifacts** — `BuildWorkerSession::write_content_artifacts(out_dir)` writes the
+    content engine's files under `assets/`
 14. **Adapter runner** (if an adapter is selected) — `run_adapter_runner()` invokes
     `adapter-runner.mjs`, which resolves the adapter and materializes its artifact reports
 
@@ -632,34 +627,25 @@ are separate products that set separate variables.
 `emit_client_bundles_with_session()` uses `ruvyxa_bundler::BundleContext`:
 
 - Creates `CompileCache` and `ResolveGraphCache` at `cache/bundler/`
-- When plugins present → attaches `BuildHookPipeline` with `TypeScriptPluginBridge` hooks
-- Plugin hooks: `resolve_id`, `load`, `transform` — each communicates with a persistent selected-
-  runtime worker via NDJSON over stdin/stdout
+- When the React compiler is on → attaches `BuildHookPipeline` with `BuildWorkerBridge`, whose
+  `transform` hook sends each client module to the persistent selected-runtime worker via NDJSON
+  over stdin/stdout
 - Supports `SplitStrategy::Route` (default) and `SplitStrategy::Single`
 - Client bundling respects minify, sourcemap, tree-shaking, JSX runtime (classic/automatic), ES
   target (es2018–esnext)
 - Progress bar on TTY; silent in pipes/CI
 
-### Plugin Host
+### Project Worker
 
-`TypeScriptPluginBuildSession` manages a persistent selected-runtime process running
-`plugin-runtime.mjs`:
+`BuildWorkerSession` manages a persistent selected-runtime process running `project-worker.mjs`, the
+same script the dev server's `WorkerHost` spawns:
 
-- `run_start(out_dir)` → calls `build.start` hook
-- `run_complete(out_dir, manifest)` → calls `build.complete` hook
-- Hooks are used during bundling via `TypeScriptPluginBridge` which implements `BuildHooks` trait
+- Started only when the config needs it: `markdown` (MDX through unified), `reactCompiler`, or
+  `content` (the content engine)
+- `bridge()` → the `BuildHooks` implementation the bundler calls for `build.transform`
+- `write_content_artifacts(out_dir)` → calls `content.write` after the staged output is committed
 - Worker protocol: JSON line → stdin, JSON line ← stdout, errors → stderr
-- Round-robin across workers for concurrent hook calls
-
-### Plugin Create Scaffolding
-
-`plugin create <name>` copies 6 template files from `templates/plugin/`:
-
-- `src/index.ts`, `test/plugin.test.mjs`, `package.json`, `tsconfig.json`, `README.md`, `.gitignore`
-- Replaces `__PLUGIN_NAME__`, `__PLUGIN_IDENTIFIER__`, `__RUVYXA_VERSION__`
-- Validates plugin name: lowercase + digits + single hyphens only
-- Default dir is `<name>` under root; `--dir` overrides (must be relative, no `..`)
-- Package is named `ruvyxa-plugin-<name>`
+- Round-robin across workers for concurrent calls
 
 ### CLI Normalization
 
@@ -671,7 +657,7 @@ matching to canonical forms). This makes `ruvyxa BUILD --Target node` equivalent
 
 - `anyhow::Result` with `.context()` for all failures
 - Error codes: `RUV1205` (prerender path escape), `RUV1600`–`RUV1603` (config validation),
-  `RUV1700`–`RUV1701` (plugin errors), `RUV2200`–`RUV2203` (adapter errors)
+  `RUV1700`–`RUV1701` (project worker errors), `RUV2200`–`RUV2203` (adapter errors)
 - Diagnostics bubble through `fail_on_diagnostics()` which prints each diagnostic and bails with
   count
 - Invalid config fields rejected at deserialization via `deny_unknown_fields`
@@ -1304,8 +1290,8 @@ validate plugin-mutated `file.data.ruvyxa.frontmatter`, and wrap the document in
 `ruvyxa-content` article.
 
 The Rust bundler cannot execute unified plugins. When the sanitized config reports a `markdown`
-block, `TypeScriptPluginBuildSession` starts the existing persistent JavaScript plugin worker and
-the resolver calls its `content.compile` protocol once per unique document. The compiled module is
+block, `BuildWorkerSession` starts the persistent project worker (`project-worker.mjs`) and the
+resolver calls its `content.compile` protocol once per unique document. The compiled module is
 stored on `ResolvedModule` and reused for dependency scanning and code generation; no process is
 started per file. Direct `ruvyxa_bundler` consumers without that host retain
 `crates/ruvyxa_bundler/src/content.rs` as the native fallback.
@@ -1313,8 +1299,8 @@ started per file. Direct `ruvyxa_bundler` consumers without that host retain
 `config-renderer.mjs` writes `.ruvyxa/cache/config/runtime-config.mjs`, a generated stable pointer
 to the versioned compiled config. Node SSR/SSG/dev compilers import only its `markdown` export.
 Pointer contents participate in the content cache key and configured content inputs, so changing a
-plugin or an imported config dependency cannot reuse output from the old pipeline. The pointer is
-generated output and is never packaged or committed.
+unified plugin or an imported config dependency cannot reuse output from the old pipeline. The
+pointer is generated output and is never packaged or committed.
 
 #### Incremental graph cache
 
@@ -1635,7 +1621,7 @@ The bundler returns a `BundleOutput`; writing it is the CLI's job (`client_bundl
 ## Dev Server
 
 **Crate**: `ruvyxa_dev_server` —
-`crates/ruvyxa_dev_server/src/{lib,router,render_cache,response,hmr_tracker,worker_pool,style,action_security,port_binding,render_pipeline,plugin_bridge,plugin_head,html_document,env_file,static_assets,cli_output,watcher,framework_endpoints,realtime_endpoints}.rs`
+`crates/ruvyxa_dev_server/src/{lib,router,render_cache,response,hmr_tracker,worker_pool,style,action_security,port_binding,render_pipeline,worker_bridge,html_document,env_file,static_assets,cli_output,watcher,framework_endpoints,realtime_endpoints}.rs`
 
 `lib.rs` is the crate root: configuration, `serve`, the router table, and the request path for
 project pages and API routes. The three newest modules were carved out of it — `watcher.rs` (the
@@ -1646,7 +1632,7 @@ realtime, and presence WebSockets with their frame rules).
 
 Axum HTTP server with HMR (WebSocket), radix-trie route matching, LRU render cache with lazily-built
 compressed copies, persistent Node/Bun/Deno worker pool, style collection pipeline, action security
-middleware, TypeScript plugin host, and realtime event broadcasting.
+middleware, project worker host, and realtime event broadcasting.
 
 ---
 
@@ -1655,42 +1641,44 @@ middleware, TypeScript plugin host, and realtime event broadcasting.
 30 fields. Constructed via `ServerConfig::dev(root, host, port)` or
 `ServerConfig::production(root, host, port)`.
 
-| Field                              | Type                     | Dev default                      | Production default                |
-| ---------------------------------- | ------------------------ | -------------------------------- | --------------------------------- |
-| `root`                             | `PathBuf`                | `root`                           | `root`                            |
-| `app_dir`                          | `PathBuf`                | `root.join("app")`               | `root.join(".ruvyxa/server/app")` |
-| `public_dir`                       | `PathBuf`                | `root.join("public")`            | `root.join(".ruvyxa/assets")`     |
-| `client_dir`                       | `PathBuf`                | `root.join(".ruvyxa/client")`    | `root.join(".ruvyxa/client")`     |
-| `prerender_dir`                    | `PathBuf`                | `root.join(".ruvyxa/prerender")` | `root.join(".ruvyxa/prerender")`  |
-| `host`                             | `String`                 | `host`                           | `host`                            |
-| `port`                             | `u16`                    | `port`                           | `port`                            |
-| `watch`                            | `bool`                   | `true`                           | `false`                           |
-| `cache_route_manifest`             | `bool`                   | `true`                           | `true`                            |
-| `cache_css`                        | `bool`                   | `true`                           | `true`                            |
-| `style_entries`                    | `Vec<PathBuf>`           | `Vec::new()`                     | `Vec::new()`                      |
-| `prebundle_dependencies`           | `bool`                   | `true`                           | `false`                           |
-| `runtime`                          | `JavaScriptRuntime`      | `JavaScriptRuntime::detect()`    | `JavaScriptRuntime::detect()`     |
-| `jsx_runtime`                      | `JsxRuntime`             | `Automatic`                      | `Automatic`                       |
-| `error_overlay`                    | `bool`                   | `true`                           | `false`                           |
-| `debug_traces`                     | `bool`                   | `false`                          | `false`                           |
-| `action_body_limit_bytes`          | `usize`                  | `1MB`                            | `1MB`                             |
-| `api_body_limit_bytes`             | `usize`                  | `10MB`                           | `10MB`                            |
-| `plugin_response_body_limit_bytes` | `usize`                  | `32MB`                           | `32MB`                            |
-| `action_rate_limit_max`            | `usize`                  | `600`                            | `600`                             |
-| `action_rate_limit_window`         | `Duration`               | `60s`                            | `60s`                             |
-| `same_origin_actions`              | `bool`                   | `true`                           | `true`                            |
-| `fetch_metadata_actions`           | `bool`                   | `true`                           | `true`                            |
-| `trusted_proxies`                  | `TrustedProxies`         | `TrustedProxies::default()`      | `TrustedProxies::default()`       |
-| `security_headers`                 | `bool`                   | `true`                           | `true`                            |
-| `middleware`                       | `MiddlewareConfig`       | `default()`                      | `default()`                       |
-| `plugins_enabled`                  | `bool`                   | `false`                          | `false`                           |
-| `plugin_head`                      | `Vec<PluginHeadEntry>`   | `Vec::new()`                     | `Vec::new()`                      |
-| `default_render_strategy`          | `Option<RenderStrategy>` | `None`                           | `None`                            |
-| `default_revalidate`               | `Option<u64>`            | `None`                           | `None`                            |
+| Field                      | Type                     | Dev default                      | Production default                |
+| -------------------------- | ------------------------ | -------------------------------- | --------------------------------- |
+| `root`                     | `PathBuf`                | `root`                           | `root`                            |
+| `app_dir`                  | `PathBuf`                | `root.join("app")`               | `root.join(".ruvyxa/server/app")` |
+| `public_dir`               | `PathBuf`                | `root.join("public")`            | `root.join(".ruvyxa/assets")`     |
+| `client_dir`               | `PathBuf`                | `root.join(".ruvyxa/client")`    | `root.join(".ruvyxa/client")`     |
+| `prerender_dir`            | `PathBuf`                | `root.join(".ruvyxa/prerender")` | `root.join(".ruvyxa/prerender")`  |
+| `host`                     | `String`                 | `host`                           | `host`                            |
+| `port`                     | `u16`                    | `port`                           | `port`                            |
+| `watch`                    | `bool`                   | `true`                           | `false`                           |
+| `cache_route_manifest`     | `bool`                   | `true`                           | `true`                            |
+| `cache_css`                | `bool`                   | `true`                           | `true`                            |
+| `style_entries`            | `Vec<PathBuf>`           | `Vec::new()`                     | `Vec::new()`                      |
+| `prebundle_dependencies`   | `bool`                   | `true`                           | `false`                           |
+| `runtime`                  | `JavaScriptRuntime`      | `JavaScriptRuntime::detect()`    | `JavaScriptRuntime::detect()`     |
+| `jsx_runtime`              | `JsxRuntime`             | `Automatic`                      | `Automatic`                       |
+| `error_overlay`            | `bool`                   | `true`                           | `false`                           |
+| `debug_traces`             | `bool`                   | `false`                          | `false`                           |
+| `action_body_limit_bytes`  | `usize`                  | `1MB`                            | `1MB`                             |
+| `api_body_limit_bytes`     | `usize`                  | `10MB`                           | `10MB`                            |
+| `action_rate_limit_max`    | `usize`                  | `600`                            | `600`                             |
+| `action_rate_limit_window` | `Duration`               | `60s`                            | `60s`                             |
+| `same_origin_actions`      | `bool`                   | `true`                           | `true`                            |
+| `fetch_metadata_actions`   | `bool`                   | `true`                           | `true`                            |
+| `trusted_proxies`          | `TrustedProxies`         | `TrustedProxies::default()`      | `TrustedProxies::default()`       |
+| `security_headers`         | `bool`                   | `true`                           | `true`                            |
+| `middleware`               | `MiddlewareConfig`       | `default()`                      | `default()`                       |
+| `route_rules`              | `CompiledRouteRules`     | `default()`                      | `default()`                       |
+| `proxy`                    | `Option<CompiledProxy>`  | `None`                           | `None`                            |
+| `realtime`                 | `Option<RealtimeConfig>` | `None`                           | `None`                            |
+| `collab`                   | `Option<CollabConfig>`   | `None`                           | `None`                            |
+| `content_engine`           | `bool`                   | `false`                          | `false`                           |
+| `default_render_strategy`  | `Option<RenderStrategy>` | `None`                           | `None`                            |
+| `default_revalidate`       | `Option<u64>`            | `None`                           | `None`                            |
 
 Validation rejects zero/over-limit values (absolute bounds: `MAX_ACTION_BODY_LIMIT_BYTES=16MB`,
 `MAX_API_BODY_LIMIT_BYTES=256MB`, `MAX_ACTION_RATE_LIMIT_REQUESTS=10000`,
-`MAX_ACTION_RATE_LIMIT_WINDOW_SECS=86400`, `MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES=256MB`).
+`MAX_ACTION_RATE_LIMIT_WINDOW_SECS=86400`).
 
 ---
 
@@ -1709,10 +1697,10 @@ pub enum JavaScriptRuntime { Node, Bun, Deno }
 | `detect()`               | `Self`    | Node preferred, then Bun, then Deno                                          |
 | `from_availability(...)` | `Self`    | Deterministic selection for Node, Bun, and Deno                              |
 
-`JavaScriptRuntime::Deno` is used for trusted local project configuration, plugin, and worker
-processes with Deno's explicit unrestricted invocation. This is necessary because those processes
-need filesystem, environment, process, network, and native-addon access. It is a trust decision: do
-not run unreviewed project configuration or plugins with the Deno runtime.
+`JavaScriptRuntime::Deno` is used for trusted local project configuration and worker processes with
+Deno's explicit unrestricted invocation. This is necessary because those processes need filesystem,
+environment, process, network, and native-addon access. It is a trust decision: do not run
+unreviewed project configuration with the Deno runtime.
 
 ---
 
@@ -1952,9 +1940,9 @@ and binds first available.
 4. Warmup: spawn background pre-bundling of page dependencies (when `watch` &&
    `prebundle_dependencies`)
 5. Create `RenderCache` (dev or production), `HmrTracker`, `MiddlewareStack`
-6. Start TypeScript plugin host if `plugins_enabled`
-7. Validate realtime config from plugin descriptor (path starts with `/`, no `?`/`#`/`*`, heartbeat
-   5-120s, capacity 16-4096, no collision with reserved framework routes)
+6. Start the project worker (`WorkerHost`) when `proxy` is set, or in dev when `content_engine` is
+7. Validate `realtime`/`collab` from the rendered config (path starts with `/`, no `?`/`#`/`*`,
+   heartbeat 5-120s, capacity 16-4096, no collision with reserved framework routes)
 8. Build `AppState` with all components
 9. Start file watcher (if `watch`): uses `notify` crate, ignores
    `.git`/`.ruvyxa`/`target`/`dist`/`.npm-pack`/`.npm-smoke`/`node_modules`
@@ -1975,8 +1963,7 @@ file event:
 3. If `full_reload` or no affected routes: full invalidation (manifest + render cache)
 4. Else: selective invalidation (styles only if CSS dep changed, render cache per route)
 5. `worker_pool.invalidate_from_watcher(paths)` — queued via `try_send` (non-blocking, sync-safe)
-6. Notify plugin runtime via `plugin_runtime.notify_file_change()`
-7. `hmr_payload()` builds the versioned wire message and broadcasts it via `reload_tx` to every
+6. `hmr_payload()` builds the versioned wire message and broadcasts it via `reload_tx` to every
    connected HMR WebSocket client
 
 HMR WebSocket handler validates Origin (cross-site connection blocked), then streams broadcast
@@ -1993,9 +1980,9 @@ other's.
 
 ### Realtime Runtime
 
-`RealtimeRuntime { path, heartbeat, tx }` — created from TypeScript plugin host descriptor.
-Validates: path is absolute, no URL special chars, heartbeat 5-120s, capacity 16-4096, no collision
-with reserved framework routes.
+`RealtimeRuntime { path, heartbeat, tx }` — created from `ServerConfig.realtime`, which the CLI
+renders from `realtime` in `ruvyxa.config.ts`. Validates: path is absolute, no URL special chars,
+heartbeat 5-120s, capacity 16-4096, no collision with reserved framework routes.
 
 Realtime WebSocket handler:
 
@@ -2005,7 +1992,7 @@ Realtime WebSocket handler:
 - Sends heartbeat pings at configured interval
 - Sends `{"version":1,"type":"resync","reason":"lagged"}` on channel lag
 
-The `@ruvyxa/realtime` plugin claims the capability and decides nothing about deployment. No build
+`realtime: true` in the config turns the socket on and decides nothing about deployment. No build
 artifact serves the socket — not a serverless function, and not the standalone server the
 self-hosted adapters emit — so `adapter-runner.mjs` reports `RUV2205` for every adapter build, and a
 deployment that depends on native realtime runs `ruvyxa start` as its process.
@@ -2028,8 +2015,9 @@ deployment that depends on native realtime runs `ruvyxa start` as its process.
   Fetch Metadata, per-key sliding-window rate limiter with forwarded-proxy support.
 - **Port binding**: Sequential fallback +100 ports. Detects and prints the owning process via
   `netstat`/`lsof`.
-- **Plugin host**: TypeScript middleware via `PluginHost` pool. Request/response round-trip
-  serialized over stdio. Realtime configured via plugin descriptor.
+- **Project worker**: `proxy.handler` and dev content artifacts via the `WorkerHost` pool, the
+  round-trip serialized over stdio. `proxy.matcher` is compiled natively, so a request it does not
+  name never crosses the process boundary.
 - **Security headers**: Applied to all responses unless `security_headers: false`. Defaults (7, each
   set only if the application has not already set it): `X-Content-Type-Options: nosniff`,
   `Referrer-Policy: strict-origin-when-cross-origin`,
@@ -2043,14 +2031,16 @@ deployment that depends on native realtime runs `ruvyxa start` as its process.
 ## Middleware
 
 **Crate**: `ruvyxa_middleware` **Sources**:
-`crates/ruvyxa_middleware/src/{config,stack,builtin,plugin_host}.rs`
+`crates/ruvyxa_middleware/src/{config,stack,builtin,client_ip,route_rules,worker_host}.rs`
 
 ### Purpose
 
-Ruvyxa middleware has two layers: a compact set of built-in Tower layers toggled from
-`ruvyxa.config.ts`, and a TypeScript plugin bridge that runs user middleware as child processes over
-JSON-lines stdin/stdout. There is no plugin ordering DSL, no abstract compression algorithm enum, no
-`RateLimitStore` trait — the built-in set is intentionally minimal.
+Ruvyxa middleware has three layers: a compact set of built-in Tower layers toggled from
+`ruvyxa.config.ts`; the route-rule evaluator (`route_rules.rs`) that compiles `headers()`,
+`redirects()`, `rewrites()`, and `proxy.matcher` to regexes and answers them natively; and the
+worker host (`worker_host.rs`) that runs `proxy.handler` in child processes over JSON-lines
+stdin/stdout. There is no ordering DSL, no abstract compression algorithm enum, no `RateLimitStore`
+trait — the built-in set is intentionally minimal.
 
 ### Configuration (`config.rs`)
 
@@ -2059,12 +2049,12 @@ JSON-lines stdin/stdout. There is no plugin ordering DSL, no abstract compressio
 ```rust
 pub struct MiddlewareConfig {
     pub builtin: BuiltinMiddlewareConfig,
-    pub workers: Option<usize>,      // TS plugin pool size, validated 1..=8
-    pub timeout_ms: Option<u64>,     // TS plugin hook timeout, 1..=300_000ms
+    pub workers: Option<usize>,      // project worker pool size, validated 1..=8
+    pub timeout_ms: Option<u64>,     // project worker call timeout, 1..=300_000ms
 }
 ```
 
-`workers` and `timeout_ms` control the TypeScript plugin host only. Built-in middleware is always
+`workers` and `timeout_ms` control the project worker host only. Built-in middleware is always
 in-process and unconstrained.
 
 Serde: `rename_all = "camelCase"`, `deny_unknown_fields`.
@@ -2173,69 +2163,68 @@ extraction strategy. The bucket is shared across clones via `Arc<Mutex<BTreeMap>
 **Logging** assigns a `x-request-id` (from incoming header or auto-generated `ruvyxa-{hex}`) and
 logs method, path, status, and duration at `info` level.
 
-### PluginHost (`plugin_host.rs`)
+### Route rules (`route_rules.rs`)
 
-TypeScript plugin middleware runs as one or more persistent child processes (`node` or `bun`). The
-runtime script loads the config registry and communicates over newline-delimited JSON on
-stdin/stdout.
+`compile_route_rules` turns the rendered `headers`, `redirects`, and `rewrites` lists into
+`CompiledRouteRules`, and `compile_proxy` turns `proxy.matcher` into `CompiledProxy`. Every source
+is a path-to-regexp pattern compiled with `fancy-regex` (the `/((?!api|static).*)` idiom is a
+negative lookahead) and matched against the canonical request path, whole and case-insensitively.
+`has`/`missing` conditions read headers, cookies, query, and host; named captures become parameters,
+which substitute into destinations and header values. The grammar and semantics are held to
+`tests/fixtures/route-rules-conformance.json`, replayed by this module and by
+`packages/@ruvyxa/core/src/route-rules.ts` for every deployed build.
+
+### WorkerHost (`worker_host.rs`)
+
+`proxy.handler` runs in one or more persistent child processes of the selected runtime. The runtime
+script (`project-worker.mjs`) loads the compiled config and communicates over newline-delimited JSON
+on stdin/stdout.
 
 #### Lifecycle
 
-1. `PluginHost::start_pool_with_timeout(root, script, executable, pool_size, timeout)` spawns
+1. `WorkerHost::start_pool(root, script, executable, executable_args, pool_size, timeout)` spawns
    workers
-2. Worker startup sends `{"hook":"describe"}` — the worker responds with `PluginRegistryDescriptor`
-3. Registry diagnostics are logged. Workers beyond the first are only spawned if the registry
-   declares HTTP hooks
+2. Worker startup sends `{"hook":"describe"}` — the worker responds with `WorkerDescriptor`
+3. Workers beyond the first are only spawned if the descriptor declares a `proxy`
 
 #### Descriptor
 
 ```rust
-pub struct PluginRegistryDescriptor {
-    pub plugins: Vec<String>,
-    pub http: PluginHttpDescriptor,
-    pub build: PluginBuildDescriptor,
-    pub dev: PluginDevDescriptor,
-    pub diagnostics: Vec<PluginDiagnosticDescriptor>,
-    pub capabilities: Vec<NativeCapabilityDescriptor>,
+pub struct WorkerDescriptor {
+    pub proxy: bool,
+    pub react_compiler: bool,
+    pub content: Vec<String>, // artifact paths the content engine serves in dev
 }
 ```
 
-`PluginHttpDescriptor` declares how many request/response hooks and route patterns are registered.
-`wants_request(pathname)` and `wants_response(pathname)` check route pattern matching (`*` wildcard,
-`prefix*` glob, exact match) before invoking the plugin.
+The matcher is not in the descriptor: `proxy.matcher` is compiled natively from the rendered config,
+so the host decides which requests cross to the worker without asking it.
 
-#### Hook Protocol
+#### Call Protocol
 
-Hooks are dispatched to workers round-robin. If the selected worker is busy, the pool scans for an
-idle worker before queueing (avoids head-of-line blocking on long hooks).
+Calls are dispatched to workers round-robin. If the selected worker is busy, the pool scans for an
+idle worker before queueing (avoids head-of-line blocking on long handlers).
 
-- `execute_request(&PluginHttpRequest) -> PluginHttpRequestResult` — the hook either returns a
-  modified `Request` or short-circuits with a `Response`
-- `execute_response(&PluginHttpRequest, &PluginHttpResponse) -> PluginHttpResponse`
-- `notify_file_change(&[String])` — used during development to signals file changes
+- `execute_proxy(&WireRequest) -> WireRequestResult` — the handler either answers with a
+  `WireResponse`, continues with a rewritten `WireRequest`, or continues unchanged
+- `content_artifact(path) -> Option<ContentArtifact>` — a dev-only content-engine artifact derived
+  from the current content tree
 
 #### Failure Recovery
 
 | Scenario                         | Behavior                                                |
 | -------------------------------- | ------------------------------------------------------- |
-| Hook returns error               | Error propagated to caller; worker left alive           |
-| Request never reached the worker | Worker restarted once; hook retried                     |
-| Worker exits after the request   | Worker restarted; hook retried only if it is idempotent |
+| Call returns error               | Error propagated to caller; worker left alive           |
+| Request never reached the worker | Worker restarted once; call retried                     |
+| Worker exits after the request   | Worker restarted; call retried only if it is idempotent |
 | JSON protocol corrupted          | Worker declared poisoned; replaced without retry        |
-| Hook times out (> `timeout_ms`)  | Worker poisoned; replaced without retry                 |
+| Call times out (> `timeout_ms`)  | Worker poisoned; replaced without retry                 |
 
 A retry is safe only when the worker cannot have acted on the first attempt. Write and flush
 failures are reported as _not delivered_ and are always retried. A failure while reading the
-response means the request did reach the worker, so it is retried only for hooks with no observable
-effect — currently `describe`. Retrying a delivered `request`/`response` hook would run its side
+response means the request did reach the worker, so it is retried only for calls with no observable
+effect — `describe` and `content.artifact`. Retrying a delivered `proxy` call would run its side
 effects twice.
-
-#### Realtime Capability
-
-If a plugin declares `{"id": "realtime@1"}`, the descriptor exposes a `RealtimeDescriptor` with the
-capability/protocol identifier `realtime@1`; this is not a separately versioned plugin package.
-WebSocket path, heartbeat interval, and capacity. The dev server uses this to wire up realtime
-connections.
 
 ### Under the Hood
 
@@ -2247,11 +2236,11 @@ connections.
   known content-length. Streaming and chunked responses are not run through the async compression
   adapter. The current server source does not provide an SSE endpoint; do not infer SSE support from
   this compression rule.
-- Plugin workers are **not restarted automatically** after a failed hook unless the process itself
+- Project workers are **not restarted automatically** after a failed call unless the process itself
   died or the protocol stream was poisoned. Application-level errors are returned to the caller
   without process replacement.
-- The pool size fan-out to >1 workers only happens when the registry declares at least one HTTP
-  hook. A build-only plugin sees a single worker regardless of the configured pool size.
+- The pool size fan-out to >1 workers only happens when the descriptor declares a `proxy`. A
+  content-only worker sees a single process regardless of the configured pool size.
 
 ---
 
@@ -2763,7 +2752,7 @@ released without acquiring another.
 | `ruvyxa_graph`       | None (single-threaded, `&mut` caches)       | Sequential                        |
 | `ruvyxa_bundler`     | `rayon`                                     | Parallel (file-level)             |
 | `ruvyxa_dev_server`  | `tokio` `RwLock`/`Mutex`, atomics, channels | Mixed (async I/O + worker pool)   |
-| `ruvyxa_middleware`  | `Arc<PluginHost>`                           | Async (Tokio tower layers)        |
+| `ruvyxa_middleware`  | `Arc<WorkerHost>`                           | Async (Tokio tower layers)        |
 | `ruvyxa_diagnostics` | None (owned values)                         | Sequential                        |
 | `ruvyxa_cli`         | Tokio runtime                               | Async (main) + sequential (build) |
 
@@ -2864,8 +2853,8 @@ WebSocket frame.
 
 #### Realtime channel (separate from HMR)
 
-The application-level realtime WebSocket (opt-in via a plugin descriptor, not HMR) sends its own
-server → client control frame on backpressure:
+The application-level realtime WebSocket (opt-in via `realtime` in the config, not HMR) sends its
+own server → client control frame on backpressure:
 
 ```json
 { "version": 1, "type": "resync", "reason": "lagged" }
@@ -3524,9 +3513,9 @@ Key behavior:
 
 Representative sample, not exhaustive — the workspace defines roughly 70 distinct `RUV####` codes
 across route discovery (`RUV1000s`), rendering (`RUV1100s`–`RUV1500s`), config validation
-(`RUV1600s`), plugins (`RUV1700s`–`RUV1800s`), realtime (`RUV2000s`), i18n (`RUV2100s`), adapters
-(`RUV2200s`), and packages (`RUV3000s`). The CLI Architecture section above lists the config and
-plugin ranges it emits directly; the full catalog with explanations lives in
+(`RUV1600s`), workers and bundling (`RUV1700s`–`RUV1800s`), realtime (`RUV2000s`), i18n
+(`RUV2100s`), adapters (`RUV2200s`), and packages (`RUV3000s`). The CLI Architecture section above
+lists the config and worker ranges it emits directly; the full catalog with explanations lives in
 [Troubleshooting](docs/en/16-troubleshooting-upgrades.md), not here — this table exists to show the
 code shape and a few of each family, not to enumerate every one.
 
@@ -3767,23 +3756,23 @@ confusing runtime `undefined`, while a build error names the file and the variab
 
 ---
 
-### 6. Plugin Security
+### 6. Project Worker Security
 
-Plugins run as a **separate Node/Bun/Deno subprocess** (see PluginHost in the Middleware section) —
-not inside the server process. That subprocess is a normal JavaScript runtime with full
-`fs`/`process` access; there is no sandbox around plugin code, and this document makes no unverified
-sandboxing claim.
+`proxy.handler` runs in a **separate Node/Bun/Deno subprocess** (see WorkerHost in the Middleware
+section) — not inside the server process. That subprocess is a normal JavaScript runtime with full
+`fs`/`process` access; there is no sandbox around application code, and this document makes no
+unverified sandboxing claim. A deployed build compiles the handler into the function bundle and runs
+it in-process, with the same access the rest of the application has.
 
 What is actually bounded:
 
-1. **Response buffering** — plugin HTTP responses are capped at `security.pluginLimit` (default 32
-   MB, hard ceiling 256 MB via `MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES`), enforced Rust-side on the
-   bridge.
-2. **Hook timeout** — `middleware.timeoutMs` (1-300,000 ms) bounds how long a hook may run before
+1. **Matcher first** — `proxy.matcher` is compiled natively, so a request the matcher does not name
+   never reaches the handler on either host.
+2. **Call timeout** — `middleware.timeoutMs` (1-300,000 ms) bounds how long a call may run before
    the worker is declared poisoned and replaced (see Failure Recovery in the Middleware section).
-3. **Explicit trust boundary, not isolation** — a plugin is first-party code the project author
-   installs and configures; the framework's guarantee is that a stuck or oversized plugin cannot
-   wedge the server indefinitely, not that plugin code is contained from the host.
+3. **Explicit trust boundary, not isolation** — the handler is first-party code the project author
+   writes in `ruvyxa.config.ts`; the framework's guarantee is that a stuck handler cannot wedge the
+   native server indefinitely, not that application code is contained from the host.
 
 ---
 
@@ -4079,8 +4068,8 @@ server {
 }
 ```
 
-The earlier `/_next/static` path in this section was a Next.js path, not a Ruvyxa one — Ruvyxa's
-client bundles are served from `/__ruvyxa/client/`.
+The earlier `/_next/static` path in this section belonged to another framework, not to Ruvyxa —
+Ruvyxa's client bundles are served from `/__ruvyxa/client/`.
 
 ---
 

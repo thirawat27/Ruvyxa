@@ -19,8 +19,7 @@
     "clean": "ruvyxa clean",
     "trace": "ruvyxa trace",
     "bench": "ruvyxa bench",
-    "test:parity": "ruvyxa test:parity",
-    "plugin": "ruvyxa plugin"
+    "test:parity": "ruvyxa test:parity"
   },
   "allowScripts": {
     "@parcel/watcher": false

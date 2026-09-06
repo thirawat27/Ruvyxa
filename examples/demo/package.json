@@ -20,12 +20,10 @@
     "clean": "cargo run -p ruvyxa_cli -- clean --root .",
     "trace": "cargo run -p ruvyxa_cli -- trace --root .",
     "bench": "cargo run -p ruvyxa_cli -- bench --root .",
-    "plugin": "cargo run -p ruvyxa_cli -- plugin",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@ruvyxa/react": "workspace:*",
-    "@ruvyxa/realtime": "workspace:*",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-server-dom-webpack": "19.2.8",

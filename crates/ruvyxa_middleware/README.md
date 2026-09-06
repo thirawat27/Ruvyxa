@@ -1,16 +1,17 @@
 # ruvyxa_middleware
 
-Ruvyxa's Tower-based middleware stack and plugin bridge.
+Ruvyxa's Tower-based middleware stack, the shared route-rule evaluator, and the bridge to the
+project worker.
 
-Built-in middleware remains native Rust and can be configured through
-`config.middleware.builtin`. Plugins are application code loaded from
-`ruvyxa.config.ts`; their `setup` function registers request/response middleware
-and build hooks. The Rust server forwards validated Fetch-style request and
-response payloads to the persistent Node/Bun runtime.
+Built-in middleware remains native Rust and can be configured through `config.middleware.builtin`.
+`headers()`, `redirects()`, `rewrites()`, and `proxy.matcher` from `ruvyxa.config.ts` are compiled
+and evaluated here (`route_rules`), replaying `tests/fixtures/route-rules-conformance.json` with the
+JavaScript copy every deployed build runs.
 
-The bridge is deliberately small: callbacks stay in JavaScript, while Rust
-owns routing, limits, ordering, process lifetime, and conversion to Axum
-responses. Response middleware is bounded by `security.pluginLimit`.
+`proxy.handler` is a function, so it runs in the persistent JavaScript project worker
+(`packages/ruvyxa/runtime/project-worker.mjs`); `worker_host` owns that process, frames the
+request and response over stdio, and validates what comes back. The bridge is deliberately small:
+the handler stays in JavaScript, while Rust owns the matcher, ordering, limits, process lifetime,
+and conversion to Axum responses.
 
-Plugin failures are reported as normal Ruvyxa diagnostics. There is no separate
-feature flag or custom middleware-layer ABI.
+Worker failures are reported as normal Ruvyxa diagnostics (`RUV1700`, `RUV1701`).
