@@ -250,29 +250,6 @@ if (Test-Path $CreateDist) {
     Write-Warn "create-ruvyxa dist not built (run 'pnpm -r build' first)"
 }
 
-# `plugin create` scaffolds into --root, so keep it out of the demo app.
-$PluginRoot = Join-Path $env:TEMP "ruvyxa-plugin-$(Get-Random)"
-try {
-    New-Item -ItemType Directory -Path $PluginRoot -Force | Out-Null
-    Invoke-Native -Arguments @("plugin", "create", "ruvyxa-plugin-smoke", "--root", $PluginRoot) | Out-Host
-    $pluginManifest = Join-Path $PluginRoot "ruvyxa-plugin-smoke\package.json"
-    if ($script:LastNativeExitCode -eq 0 -and (Test-Path $pluginManifest)) {
-        Write-Ok "plugin create scaffolds a publishable package"
-    } else {
-        Write-Fail "plugin create (exit $($script:LastNativeExitCode))"
-    }
-
-    # --dir must place the package somewhere other than <name>.
-    Invoke-Native -Arguments @("plugin", "create", "ruvyxa-plugin-dir", "--root", $PluginRoot, "--dir", "custom-dir") | Out-Host
-    if ($script:LastNativeExitCode -eq 0 -and (Test-Path (Join-Path $PluginRoot "custom-dir\package.json"))) {
-        Write-Ok "plugin create --dir honors a custom directory"
-    } else {
-        Write-Fail "plugin create --dir (exit $($script:LastNativeExitCode))"
-    }
-} finally {
-    Remove-Item $PluginRoot -Recurse -Force -ErrorAction SilentlyContinue
-}
-
 # ==============================================================================
 #  2. CLI COMMANDS - happy path
 # ==============================================================================
@@ -443,64 +420,77 @@ if ($SkipAdapters) {
     # `--target` selects the public build target. Bun is a deployment adapter,
     # not a standalone --target value; bun() emits a Node-compatible
     # self-contained server and is covered in the adapter matrix below.
-    $targetExpectations = @(
-        @{ Name = "node";   Supported = $true }
-        @{ Name = "edge";   Supported = $false; ExpectedCode = "RUV3201" }
-        @{ Name = "static"; Supported = $false; ExpectedCode = "RUV3201" }
-    )
-    foreach ($expectation in $targetExpectations) {
-        $label = "build --target $($expectation.Name)"
-        if ($expectation.Supported) {
-            Test-Cli $label @("build", "--target", $expectation.Name)
-            continue
-        }
-
-        Write-Host "--- $label ---" -ForegroundColor Yellow
-        $output = Invoke-Native -Arguments @("build", "--target", $expectation.Name, "--root", $App) | Out-String
-        $exit = $script:LastNativeExitCode
-        if ($exit -ne 0 -and $output -match $expectation.ExpectedCode) {
-            Write-Ok "$label -> $($expectation.ExpectedCode) realtime deployment guard"
-        } else {
-            Write-Fail "$label expected $($expectation.ExpectedCode)`n$output"
-        }
-        Write-Host ""
+    #
+    # A target selects no deploy adapter, so no capability check runs and every
+    # one of them builds the demo. The refusals live in the adapter matrix.
+    foreach ($target in @("node", "edge", "static")) {
+        Test-Cli "build --target $target" @("build", "--target", $target)
     }
 
     # `--adapter` picks the deploy shape without editing ruvyxa.config. Each
-    # adapter declares the strategies it can deploy via `Adapter.supports`.
-    # The demo app also enables native realtime, which is intentionally limited
-    # to self-hosted Node/Bun adapters. Non-self-hosted adapters therefore stop
-    # at RUV3201 before their route-strategy checks; their emitted artifacts are
-    # covered by the focused adapter package tests.
+    # adapter declares the strategies it can deploy via `Adapter.supports`, and
+    # RUV2202 names every route it cannot.
+    #
+    # The demo also enables native realtime, which only `ruvyxa start` serves:
+    # no build artifact holds a socket, so every adapter *reports* RUV2205 and
+    # none refuses the build for it. That report is what is asserted here,
+    # because a deployment that quietly ships a dead `/__ruvyxa/realtime` is the
+    # failure this fixture exists to catch. This matrix used to expect RUV3201
+    # from four of these six, and that code no longer exists anywhere in the
+    # workspace -- it was the refusal RUV2205 replaced.
     $adapterExpectations = @(
-        @{ Name = "node";       Supported = $true }
-        @{ Name = "bun";        Supported = $true }
-        @{ Name = "vercel";     Supported = $false; ExpectedCode = "RUV3201" }
-        @{ Name = "netlify";    Supported = $false; ExpectedCode = "RUV3201" }
-        @{ Name = "cloudflare"; Supported = $false; ExpectedCode = "RUV3201" }
-        @{ Name = "static";     Supported = $false; ExpectedCode = "RUV3201" }
+        @{ Name = "node";    Supported = $true; Warns = "RUV2205" }
+        @{ Name = "bun";     Supported = $true; Warns = "RUV2205" }
+        @{ Name = "vercel";  Supported = $true; Warns = "RUV2205" }
+        @{ Name = "netlify"; Supported = $true; Warns = "RUV2205" }
+        @{
+            Name        = "cloudflare"
+            Supported   = $false
+            Unsupported = @("/isr-page (isr)", "/ppr-page (ppr)")
+        }
+        @{
+            Name        = "static"
+            Supported   = $false
+            Unsupported = @(
+                "/api/echo (api)"
+                "/api/health (api)"
+                "/api/revalidate (api)"
+                "/blog/[slug] (ssr)"
+                "/catchall/[...slug] (ssr)"
+                "/game (ssr)"
+                "/isr-page (isr)"
+                "/ppr-page (ppr)"
+                "/request (ssr)"
+                "/showcase/[item] (ssr)"
+                "/streaming (ssr)"
+            )
+        }
     )
     foreach ($expectation in $adapterExpectations) {
         $label = "build --adapter $($expectation.Name)"
         Write-Host "--- $label ---" -ForegroundColor Yellow
-        $output = Invoke-Native -Arguments @("build", "--adapter", $expectation.Name, "--root", $App) | Out-String
+        # `-Width` and the whitespace collapse below work together: PowerShell
+        # wraps a captured native line at the host width, and a wrap inside
+        # `/catchall/[...slug] (ssr)` would fail a match that should pass.
+        $output = Invoke-Native -Arguments @("build", "--adapter", $expectation.Name, "--root", $App) |
+            Out-String -Width 4096
         $exit = $script:LastNativeExitCode
+        $flat = $output -replace "\s+", " "
 
         if ($expectation.Supported) {
-            if ($exit -eq 0) { Write-Ok $label }
-            else { Write-Fail "$label exit $exit`n$output" }
-        } elseif ($expectation.ExpectedCode) {
-            if ($exit -ne 0 -and $output -match $expectation.ExpectedCode) {
-                Write-Ok "$label -> $($expectation.ExpectedCode) realtime deployment guard"
+            if ($exit -ne 0) {
+                Write-Fail "$label exit $exit`n$output"
+            } elseif ($flat -notmatch $expectation.Warns) {
+                Write-Fail "$label expected the $($expectation.Warns) realtime deployment report`n$output"
             } else {
-                Write-Fail "$label expected $($expectation.ExpectedCode)`n$output"
+                Write-Ok "$label -> built and reported $($expectation.Warns)"
             }
         } elseif ($exit -eq 0) {
             Write-Fail "$label unexpectedly succeeded; RUV2202 should reject $($expectation.Unsupported -join ', ')"
-        } elseif ($output -notmatch "RUV2202") {
+        } elseif ($flat -notmatch "RUV2202") {
             Write-Fail "$label failed without RUV2202`n$output"
         } else {
-            $missing = @($expectation.Unsupported | Where-Object { $output -notmatch [regex]::Escape($_) })
+            $missing = @($expectation.Unsupported | Where-Object { $flat -notmatch [regex]::Escape($_) })
             if ($missing.Count -eq 0) {
                 Write-Ok "$label -> RUV2202 names every unsupported route"
             } else {

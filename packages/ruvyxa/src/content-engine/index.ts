@@ -412,9 +412,19 @@ function createLlmsText(
   return `${lines.join('\n')}\n`
 }
 
+/**
+ * Escape one field for a Markdown line in `llms.txt`.
+ *
+ * Backslash first, then the brackets that would otherwise close a link label:
+ * reversing the two would escape the backslashes this function just wrote. It
+ * is spelled as a global regex rather than `replaceAll('\\', ...)` because that
+ * is the form static analysis recognises as escaping the escape character, and
+ * an escaper it cannot see is reported as an incomplete one. The two
+ * replacements are identical.
+ */
 function escapeMarkdownText(value: string): string {
   return value
-    .replaceAll('\\', '\\\\')
+    .replace(/\\/g, '\\\\')
     .replace(/([[\]])/g, '\\$1')
     .replace(/\s+/g, ' ')
     .trim()

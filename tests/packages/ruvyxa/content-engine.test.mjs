@@ -114,7 +114,7 @@ describe('content engine', () => {
     assert.doesNotMatch(feed.body, /Secret roadmap/)
 
     const sitemap = engine.artifact(root, '/sitemap.xml').body
-    assert.match(sitemap, /https:\/\/example\.com\/blog\/launch/)
+    assert.match(sitemap, /<loc>https:\/\/example\.com\/blog\/launch<\/loc>/)
     assert.match(sitemap, /<lastmod>2026-07-23T10:30:00\.000Z<\/lastmod>/)
     assert.doesNotMatch(sitemap, /\[slug\]|_private|draft/)
 

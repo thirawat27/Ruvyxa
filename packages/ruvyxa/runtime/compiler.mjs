@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, writeFile } from 'node:fs/promises'
 import { createRequire, isBuiltin } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -3769,20 +3769,36 @@ function isContainerAtRule(prelude) {
   ].some((prefix) => normalized.startsWith(prefix))
 }
 
+/**
+ * Read a source file through the compiler's bounded cache.
+ *
+ * One handle, opened once. Asking the filesystem about the *path* twice --
+ * `statSync(file)` to build the cache key, then `readFile(file)` for the bytes
+ * -- lets an edit land between the two calls, and the entry then stores the new
+ * bytes under the previous version's mtime and size. Every later build reads
+ * that entry back as current, because the key it is validated against is the
+ * one the file no longer has. `handle.stat()` describes the same open file the
+ * read returns, so the key and the bytes cannot come from two versions of it.
+ */
 async function readSourceFile(file) {
-  const stats = statSync(file)
   const cacheKey = path.resolve(file)
-  const cached = compilerCache.sources.get(cacheKey)
-  if (cached && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size) {
-    return cached.source
+  const handle = await open(file, 'r')
+  try {
+    const stats = await handle.stat()
+    const cached = compilerCache.sources.get(cacheKey)
+    if (cached && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size) {
+      return cached.source
+    }
+    const source = await handle.readFile('utf8')
+    setBoundedCacheEntry(compilerCache.sources, cacheKey, {
+      mtimeMs: stats.mtimeMs,
+      size: stats.size,
+      source,
+    })
+    return source
+  } finally {
+    await handle.close()
   }
-  const source = await readFile(file, 'utf8')
-  setBoundedCacheEntry(compilerCache.sources, cacheKey, {
-    mtimeMs: stats.mtimeMs,
-    size: stats.size,
-    source,
-  })
-  return source
 }
 
 /**
