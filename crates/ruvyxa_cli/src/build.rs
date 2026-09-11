@@ -919,12 +919,18 @@ impl BuildReport<'_> {
                 }
             },
             "hashAlgorithm": ASSET_HASH_ALGORITHM,
+            // The four defaults below are the native host's own constants, not
+            // copies of them. A deployed build reads its security policy out of
+            // this manifest, so a literal here is a second declaration of the
+            // same decision -- and the project that would notice it drifting is
+            // exactly the one that configured nothing, whose manifest carries
+            // no value to correct the difference.
             "security": {
-                "actionLimit": config.security.action_body_limit_bytes.unwrap_or(1024 * 1024),
-                "apiLimit": config.security.api_body_limit_bytes.unwrap_or(10 * 1024 * 1024),
+                "actionLimit": config.security.action_body_limit_bytes.unwrap_or(ruvyxa_dev_server::MAX_ACTION_BODY_BYTES),
+                "apiLimit": config.security.api_body_limit_bytes.unwrap_or(ruvyxa_dev_server::MAX_API_BODY_BYTES),
                 "actionRateLimit": {
-                    "max": config.security.action_rate_limit.as_ref().and_then(|value| value.max).unwrap_or(600),
-                    "window": config.security.action_rate_limit.as_ref().and_then(|value| value.window).unwrap_or(60)
+                    "max": config.security.action_rate_limit.as_ref().and_then(|value| value.max).unwrap_or(ruvyxa_dev_server::ACTION_RATE_LIMIT_MAX),
+                    "window": config.security.action_rate_limit.as_ref().and_then(|value| value.window).unwrap_or(ruvyxa_dev_server::ACTION_RATE_LIMIT_WINDOW.as_secs())
                 },
                 "sameOrigin": config.security.same_origin_actions.unwrap_or(true),
                 "fetchMeta": config.security.fetch_metadata_actions.unwrap_or(true),

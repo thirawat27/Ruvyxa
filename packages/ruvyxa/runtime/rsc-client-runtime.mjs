@@ -154,7 +154,7 @@ export function parseServerReference(reference) {
 }
 
 /** Global holding `'use server'` modules whose exports are not registered yet. */
-export const PENDING_SERVER_MODULES_GLOBAL = '__RUVYXA_PENDING_SERVER_MODULES__'
+const PENDING_SERVER_MODULES_GLOBAL = '__RUVYXA_PENDING_SERVER_MODULES__'
 
 /**
  * Note a `'use server'` module whose exports must become server references.

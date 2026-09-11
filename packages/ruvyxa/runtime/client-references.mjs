@@ -45,7 +45,7 @@ export {
 export { isServerModuleId, parseServerReference }
 
 /** Prefix every Ruvyxa client-reference id carries, so a stray id is obvious. */
-export const CLIENT_MODULE_ID_PREFIX = 'ruv:'
+const CLIENT_MODULE_ID_PREFIX = 'ruv:'
 
 /**
  * The package the server graph imports its client-reference proxy from.

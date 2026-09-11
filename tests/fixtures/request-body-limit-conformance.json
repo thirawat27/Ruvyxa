@@ -1,0 +1,100 @@
+{
+  "contract": "ruvyxa.request-body-limit",
+  "schemaVersion": 1,
+  "$comment": [
+    "How large a request body each host will buffer before refusing it, and what",
+    "it answers when the body is larger.",
+    "",
+    "Three endpoints, four implementations, and until this file existed the only",
+    "thing holding them together was a comment in one of them saying it used the",
+    "'same bound as the native host':",
+    "  - crates/ruvyxa_dev_server                       (`dev`, `start`, `preview`)",
+    "  - crates/ruvyxa_cli/src/build.rs                 writes the effective policy",
+    "                                                   into build.json for a deploy",
+    "  - packages/ruvyxa/runtime/serverless-handler.mjs every deployed build",
+    "  - packages/@ruvyxa/core/src/standalone-server.ts the six self-hosted adapters",
+    "",
+    "The build.rs row is the one that makes a split invisible. A deployed build",
+    "does not read the native host's constants; it reads the numbers `ruvyxa",
+    "build` wrote into the manifest, and those were four bare literals beside",
+    "the config lookups -- `unwrap_or(1024 * 1024)` and its three neighbours.",
+    "Change a default on the native host and every deployed build keeps the old",
+    "one, for exactly the projects that configured nothing and so have no value",
+    "in the manifest to correct it. That is the shape `defaultMaxWidth` shipped",
+    "in: one Rust constant against unnamed copies written into deployed",
+    "functions, which no name-matching gate can see. build.rs names the",
+    "constants now, and this table holds the two languages.",
+    "",
+    "Every implementation replays this file:",
+    "  - crates/ruvyxa_dev_server/src/lib.rs                     (native host and",
+    "                                                             the manifest writer)",
+    "  - tests/packages/ruvyxa/serverless-shared-tables.test.mjs (the deployed",
+    "                                                             handler and the",
+    "                                                             standalone server",
+    "                                                             it generates)"
+  ],
+
+  "$axumNote": [
+    "On the native host a number in a handler is not the bound until a layer",
+    "says so. Axum applies `DefaultBodyLimit` -- 2 MiB unless a route overrides",
+    "it -- while extracting `Bytes`, which happens before the handler runs, so",
+    "`POST /__ruvyxa/rsc` refused a 3 MiB server-function call that every",
+    "deployed build accepted, and `serverFunction.bytes` below described",
+    "nothing. Its two neighbours had carried a layer from the start, which is",
+    "what made the third look deliberate.",
+    "`every_route_that_buffers_a_body_declares_its_limit` reads the router",
+    "chain in the direction the guard reads: from the handlers that extract a",
+    "body to the routes that register them."
+  ],
+
+  "$statusNote": [
+    "413 is the whole of the refusal contract. The message text deliberately is",
+    "not: the native host's API branch appends the read error to it, because a",
+    "body that was cut short and a body that was too large arrive at the same",
+    "place and an operator needs to tell them apart.",
+    "",
+    "`message` is a claim about the source, not about the wire, and only the",
+    "deployed hosts put it on the wire at all. On the native host a body over",
+    "the limit is refused by the `DefaultBodyLimit` layer during extraction,",
+    "which answers with axum's own text -- so `/__ruvyxa/action` and",
+    "`POST /__ruvyxa/rsc` never reach the string beside them. That is the cost",
+    "of bounding the allocation before the handler runs, and it is the same",
+    "arrangement both routes have. It is recorded here so that a rename of",
+    "either string is a decision rather than an accident, and so that nobody",
+    "writes a test asserting the native host emits one."
+  ],
+  "refusalStatus": 413,
+
+  "$ceilingNote": [
+    "`configCeiling` is enforced by the Rust config validator alone, which is",
+    "correct rather than a gap: a deployed build reads a manifest `ruvyxa build`",
+    "already validated, and re-checking a number the same toolchain wrote would",
+    "be a second opinion about a decision already made. It is here so that",
+    "raising a default past its own ceiling fails a test instead of a project's",
+    "next build."
+  ],
+
+  "limits": {
+    "action": {
+      "endpoint": "/__ruvyxa/action",
+      "bytes": 1048576,
+      "configKey": "security.actionLimit",
+      "configCeiling": 16777216,
+      "message": "Action payload is too large"
+    },
+    "api": {
+      "endpoint": "app/**/route.ts",
+      "bytes": 10485760,
+      "configKey": "security.apiLimit",
+      "configCeiling": 268435456,
+      "message": null
+    },
+    "serverFunction": {
+      "endpoint": "POST /__ruvyxa/rsc",
+      "bytes": 4194304,
+      "configKey": null,
+      "configCeiling": null,
+      "message": "Server-function call too large"
+    }
+  }
+}

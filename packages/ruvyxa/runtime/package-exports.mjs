@@ -45,7 +45,7 @@
  * `edge` has no fallback pass on purpose: a Worker cannot run a CommonJS build,
  * so falling back to `require` there would ship something that cannot load.
  */
-export const PACKAGE_EXPORT_CONDITIONS = Object.freeze({
+const PACKAGE_EXPORT_CONDITIONS = Object.freeze({
   client: Object.freeze({
     preferred: Object.freeze(['browser', 'import', 'module', 'default']),
     fallback: Object.freeze(['require']),

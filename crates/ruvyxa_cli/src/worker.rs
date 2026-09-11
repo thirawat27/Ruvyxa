@@ -10,8 +10,10 @@
 //! This module owns the worker's lifetime, frames newline-delimited JSON over
 //! its stdio, and turns a worker fault into a build error rather than a hang.
 //!
-//! One worker is shared by every route in a build session, so startup cost is
-//! paid once instead of once per route.
+//! The worker outlives every route in a build session, so startup cost is paid
+//! once instead of once per route. There is one process unless the React
+//! compiler is on, because that is the only hook a second process may answer —
+//! see [`hook_fans_out`].
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -40,11 +42,22 @@ impl WorkerOptions {
     }
 }
 
+/// The build's end of the worker pipe.
+///
+/// It carries the whole [`WorkerOptions`] rather than the one flag a hook
+/// happens to need, because each hook has to answer for its own feature and
+/// the worker exists whenever *any* of the three is on. Holding a single field
+/// meant `compile_content` could check `markdown` while `transform` had
+/// nothing to check: a project that enabled only the content engine still paid
+/// a synchronous round trip per compiled module for an answer
+/// `runBuildTransform` in `packages/ruvyxa/runtime/project-worker.mjs` can only
+/// give as `null`. A fourth hook added beside these two would have repeated
+/// the omission.
 #[derive(Clone)]
 pub(crate) struct BuildWorkerBridge {
     pub(crate) workers: Arc<Vec<Mutex<BuildWorker>>>,
     pub(crate) next_worker: Arc<AtomicUsize>,
-    pub(crate) markdown: bool,
+    options: WorkerOptions,
 }
 
 /// Longest one worker call may run before its worker is stopped.
@@ -66,13 +79,12 @@ pub(crate) struct BuildWorker {
     poisoned: bool,
 }
 
-/// Owns the single persistent worker used by one production build.
+/// Owns the persistent workers used by one production build.
 ///
 /// The bundler hooks and the content-artifact write intentionally share this
 /// session so config compilation and process startup happen only once.
 pub(crate) struct BuildWorkerSession {
     pub(crate) bridge: Option<BuildWorkerBridge>,
-    content_engine: bool,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -92,12 +104,21 @@ impl ruvyxa_bundler::hooks::BuildHooks for BuildWorkerBridge {
 
     /// The React compiler, when the project turned it on. The worker answers
     /// `null` for a module it leaves alone.
+    ///
+    /// The flag is read here rather than only in the worker because the worker
+    /// cannot answer without being asked: `transform_with_map` runs for every
+    /// compiled module, so a project that started the worker for markdown or
+    /// the content engine would serialise its whole compile behind one process
+    /// to collect a `null` per module.
     fn transform(
         &self,
         code: &str,
         id: &Path,
         _ctx: &ruvyxa_bundler::hooks::BuildHookContext,
     ) -> ruvyxa_bundler::Result<Option<ruvyxa_bundler::hooks::TransformOutput>> {
+        if !self.options.react_compiler {
+            return Ok(None);
+        }
         let payload = serde_json::json!({
             "code": code,
             "id": id.display().to_string(),
@@ -124,7 +145,7 @@ impl ruvyxa_bundler::hooks::BuildHooks for BuildWorkerBridge {
         id: &Path,
         _ctx: &ruvyxa_bundler::hooks::BuildHookContext,
     ) -> ruvyxa_bundler::Result<Option<ruvyxa_bundler::hooks::TransformOutput>> {
-        if !self.markdown {
+        if !self.options.markdown {
             return Ok(None);
         }
         let payload = serde_json::json!({
@@ -141,13 +162,79 @@ impl ruvyxa_bundler::hooks::BuildHooks for BuildWorkerBridge {
     }
 }
 
+/// Whether `hook` may run on any worker in the pool.
+///
+/// Only `build.transform` may. It is the React compiler over one module: a
+/// first-party transform that is a pure function of that module's `(code, id)`
+/// and shares nothing with the module before it.
+///
+/// `content.compile` runs the project's own remark and rehype plugins, and
+/// `content.write` derives the content engine's artifacts through the same
+/// pipeline. Both are project code, module-level state is per process, and a
+/// plugin that collects across files — a heading index, a footnote counter —
+/// would see a different subset on each worker and produce a different build.
+/// They stay on the process that has always run them, which is the same reason
+/// `middleware.workers` defaults to one on the native host.
+pub(crate) fn hook_fans_out(hook: &str) -> bool {
+    hook == "build.transform"
+}
+
+/// How many worker processes one build session runs.
+///
+/// One, unless the React compiler is on: it is the only hook that fans out, so
+/// a build that never calls it would pay a whole JavaScript runtime per extra
+/// process and get nothing back.
+///
+/// When it is on, the pool is sized the way prerendering sizes its workers,
+/// because the processes are the same shape — a runtime holding the compiled
+/// config and the compiler's own module graph. `prerender_worker_budget` is
+/// what stops a large CI runner with a small memory limit from being asked for
+/// more than it has.
+pub(crate) fn build_worker_processes(options: WorkerOptions) -> usize {
+    if !options.react_compiler {
+        return 1;
+    }
+    let cpu_budget = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(crate::prerender::MAX_PRERENDER_PARALLELISM);
+    crate::host_resources::prerender_worker_budget(cpu_budget)
+}
+
 impl BuildWorkerBridge {
+    /// Frame one call to a worker and return what it answered.
+    ///
+    /// `hook` chooses the process as well as the work. A hook that does not
+    /// fan out always runs on the first worker; one that does starts at the
+    /// round-robin position and takes the first process that is free, so a
+    /// rayon thread whose turn landed on a busy worker makes progress instead
+    /// of queueing behind it. That is the selection `WorkerHost::call` already
+    /// makes on the native host.
     pub(crate) fn call_worker(
         &self,
+        hook: &str,
+        mut payload: serde_json::Value,
+    ) -> ruvyxa_bundler::Result<WorkerOutput> {
+        payload["hook"] = serde_json::Value::String(hook.to_string());
+        if !hook_fans_out(hook) {
+            return self.call_on(0, &payload);
+        }
+        let start = self.next_worker.fetch_add(1, Ordering::Relaxed) % self.workers.len();
+        for offset in 0..self.workers.len() {
+            let index = (start + offset) % self.workers.len();
+            if let Ok(mut worker) = self.workers[index].try_lock() {
+                return worker.call(&payload);
+            }
+        }
+        self.call_on(start, &payload)
+    }
+
+    fn call_on(
+        &self,
+        index: usize,
         payload: &serde_json::Value,
     ) -> ruvyxa_bundler::Result<WorkerOutput> {
-        let worker_index = self.next_worker.fetch_add(1, Ordering::Relaxed) % self.workers.len();
-        let mut worker = self.workers[worker_index].lock().map_err(|_| {
+        let mut worker = self.workers[index].lock().map_err(|_| {
             ruvyxa_bundler::BundleError::Compiler("project worker lock was poisoned".into())
         })?;
         worker.call(payload)
@@ -156,10 +243,9 @@ impl BuildWorkerBridge {
     pub(crate) fn call_runner(
         &self,
         hook: &str,
-        mut payload: serde_json::Value,
+        payload: serde_json::Value,
     ) -> ruvyxa_bundler::Result<Option<serde_json::Value>> {
-        payload["hook"] = serde_json::Value::String(hook.to_string());
-        let result = self.call_worker(&payload)?;
+        let result = self.call_worker(hook, payload)?;
 
         if result.ok {
             return Ok(result.result);
@@ -184,24 +270,25 @@ impl BuildWorkerSession {
         options: WorkerOptions,
     ) -> anyhow::Result<Self> {
         if !options.needs_worker() {
-            return Ok(Self {
-                bridge: None,
-                content_engine: false,
-            });
+            return Ok(Self { bridge: None });
         }
 
         let runner = find_runtime_script(root, "project-worker.mjs")
             .ok_or_else(|| anyhow::anyhow!("RUV1701 project-worker.mjs not found"))?;
         let project_root = ruvyxa_diagnostics::normalized_canonical_path(root);
-        let worker = BuildWorker::spawn(&runner, &project_root, runtime)
-            .map_err(|error| anyhow::anyhow!("failed to start the project worker: {error}"))?;
+        let pool_size = build_worker_processes(options);
+        let mut workers = Vec::with_capacity(pool_size);
+        for _ in 0..pool_size {
+            let worker = BuildWorker::spawn(&runner, &project_root, runtime)
+                .map_err(|error| anyhow::anyhow!("failed to start the project worker: {error}"))?;
+            workers.push(Mutex::new(worker));
+        }
         Ok(Self {
             bridge: Some(BuildWorkerBridge {
-                workers: Arc::new(vec![Mutex::new(worker)]),
+                workers: Arc::new(workers),
                 next_worker: Arc::new(AtomicUsize::new(0)),
-                markdown: options.markdown,
+                options,
             }),
-            content_engine: options.content_engine,
         })
     }
 
@@ -214,13 +301,15 @@ impl BuildWorkerSession {
     /// Called after the build output is committed, so the files land in the
     /// directory every adapter snapshots as the site's public root.
     pub(crate) fn write_content_artifacts(&self, out_dir: &Path) -> anyhow::Result<()> {
-        let (Some(bridge), true) = (&self.bridge, self.content_engine) else {
+        let Some(bridge) = self
+            .bridge
+            .as_ref()
+            .filter(|bridge| bridge.options.content_engine)
+        else {
             return Ok(());
         };
-        let mut payload = serde_json::json!({ "outDir": out_dir });
-        payload["hook"] = serde_json::Value::String("content.write".to_string());
         let result = bridge
-            .call_worker(&payload)
+            .call_worker("content.write", serde_json::json!({ "outDir": out_dir }))
             .map_err(|error| anyhow::anyhow!("content engine failed: {error}"))?;
         if !result.ok {
             anyhow::bail!(

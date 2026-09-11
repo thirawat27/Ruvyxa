@@ -515,7 +515,7 @@ function __ruvyxaDocumentAssets(assets, ctx, rscPayload) {
 }
 
 /** Global registry of route pattern to tree factory, read by the client router. */
-export const ROUTE_REGISTRY_GLOBAL = '__RUVYXA_ROUTES__'
+const ROUTE_REGISTRY_GLOBAL = '__RUVYXA_ROUTES__'
 const SHELL_REGISTRY_GLOBAL = '__RUVYXA_SHELLS__'
 
 /**
@@ -525,7 +525,7 @@ const SHELL_REGISTRY_GLOBAL = '__RUVYXA_SHELLS__'
  * decides whether a navigation is a route change at all: an intercepted URL
  * never swaps the mounted route.
  */
-export const INTERCEPT_REGISTRY_GLOBAL = '__RUVYXA_INTERCEPTS__'
+const INTERCEPT_REGISTRY_GLOBAL = '__RUVYXA_INTERCEPTS__'
 
 /**
  * Global carrying the route pattern this document was served from.
@@ -533,16 +533,16 @@ export const INTERCEPT_REGISTRY_GLOBAL = '__RUVYXA_INTERCEPTS__'
  * The registry above is keyed by pattern (`/blog/[slug]`), not by URL, so the
  * client router needs the pattern to look up its own initial route.
  */
-export const ROUTE_PATTERN_GLOBAL = '__RUVYXA_ROUTE_PATTERN__'
+const ROUTE_PATTERN_GLOBAL = '__RUVYXA_ROUTE_PATTERN__'
 
 /** Local name the emitted prelude binds the shared routing context to. */
-export const ROUTE_CONTEXT_LOCAL = '__ruvyxaRouteContext'
+const ROUTE_CONTEXT_LOCAL = '__ruvyxaRouteContext'
 
 /** Local name the emitted prelude binds the error/not-found boundary class to. */
-export const ROUTE_BOUNDARY_LOCAL = '__ruvyxaBoundary'
+const ROUTE_BOUNDARY_LOCAL = '__ruvyxaBoundary'
 
 /** Local name the emitted prelude binds the interception-aware slot resolver to. */
-export const ROUTE_SLOT_LOCAL = '__ruvyxaSlot'
+const ROUTE_SLOT_LOCAL = '__ruvyxaSlot'
 
 /**
  * Global registry of route pattern to a server-components tree factory.
@@ -553,13 +553,13 @@ export const ROUTE_SLOT_LOCAL = '__ruvyxaSlot'
  * rendered from. One registry holding both would make "which kind of route is
  * this" a guess at every call site that reads it.
  */
-export const RSC_ROUTE_REGISTRY_GLOBAL = '__RUVYXA_RSC_ROUTES__'
+const RSC_ROUTE_REGISTRY_GLOBAL = '__RUVYXA_RSC_ROUTES__'
 
 /** Local name the server-components entry binds its root component to. */
-export const RSC_ROOT_LOCAL = '__ruvyxaRscRoot'
+const RSC_ROOT_LOCAL = '__ruvyxaRscRoot'
 
 /** Local name the server-components entry binds its registered factory to. */
-export const RSC_TREE_LOCAL = '__ruvyxaRscTree'
+const RSC_TREE_LOCAL = '__ruvyxaRscTree'
 
 /**
  * The slot resolver a route with interceptions emits.
@@ -594,16 +594,16 @@ export const ROUTE_SLOT_PRELUDE = `function ${'__ruvyxaSlot'}(ctx, level, name, 
 `
 
 /** Local name bound to the route-metadata merge helper. */
-export const META_RESOLVE_LOCAL = '__ruvyxaResolveMeta'
+const META_RESOLVE_LOCAL = '__ruvyxaResolveMeta'
 
 /** Local name bound to the helper that turns merged metadata into elements. */
-export const META_ELEMENT_LOCAL = '__ruvyxaMetaElement'
+const META_ELEMENT_LOCAL = '__ruvyxaMetaElement'
 
 /** Local name bound to the helper that rewrites `<html lang>` on a rendered document. */
-export const META_LANG_LOCAL = '__ruvyxaApplyLang'
+const META_LANG_LOCAL = '__ruvyxaApplyLang'
 
 /** Identifier prefix for the namespace imports metadata is read from. */
-export const META_SOURCE_PREFIX = '__ruvyxaMeta'
+const META_SOURCE_PREFIX = '__ruvyxaMeta'
 
 /**
  * Build the namespace imports a route's metadata is merged from.
@@ -1048,7 +1048,7 @@ function slotProps(level) {
  * Mirrors `intercept_registry_statement()` in
  * `crates/ruvyxa_bundler/src/output.rs`.
  */
-export function interceptRegistryStatement(routePath, intercepts = []) {
+function interceptRegistryStatement(routePath, intercepts = []) {
   if (intercepts.length === 0) return ''
   const entries = intercepts
     .map(
@@ -1138,7 +1138,7 @@ export function needsRouteBoundary({ errorName = null, notFoundName = null } = {
  * Next.js), while `not-found.tsx`, which no page would intercept, recovers on the
  * server.
  */
-export function routeRecoveryFunction({ layoutNames, routePath, notFoundName }) {
+function routeRecoveryFunction({ layoutNames, routePath, notFoundName }) {
   if (!notFoundName) return ''
   return `function __ruvyxaRecovery(ctx, error) {
   if (!(error && error.__ruvyxaNotFound)) return null
@@ -1204,7 +1204,7 @@ export function routeShellFunction({
  * a tree and no shell, and the router has to be able to tell the difference
  * rather than rendering a tree that would immediately suspend on missing data.
  */
-export function routeShellRegistration({ name, routePath }) {
+function routeShellRegistration({ name, routePath }) {
   return `;(globalThis.${SHELL_REGISTRY_GLOBAL} ||= {})[${JSON.stringify(routePath)}] = ${name}`
 }
 

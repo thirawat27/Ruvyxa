@@ -258,6 +258,41 @@
       "why": "Reserved. Refused by the reserved-route check rather than the alphabet, and listed here so a host that lost one of the two checks still fails."
     }
   ],
+
+  "$transportBoundsComment": [
+    "The numeric half of the same rule `transportPaths` holds, and the half",
+    "that had nothing holding it.",
+    "",
+    "`config.realtime` and `config.collab` are validated twice: once at config",
+    "time by normalizeRealtimeConfig / normalizeCollabConfig in",
+    "packages/@ruvyxa/core/src/framework-paths.ts, and again by",
+    "realtime_runtime / presence_runtime in crates/ruvyxa_dev_server/src/lib.rs,",
+    "because that is the process a bad value would reach. The path rule earned",
+    "this fixture; the four numbers beside it did not. They were named",
+    "constants on the JavaScript side and bare literals written three times on",
+    "the Rust side -- `(5_000..=120_000)` twice and `(16..=4_096)` once -- which",
+    "is precisely what scripts/check-cross-language-constants.mjs cannot see,",
+    "since it can only compare a name declared in both languages.",
+    "",
+    "A split does not fail a build. It produces one of two contradictions: a",
+    "value the config renderer accepts and the server then refuses at startup",
+    "with RUV1602 naming a range the renderer just allowed, or a range the",
+    "server would accept that no project can ever reach because the renderer",
+    "refuses it first -- dead validation nobody can observe.",
+    "",
+    "`default` is the JavaScript side's alone and is recorded rather than",
+    "replayed there: the renderer applies defaults before the Rust host sees",
+    "the config, so the host has no absent value to fill.",
+    "",
+    "Both implementations replay this section:",
+    "  - crates/ruvyxa_dev_server/src/lib.rs",
+    "  - tests/packages/ruvyxa/framework-endpoints.test.mjs"
+  ],
+  "transportBounds": {
+    "heartbeatMs": { "min": 5000, "max": 120000, "default": 25000 },
+    "realtimeCapacity": { "min": 16, "max": 4096, "default": 256 }
+  },
+
   "capabilities": [
     {
       "id": "actions",

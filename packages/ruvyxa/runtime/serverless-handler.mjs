@@ -351,7 +351,7 @@ const LOG_VALUE_LIMIT = 256
  * still has to be able to read. Bounded too — one field must not be able to bury
  * the rest of the line.
  */
-export function logValue(value) {
+function logValue(value) {
   const text = typeof value === 'string' ? value : String(value)
   let rendered = ''
   for (const character of text) {

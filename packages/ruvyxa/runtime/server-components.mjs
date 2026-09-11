@@ -279,7 +279,7 @@ export async function renderServerComponentsStream({
  * context read is a client concern. The browser entry wraps the decoded element
  * in the same provider with the same value, so the markup matches.
  */
-export async function flightStreamToHtml(stream, ctx, routePath, { formState = null } = {}) {
+async function flightStreamToHtml(stream, ctx, routePath, { formState = null } = {}) {
   const html = await flightStreamToHtmlStream(stream, ctx, routePath, { complete: true, formState })
   return await readStreamText(html)
 }
@@ -304,7 +304,7 @@ export async function flightStreamToHtml(stream, ctx, routePath, { formState = n
  *   render that is not answering a form post — leaves each hook at its initial
  *   state.
  */
-export async function flightStreamToHtmlStream(
+async function flightStreamToHtmlStream(
   stream,
   ctx,
   routePath,
@@ -386,7 +386,7 @@ function withDoctype(stream) {
 }
 
 /** The context value both the SSR pass and the browser entry provide. */
-export function routeContextValue(ctx, routePath) {
+function routeContextValue(ctx, routePath) {
   return {
     pathname: ctx.path,
     params: ctx.params ?? {},

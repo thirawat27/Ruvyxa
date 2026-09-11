@@ -163,8 +163,8 @@ Version numbers that are **not** this, and must stay literal: the framework's ow
 `version: 3`), a platform's config schema (`@ruvyxa/adapter-vercel` writes what Vercel expects), a
 wire protocol two independently-shipped sides negotiate (`FLIGHT_PROTOCOL_VERSION`, the HMR
 `protocolVersion`, `REFERENCE_MANIFEST_SCHEMA_VERSION`, `schemaVersion` in `tests/fixtures/*.json`),
-a runtime floor (`MINIMUM_BUN_VERSION`), and a user-facing config value (`pwa`'s `version`). Those
-describe a contract with something outside this repository. A cache key describes only us.
+and a runtime floor (`MINIMUM_BUN_VERSION`). Those describe a contract with something outside this
+repository. A cache key describes only us.
 
 ## Verification
 
@@ -243,6 +243,8 @@ The rest of the scripts, and when each is worth running:
 | `pnpm check:doc-attachment`           | after moving a doc comment — a `///` block that drifted off its item documents the wrong thing and still compiles  |
 | `pnpm check:cross-language-constants` | after changing a value the Rust and JavaScript halves must both hold — the two copies drift silently               |
 | `pnpm check:template-mirrors`         | after editing `templates/` or a `create-ruvyxa` template — the two trees are one source published twice            |
+| `pnpm check:stale-dist`               | after deleting or renaming a package source — `tsc` leaves the old output, and `files` publishes it                |
+| `pnpm check:runtime-exports`          | after editing a `runtime/*.mjs` — they are Knip's entry points, so an export nothing reads is invisible to it      |
 | `pnpm verify:reproducible`            | after a change to emitted bytes, ordering, or hashing — two builds of one input must agree                         |
 | `pnpm test:full-flow`                 | before a release; scaffolds, builds, and runs a project end to end (PowerShell)                                    |
 | `pnpm publish:dry-run`                | before a release, to see what would actually be published                                                          |
@@ -279,7 +281,13 @@ before believing it.
   `repoPath()` from `tests/repo-root.ts` to reach a repository file rather than walking up from
   `import.meta.url`.
 - Template changes should stay package-manager neutral and must match
-  `templates/minimal/package.json`.
+  `templates/minimal/package.json`. `pnpm pack:smoke` is the only thing that ever runs a scaffold:
+  it packs the workspace, scaffolds all four starters against the tarballs, and type-checks each.
+  `tsc` answers "does this compile" — it does not answer "does the framework accept it", which is
+  route conventions, the server/client boundary, config validation, and dev/production parity. Only
+  `minimal` was asked the second question, so `blog`, `crud`, and `api` shipped on the first answer
+  alone; all four run `ruvyxa check` now. Nothing else compiles `templates/`, so a change there is
+  unverified until `pack:smoke` has run.
 - `templates/minimal/app/components/ruvyxa-runner.tsx` and
   `examples/demo/app/components/ruvyxa-runner.tsx` are required to be byte-identical, so the demo
   fixture exercises exactly what a scaffolded project ships with. After editing either, run
@@ -403,6 +411,32 @@ before believing it.
   task. A process that exits does not unwind that task, so nothing drops the `Child` and
   `kill_on_drop` never runs. Anything spawning a child into a detached task needs a registry the
   shutdown path reads.
+- A worker pool is only as parallel as its least pure hook, and a bridge that carries one flag can
+  only guard one feature. `crates/ruvyxa_cli/src/worker.rs` holds both rules. `BuildWorkerBridge`
+  stored `markdown` alone, so `compile_content` could check its feature and `transform` had nothing
+  to check — and `transform_with_map` runs for **every** compiled module, so a project that started
+  the worker for markdown or the content engine paid a synchronous round trip per module to collect
+  the `null` that `runBuildTransform` returns whenever `reactCompiler` is off. The bridge carries
+  the whole `WorkerOptions` now, so the next hook cannot lose its flag. `hook_fans_out` draws the
+  other line: only `build.transform` may run on a second process, because it is the React compiler
+  over one module — first-party, and a pure function of that module's `(code, id)`.
+  `content.compile` and `content.write` run the project's own remark and rehype plugins, whose
+  module-level state is per process, so a plugin that collects across files would see a different
+  subset on each worker and emit a different build. That is the same reason `middleware.workers`
+  defaults to one on the native host, and why the pool stays at a single process when the React
+  compiler is off — nothing else can use a second one.
+- A value shared between request stages belongs to the request, not beside it. `headers()` and
+  `redirects()`, the `proxy.matcher`, and the `beforeFiles` rewrite all read the same
+  `Vec<(String, String)>` built over every header, and each stage built its own. Sharing one is safe
+  only because it is a field of `ForwardedRequest`: `proxy.handler` answering with a different
+  `Request` produces a different `ForwardedRequest`, whose list starts empty, so there is no window
+  in which the list describes headers the request no longer has. A cache held beside the pipeline
+  would instead have been correct only while somebody kept checking that the proxy changed nothing.
+  It is a `OnceLock` because it is borrowed across the `await` on the worker, and it is lazy because
+  a project that configures neither a rule nor a proxy asks for it zero times.
+  `render_request_inner`'s `afterFiles` rewrite still builds its own on purpose: it runs only once
+  the route table has missed, and threading the list down a recursive render path would trade a
+  lifetime a reader can see for one allocation on the rarest branch.
 - Any pass that _deletes_ code needs its output parsed by a test, not matched. The `NODE_ENV` fold
   in `crates/ruvyxa_bundler/src/minifier.rs` runs while a production client graph is being resolved
   and reports nothing, and it cut the `if` out of an `else if` chain — a bundle that does not parse,
@@ -594,6 +628,67 @@ before believing it.
   neighbours. Anything drawn onto a live line is also sized against eighty columns and pinned by a
   test: the runner is an emoji and occupies two cells, and a frame that overflows cannot be erased
   by `[2K`, which clears one line and not a wrapped one.
+- A fixture that holds half a rule leaves the other half looking held. `transportPaths` in
+  `tests/fixtures/framework-endpoint-conformance.json` pins the _path_ `config.realtime` and
+  `config.collab` may name across both validators — and the four numbers beside it, the heartbeat
+  window and the realtime capacity range, were named constants in `framework-paths.ts` against bare
+  literals written three times in `lib.rs`. `scripts/check-cross-language-constants.mjs` can only
+  compare a name declared in both languages, so it saw nothing. A split there is not a build
+  failure: it is a value the config renderer accepts and the server then refuses at startup with
+  RUV1602 naming a range the renderer just allowed, or a range no project can reach because the
+  renderer refuses it first. Both sides name the constants now and `transportBounds` holds them,
+  from both directions — the edge of each range has to be accepted as well as one step past it
+  refused, because a bound that is only ever tested from above passes at half its value.
+- A wire format with two readers needs the _reading_ one tested.
+  `packages/ruvyxa/runtime/flight.mjs` writes every Flight payload and decodes one beside the
+  encoder; `decodeFlight` in `packages/@ruvyxa/react/src/router.ts` decodes the ones that arrive.
+  Nothing outside its own unit test called the first, and nothing at all called the second — so the
+  round trip beside the encoder made the format look covered while the decoder every browser runs on
+  every soft navigation into a server-components route was exercised by nothing. A divergence
+  produces no error anybody sees: `startFlight` rejects, the router falls back to `hardNavigate`,
+  and the navigation quietly becomes a full page load. `tests/fixtures/flight-conformance.json`
+  hands both decoders the same bytes. Its three limits were the same shape one level down —
+  `MAX_NODES`/`MAX_DEPTH` against inline `10_000`/`64`, and `DEFAULT_FLIGHT_LIMIT` against
+  `FLIGHT_BYTE_LIMIT` — and both halves are JavaScript, which the cross-language gate never looks
+  at. What the two do _not_ share is the value they hand back: this one rebuilds every object with
+  `Object.create(null)` and sorted keys so an encode is deterministic, and that is asserted rather
+  than left to be discovered.
+- A bound in a handler is not the bound until a layer says so. Axum applies `DefaultBodyLimit` — 2
+  MiB unless the route overrides it — while _extracting_ `Bytes`, so it decides before the handler
+  runs. `POST /__ruvyxa/rsc` carried no layer, which made its `MAX_SERVER_ACTION_BODY` of 4 MiB
+  unreachable: a server-function call between the two sizes was refused under `ruvyxa dev`,
+  `ruvyxa start` and `ruvyxa preview`, and accepted by every deployed build and by the standalone
+  server, both of which apply the handler's number. `/__ruvyxa/action` and `/__ruvyxa/trace` had
+  always carried theirs, which is exactly what made the third look deliberate.
+  `every_route_that_buffers_a_body_declares_its_limit` reads the route chain in the direction the
+  guard reads — from the handlers that extract a body to the routes that register them — and
+  `the_server_function_body_limit_is_the_one_the_endpoint_declares` drives both shapes of the
+  registration, because a source match passes on a layer that names the wrong number.
+- A default the build _writes down_ is a second declaration of that default. `ruvyxa build` renders
+  the effective security policy into `build.json`, which is where a deployed build reads its request
+  limits from — and it filled the absent ones with four bare literals of its own
+  (`unwrap_or(1024 * 1024)` and its neighbours) while `ruvyxa_dev_server` held the same four as
+  private constants. Nothing fails when those diverge: the native host moves, the manifest keeps the
+  old number, and the projects that notice are the ones that configured nothing and so have no value
+  in the manifest to correct it. That is `defaultMaxWidth` again — one Rust constant against unnamed
+  copies written into deployed functions, which a name-matching gate cannot see. The constants are
+  `pub` and `build.rs` names them, and `tests/fixtures/request-body-limit-conformance.json` holds
+  the three limits, their config ceilings, and the 413 across the Rust host, the deployed handler,
+  and the standalone server the self-hosted adapters emit.
+- A dead-code gate cannot see its own entry points. `knip.json` declares
+  `packages/ruvyxa/runtime/*.mjs` as the `packages/ruvyxa` entries, because the Rust CLI resolves
+  them by path and spawns or imports them rather than importing them from a package specifier — and
+  an entry point's exports are the boundary Knip measures everything else against, so an export
+  nobody reads is the one thing it can never report. `runtime/*.mjs` is not in the `ruvyxa`
+  package's `exports` map either, so a name there is not public API by any route: something in this
+  repository reads it, or nothing does. Nothing did thirty-one times: eight found by hand, and
+  twenty-three still standing in six other modules once that sweep was over. `SHELL_REGISTRY_GLOBAL`
+  sits unexported beside `ROUTE_REGISTRY_GLOBAL` in the same file for the same job, which is how
+  visible the inconsistency was. `pnpm check:runtime-exports` reads declarations out of
+  `scanner.mjs`'s masked code, because `entry-templates.mjs` is a generator and its template
+  literals hold `export const …` as _output_ text; a name is "read" when it appears outside a
+  comment in another tracked file, so generated source and a Rust literal count and prose does not.
+  `@public` opts a name out, which is the tag `knip.json` already honours.
 - Documentation changes should describe actual supported behavior, not intended future behavior.
 - If a check was already failing before your work, report it as baseline and do not weaken tests to
   pass.

@@ -819,7 +819,7 @@ const SERVER_ACTION_HEADER: &str = "x-ruvyxa-action";
 /// a file, and a file large enough to matter belongs in a route handler that can
 /// stream it. The bound exists because the body is buffered before the worker
 /// sees it, so without one a single request could size the process.
-const MAX_SERVER_ACTION_BODY: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_SERVER_ACTION_BODY: usize = 4 * 1024 * 1024;
 
 /// Run one of a server-components route's server functions.
 ///

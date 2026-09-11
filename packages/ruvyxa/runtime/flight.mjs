@@ -1,7 +1,7 @@
 /** Fail-closed transport for Ruvyxa server components. */
 export const FLIGHT_PROTOCOL = 'ruvyxa.flight'
 export const FLIGHT_PROTOCOL_VERSION = 1
-export const DEFAULT_FLIGHT_LIMIT = 1024 * 1024
+const DEFAULT_FLIGHT_LIMIT = 1024 * 1024
 const MAX_DEPTH = 64
 const MAX_NODES = 10_000
 

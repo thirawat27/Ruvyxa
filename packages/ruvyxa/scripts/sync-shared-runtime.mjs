@@ -74,7 +74,7 @@ const SYNCED_MODULES = [
     why:
       'It is the copy of @ruvyxa/core/origin-policy that ships inside serverless\n' +
       'function bundles. Letting it drift means the action endpoint accepts a\n' +
-      'cross-site request that the plugin and the native server both reject.',
+      'cross-site request that the native server rejects.',
   },
 ]
 

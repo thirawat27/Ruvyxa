@@ -343,3 +343,54 @@ describe('framework endpoint conformance', () => {
     assert.match(await response.text(), /RUV2211/)
   })
 })
+
+/**
+ * The numeric half of the transport rule, which the path half's fixture did
+ * not cover.
+ *
+ * `realtime_runtime` and `presence_runtime` in
+ * `crates/ruvyxa_dev_server/src/lib.rs` re-check every one of these, because
+ * that host is the process a bad value reaches. They held the numbers as bare
+ * literals written three times over, so nothing could compare them with the
+ * names here — and a split shows up as the renderer accepting a value the
+ * server then refuses at startup, or as a range no project can reach.
+ */
+describe('transport bounds conformance', () => {
+  const { heartbeatMs, realtimeCapacity } = contract.transportBounds
+
+  it('takes the shared defaults when the block names none', () => {
+    assert.deepEqual(normalizeRealtimeConfig(true), {
+      path: '/__ruvyxa/realtime',
+      heartbeatMs: heartbeatMs.default,
+      capacity: realtimeCapacity.default,
+    })
+    assert.deepEqual(normalizeCollabConfig(true), {
+      path: '/__ruvyxa/collab',
+      heartbeatMs: heartbeatMs.default,
+    })
+  })
+
+  it('accepts each end of the heartbeat window and refuses one step outside it', () => {
+    for (const normalize of [normalizeRealtimeConfig, normalizeCollabConfig]) {
+      for (const value of [heartbeatMs.min, heartbeatMs.max]) {
+        assert.equal(normalize({ heartbeatMs: value }).heartbeatMs, value)
+      }
+      for (const value of [heartbeatMs.min - 1, heartbeatMs.max + 1]) {
+        assert.throws(() => normalize({ heartbeatMs: value }), /RUV1602/, `heartbeatMs ${value}`)
+      }
+    }
+  })
+
+  it('accepts each end of the capacity range and refuses one step outside it', () => {
+    for (const value of [realtimeCapacity.min, realtimeCapacity.max]) {
+      assert.equal(normalizeRealtimeConfig({ capacity: value }).capacity, value)
+    }
+    for (const value of [realtimeCapacity.min - 1, realtimeCapacity.max + 1]) {
+      assert.throws(
+        () => normalizeRealtimeConfig({ capacity: value }),
+        /RUV1602/,
+        `capacity ${value}`,
+      )
+    }
+  })
+})

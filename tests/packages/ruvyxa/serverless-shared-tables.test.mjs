@@ -26,6 +26,11 @@ const { DEFAULT_SECURITY_HEADERS, isStaticAssetPath, createHandler } = await imp
 const { platformDocumentStoreSource } = await import(
   `file://${path.join(workspaceRoot, 'packages/@ruvyxa/core/dist/index.js').replaceAll('\\', '/')}`
 )
+const { standaloneServerSource } = await import(
+  `file://${path
+    .join(workspaceRoot, 'packages/@ruvyxa/core/dist/standalone-server.js')
+    .replaceAll('\\', '/')}`
+)
 
 const handlerSource = readFileSync(handlerPath, 'utf8')
 
@@ -412,6 +417,97 @@ describe('adapter on-demand revalidation', () => {
     const store = platformDocumentStoreSource()
     assert.match(store, /platformWritePrerendered = \(pathname, html, revalidate, forced\)/)
     assert.doesNotMatch(store, /forced === true/)
+  })
+})
+
+/**
+ * The request-body ceilings, on the two hosts that are not the Rust one.
+ *
+ * `crates/ruvyxa_dev_server` declares three numbers, `crates/ruvyxa_cli`
+ * writes them into the manifest a deployment reads, this handler falls back to
+ * its own copy when the manifest is older than the field, and the standalone
+ * server the six self-hosted adapters emit carries a fourth. Only the pairing
+ * between the last two was ever checked, and only for the server-function
+ * bound. A comment in `requestBodyPolicy` said the rest used the "same bound
+ * as the native host's `MAX_SERVER_ACTION_BODY`", which is the arrangement
+ * `tests/fixtures/` exists to replace.
+ *
+ * The numbers are read out of source rather than imported because both places
+ * declare them locally: the handler is copied into a function bundle that
+ * resolves no sibling specifiers, and the standalone server is a template
+ * string.
+ */
+describe('request body limits', () => {
+  const { limits, refusalStatus } = fixture('request-body-limit-conformance.json')
+
+  /** The right-hand side of a `const NAME = …` line, evaluated. */
+  function declaredBytes(source, name, where) {
+    const declared = new RegExp(`\\bconst ${name} = ([^\\n;]+)`).exec(source)
+    assert.ok(declared, `${where} no longer declares ${name}`)
+    const value = Number(
+      declared[1]
+        .trim()
+        .split('*')
+        .reduce((total, part) => total * Number(part.trim()), 1),
+    )
+    assert.ok(Number.isSafeInteger(value), `${name} in ${where} is not a plain byte count`)
+    return value
+  }
+
+  it('bounds the deployed handler by the numbers the native host bounds itself by', () => {
+    assert.equal(
+      declaredBytes(handlerSource, 'DEFAULT_ACTION_BODY_LIMIT', 'serverless-handler.mjs'),
+      limits.action.bytes,
+    )
+    assert.equal(
+      declaredBytes(handlerSource, 'DEFAULT_API_BODY_LIMIT', 'serverless-handler.mjs'),
+      limits.api.bytes,
+    )
+    assert.equal(
+      declaredBytes(handlerSource, 'RSC_ACTION_BODY_LIMIT', 'serverless-handler.mjs'),
+      limits.serverFunction.bytes,
+    )
+  })
+
+  it('refuses with the shared status, and keeps the messages the table records', () => {
+    assert.match(handlerSource, new RegExp(`textResponse\\(${refusalStatus},`))
+    // The messages are the deployed hosts' alone: the native host refuses in
+    // its `DefaultBodyLimit` layer, which answers with axum's own text before
+    // the handler that carries the string ever runs. Asserted so a rename is
+    // a decision, not so the two are claimed to answer alike.
+    for (const limit of Object.values(limits)) {
+      if (limit.message === null) continue
+      assert.ok(
+        handlerSource.includes(limit.message),
+        `the handler no longer answers "${limit.message}"`,
+      )
+    }
+  })
+
+  it('gives the generated standalone server the same fallbacks', () => {
+    // `runtimePolicy` is empty on purpose: the fallbacks are what a deployment
+    // whose project configured nothing actually runs, which is the case a
+    // split between the two languages reaches first.
+    const generated = standaloneServerSource({ runtimePolicy: {} })
+    assert.equal(
+      declaredBytes(generated, 'RSC_ACTION_BODY_LIMIT', 'the standalone server'),
+      limits.serverFunction.bytes,
+    )
+    const fallbacks = [
+      ...generated.matchAll(/configuredLimit\(runtimePolicy\.security\?\.(\w+),\s*([^)]+)\)/g),
+    ].map(([, key, expression]) => [
+      key,
+      expression
+        .trim()
+        .split('*')
+        .reduce((total, part) => total * Number(part.trim()), 1),
+    ])
+
+    assert.deepEqual(
+      Object.fromEntries(fallbacks),
+      { apiLimit: limits.api.bytes, actionLimit: limits.action.bytes },
+      'the transport buffers before the handler runs, so its fallbacks are the policy',
+    )
   })
 })
 

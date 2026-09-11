@@ -44,6 +44,11 @@ tempfile.workspace = true
 
 [dev-dependencies]
 jpeg-encoder.workspace = true
+# `ServiceExt::oneshot`, to drive the router without a socket. A body limit is
+# refused mid-upload, and the reset that follows discards the response still in
+# the receive buffer on Windows -- so a loopback client reads nothing on exactly
+# the half the test exists to observe. Already in the tree through axum.
+tower = { workspace = true, features = ["util"] }
 
 [lints]
 workspace = true

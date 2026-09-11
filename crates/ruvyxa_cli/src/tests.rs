@@ -2508,6 +2508,120 @@ fn production_session_runs_opt_in_react_compiler_before_oxc() {
     assert!(transformed.map.is_some());
 }
 
+/// A build that did not turn the React compiler on must not cross the process
+/// boundary for `build.transform`.
+///
+/// The worker is started whenever markdown, the React compiler, *or* the
+/// content engine is on, and `transform_with_map` runs for every compiled
+/// module. `runBuildTransform` in `packages/ruvyxa/runtime/project-worker.mjs`
+/// answers `null` when `reactCompiler` is off, so a project using only
+/// markdown or only the content engine was serialising its whole compile
+/// behind one process to collect that `null` once per module.
+///
+/// The worker is killed before the call, so a `transform` that still crossed
+/// reports an error instead of returning the same `None` for the wrong reason
+/// — without that, this test passes against the bug it exists to catch.
+#[test]
+fn transform_does_not_reach_the_worker_when_the_react_compiler_is_off() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::write(
+        root.join("ruvyxa.config.mjs"),
+        "export default { markdown: {} }\n",
+    )
+    .unwrap();
+
+    let session = BuildWorkerSession::new(
+        root,
+        JavaScriptRuntime::Node,
+        WorkerOptions {
+            markdown: true,
+            ..WorkerOptions::default()
+        },
+    )
+    .unwrap();
+    let bridge = session.bridge().unwrap();
+    assert_eq!(
+        bridge.workers.len(),
+        1,
+        "a build that cannot call `build.transform` runs one process"
+    );
+    {
+        let mut worker = bridge.workers[0].lock().unwrap();
+        let _ = worker.child.kill();
+        let _ = worker.child.wait();
+    }
+
+    let context = ruvyxa_bundler::hooks::BuildHookContext {
+        project_root: root.to_path_buf(),
+        importer: None,
+        target: ruvyxa_bundler::BundleTarget::Client,
+    };
+    let transformed = ruvyxa_bundler::hooks::BuildHooks::transform(
+        bridge,
+        "export function Counter({ count }) { return <span>{count}</span> }",
+        &root.join("Counter.tsx"),
+        &context,
+    )
+    .expect("a build with the React compiler off must not call the worker");
+
+    assert!(
+        transformed.is_none(),
+        "the React compiler is off, so no module is transformed"
+    );
+}
+
+/// The build worker pool fans out for exactly one hook, and only when a build
+/// can reach it.
+///
+/// `build.transform` is the React compiler over one module: first-party, and a
+/// pure function of that module. Everything else runs the project's own
+/// unified plugins, whose module-level state is per process — spreading those
+/// across workers would let a plugin that collects across files see a
+/// different subset on each one and emit a different build.
+#[test]
+fn only_the_react_compiler_hook_runs_on_more_than_one_build_worker() {
+    assert!(crate::worker::hook_fans_out("build.transform"));
+    assert!(!crate::worker::hook_fans_out("content.compile"));
+    assert!(!crate::worker::hook_fans_out("content.write"));
+    assert!(!crate::worker::hook_fans_out("describe"));
+
+    for options in [
+        WorkerOptions {
+            markdown: true,
+            ..WorkerOptions::default()
+        },
+        WorkerOptions {
+            content_engine: true,
+            ..WorkerOptions::default()
+        },
+        WorkerOptions {
+            markdown: true,
+            content_engine: true,
+            ..WorkerOptions::default()
+        },
+    ] {
+        assert_eq!(
+            crate::worker::build_worker_processes(options),
+            1,
+            "a build that never calls `build.transform` pays for one runtime, not several"
+        );
+    }
+
+    // With the compiler on, the host decides the size, so the assertion is the
+    // bound rather than a number: `prerender_worker_budget` lowers the answer
+    // when the machine is short on memory, and asserting an exact value would
+    // be asserting this machine.
+    let pool = crate::worker::build_worker_processes(WorkerOptions {
+        react_compiler: true,
+        ..WorkerOptions::default()
+    });
+    assert!(
+        (1..=crate::prerender::MAX_PRERENDER_PARALLELISM).contains(&pool),
+        "pool of {pool} is outside the documented bound"
+    );
+}
+
 #[test]
 fn top_level_help_uses_framework_name_and_command_descriptions() {
     let help = Cli::command().render_long_help().to_string();

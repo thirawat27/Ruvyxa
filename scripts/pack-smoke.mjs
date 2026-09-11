@@ -385,10 +385,19 @@ async function main() {
       stdio: 'inherit',
     })
   }
-  execPnpm(['exec', 'ruvyxa', 'check', '--root', '.'], {
-    cwd: `${extracted}/scaffolded-minimal`,
-    stdio: 'inherit',
-  })
+  // Every starter, not just `minimal`. `tsc` above answers "does this compile";
+  // `ruvyxa check` answers "does the framework accept it" — route conventions,
+  // the server/client boundary, config validation, and dev/production parity —
+  // and those are the rules a scaffold can break while type-checking clean.
+  // Three of the four templates had only the first answer, and they are what
+  // `create-ruvyxa --template blog|crud|api` hands somebody in their first five
+  // minutes.
+  for (const starter of starters) {
+    execPnpm(['exec', 'ruvyxa', 'check', '--root', '.'], {
+      cwd: `${extracted}/scaffolded-${starter}`,
+      stdio: 'inherit',
+    })
+  }
   const packedManifest = JSON.parse(
     readFileSync(`${extracted}/scaffolded-minimal/.ruvyxa/assets/content.json`, 'utf8'),
   )

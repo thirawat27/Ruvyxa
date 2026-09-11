@@ -563,7 +563,7 @@ export async function compileBundleWithMetadata({
  * walking and compiling the whole graph — which is the work a caller wanted to
  * skip. `writeIfChanged` then finds the bytes identical and writes nothing, so
  * the whole cost bought an answer that was already sitting on disk. Booting the
- * plugin host for the demo spent 341ms of a 964ms warm build exactly this way,
+ * project worker for the demo spent 341ms of a 964ms warm build exactly this way,
  * on every build, and the dev server pays it again at startup.
  *
  * The manifest beside the output records what the last compile read and what
@@ -857,7 +857,7 @@ export const INSTRUMENTATION_FILES = Object.freeze([
  * Each module below is served separately and built with the *others* rewritten
  * the same way, so the browser ends up with exactly one instance of each.
  */
-export const CLIENT_VENDOR_PATH = '/__ruvyxa/client/vendor'
+const CLIENT_VENDOR_PATH = '/__ruvyxa/client/vendor'
 
 /**
  * Global the shared browser modules are published on, keyed by specifier.
@@ -866,7 +866,7 @@ export const CLIENT_VENDOR_PATH = '/__ruvyxa/client/vendor'
  * uses with module-id keys: the two never appear on one page, and one global
  * holding two key rules is a collision waiting for the day they do.
  */
-export const VENDOR_REGISTRY_GLOBAL = '__RUVYXA_VENDOR_MODULES__'
+const VENDOR_REGISTRY_GLOBAL = '__RUVYXA_VENDOR_MODULES__'
 
 /** The module source that publishes one shared browser module. */
 export function clientVendorEntrySource(specifier) {
@@ -881,10 +881,11 @@ export function clientVendorEntrySource(specifier) {
  * The shared modules, keyed by the `name` their URL carries.
  *
  * A query parameter rather than a path segment, matching `/__ruvyxa/client`:
- * a parameterised route could not be named exactly in the reserved-path lists
- * that keep plugins from colliding with framework endpoints.
+ * a parameterised route could not be named exactly in `RESERVED_FRAMEWORK_PATHS`,
+ * which is what keeps a configured socket transport from taking a path the
+ * framework already answers.
  */
-export const CLIENT_VENDOR_MODULES = Object.freeze({
+const CLIENT_VENDOR_MODULES = Object.freeze({
   react: 'react',
   'react-jsx-runtime': 'react/jsx-runtime',
   'react-dom': 'react-dom',
@@ -3806,7 +3807,7 @@ async function readSourceFile(file) {
  *
  * `markdownConfig` is normally discovered from the stable config pointer the
  * CLI writes. Passing an object keeps executable plugin functions live inside
- * the persistent plugin host; passing `false` disables project config loading
+ * the persistent project worker; passing `false` disables project config loading
  * while the config module itself is being compiled.
  */
 export async function compileContentSource(source, filePath, projectRoot, markdownConfig) {

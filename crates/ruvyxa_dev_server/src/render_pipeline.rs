@@ -467,20 +467,14 @@ pub(crate) enum RuleStage {
 /// page fallback, so no rule can redirect `/__ruvyxa/action`.
 pub(crate) fn route_rule_stage(
     rules: &ruvyxa_middleware::RouteRules,
-    request_path: &str,
-    request_target: &str,
-    headers: &HeaderMap,
+    request: &crate::worker_bridge::ForwardedRequest,
 ) -> RuleStage {
+    // Before the request is asked for its header list, so a project with no
+    // rules never builds one.
     if rules.is_empty() {
         return RuleStage::Continue(Vec::new());
     }
-    let header_list = ruvyxa_middleware::route_rules::header_pairs(headers);
-    let rule_request = ruvyxa_middleware::route_rules::RuleRequest {
-        path: request_path,
-        query: request_target.split_once('?').map(|(_, query)| query),
-        headers: &header_list,
-        host: ruvyxa_middleware::route_rules::host_header(headers),
-    };
+    let rule_request = request.rule_request();
     // `headers()` is decided before `redirects()` and set on whatever answers,
     // a redirect included — the documented order, and the one the deployed
     // handler follows.
@@ -502,20 +496,15 @@ pub(crate) fn route_rule_stage(
 /// the path this reads is the one the proxy forwarded.
 pub(crate) fn before_files_rewrite(
     rules: &ruvyxa_middleware::RouteRules,
-    request_path: &str,
-    request_target: &str,
-    headers: &HeaderMap,
+    request: &crate::worker_bridge::ForwardedRequest,
 ) -> std::result::Result<Option<(String, String)>, Box<Response>> {
     if rules.before_files.is_empty() {
         return Ok(None);
     }
-    let header_list = ruvyxa_middleware::route_rules::header_pairs(headers);
-    let rule_request = ruvyxa_middleware::route_rules::RuleRequest {
-        path: request_path,
-        query: request_target.split_once('?').map(|(_, query)| query),
-        headers: &header_list,
-        host: ruvyxa_middleware::route_rules::host_header(headers),
-    };
+    // The same list `route_rule_stage` built, unless `proxy.handler` replaced
+    // the request — in which case this is a different `ForwardedRequest` and
+    // the list is its own.
+    let rule_request = request.rule_request();
     match ruvyxa_middleware::route_rules::match_rewrite(&rules.before_files, &rule_request) {
         Some(target) => rewrite_target(&target).map(Some),
         None => Ok(None),
@@ -3466,8 +3455,16 @@ mod tests {
             ruvyxa_middleware::RewritePhases::default(),
         )
         .unwrap();
-        let headers = HeaderMap::new();
-        match route_rule_stage(&rules, "/old/a", "/old/a", &headers) {
+        let request = |path: &str| {
+            crate::worker_bridge::ForwardedRequest::new(
+                "GET".to_string(),
+                path.to_string(),
+                path.to_string(),
+                HeaderMap::new(),
+                None,
+            )
+        };
+        match route_rule_stage(&rules, &request("/old/a")) {
             RuleStage::Answer(response) => {
                 assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
                 assert_eq!(response.headers()[header::LOCATION], "/new/a");
@@ -3475,12 +3472,74 @@ mod tests {
             }
             RuleStage::Continue(_) => panic!("a matching redirect must answer"),
         }
-        match route_rule_stage(&rules, "/", "/", &headers) {
+        match route_rule_stage(&rules, &request("/")) {
             RuleStage::Continue(entries) => {
                 assert_eq!(entries, vec![("x-rules".to_string(), "on".to_string())]);
             }
             RuleStage::Answer(_) => panic!("the root is not redirected"),
         }
+    }
+
+    /// The `beforeFiles` rewrite reads the request the proxy stage left
+    /// behind: its canonical path, its own query, and its headers.
+    ///
+    /// It runs between `proxy.handler` and the file lookup, which is the one
+    /// stage with no direct test of its own — and the one whose input can be a
+    /// request `proxy.handler` replaced wholesale rather than the one that
+    /// arrived.
+    #[test]
+    fn the_before_files_rewrite_reads_the_request_it_is_handed() {
+        let rules = ruvyxa_middleware::RouteRules::compile(
+            Vec::new(),
+            Vec::new(),
+            ruvyxa_middleware::RewritePhases {
+                before_files: vec![ruvyxa_middleware::route_rules::RewriteRule {
+                    source: "/docs/:page".to_string(),
+                    destination: "/guide/:page".to_string(),
+                    has: Vec::new(),
+                    missing: Vec::new(),
+                }],
+                ..ruvyxa_middleware::RewritePhases::default()
+            },
+        )
+        .unwrap();
+        let request = |path: &str, target: &str| {
+            crate::worker_bridge::ForwardedRequest::new(
+                "GET".to_string(),
+                path.to_string(),
+                target.to_string(),
+                HeaderMap::new(),
+                None,
+            )
+        };
+
+        assert_eq!(
+            before_files_rewrite(&rules, &request("/docs/intro", "/docs/intro")).unwrap(),
+            Some(("/guide/intro".to_string(), "/guide/intro".to_string()))
+        );
+        // The rule matches on the canonical path, and the request's own query
+        // is carried onto the destination: a rewrite renames the path, it does
+        // not discard what the client asked for.
+        assert_eq!(
+            before_files_rewrite(&rules, &request("/docs/intro", "/docs/intro?v=2")).unwrap(),
+            Some(("/guide/intro".to_string(), "/guide/intro?v=2".to_string()))
+        );
+        assert_eq!(
+            before_files_rewrite(&rules, &request("/other", "/other")).unwrap(),
+            None
+        );
+
+        let empty = ruvyxa_middleware::RouteRules::compile(
+            Vec::new(),
+            Vec::new(),
+            ruvyxa_middleware::RewritePhases::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            before_files_rewrite(&empty, &request("/docs/intro", "/docs/intro")).unwrap(),
+            None,
+            "a project with no rewrite never asks the request for anything"
+        );
     }
 
     /// A `rewrites()` destination is canonicalized like any request path; an

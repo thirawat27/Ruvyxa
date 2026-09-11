@@ -71,6 +71,25 @@ export const TRANSPORT_PATH_RULE =
 export const HEARTBEAT_MIN_MS = 5_000
 export const HEARTBEAT_MAX_MS = 120_000
 
+/**
+ * Buffered broadcast messages one realtime channel may hold.
+ *
+ * Named for the same reason the heartbeat bounds are: the Axum host re-checks
+ * this range, so it is a two-language rule. Both halves wrote it as a literal
+ * on one side or the other, which put it outside
+ * `scripts/check-cross-language-constants.mjs` — that gate can only see a name
+ * declared in both. `transportBounds` in
+ * `tests/fixtures/framework-endpoint-conformance.json` is what actually holds
+ * the four numbers.
+ */
+export const REALTIME_CAPACITY_MIN = 16
+/** The upper end of {@link REALTIME_CAPACITY_MIN}'s range. */
+export const REALTIME_CAPACITY_MAX = 4_096
+/** The channel capacity a `realtime` block that names none is given. */
+export const REALTIME_CAPACITY_DEFAULT = 256
+/** The heartbeat a transport block that names none is given. */
+export const HEARTBEAT_DEFAULT_MS = 25_000
+
 /** The `realtime` block as the hosts read it: every field decided. */
 export interface NormalizedRealtime {
   readonly path: string
@@ -107,7 +126,7 @@ function transportPath(value: unknown, key: string, fallback: string): string {
 }
 
 function heartbeat(value: unknown, key: string): number {
-  const heartbeatMs = value ?? 25_000
+  const heartbeatMs = value ?? HEARTBEAT_DEFAULT_MS
   if (
     typeof heartbeatMs !== 'number' ||
     !Number.isInteger(heartbeatMs) ||
@@ -129,14 +148,16 @@ function heartbeat(value: unknown, key: string): number {
 export function normalizeRealtimeConfig(value: unknown): NormalizedRealtime | undefined {
   const block = transportBlock(value, 'realtime')
   if (!block) return undefined
-  const capacity = block.capacity ?? 256
+  const capacity = block.capacity ?? REALTIME_CAPACITY_DEFAULT
   if (
     typeof capacity !== 'number' ||
     !Number.isInteger(capacity) ||
-    capacity < 16 ||
-    capacity > 4096
+    capacity < REALTIME_CAPACITY_MIN ||
+    capacity > REALTIME_CAPACITY_MAX
   ) {
-    throw new TypeError('RUV1602 config.realtime.capacity must be an integer between 16 and 4096.')
+    throw new TypeError(
+      `RUV1602 config.realtime.capacity must be an integer between ${REALTIME_CAPACITY_MIN} and ${REALTIME_CAPACITY_MAX}.`,
+    )
   }
   return Object.freeze({
     path: transportPath(block.path, 'realtime', '/__ruvyxa/realtime'),

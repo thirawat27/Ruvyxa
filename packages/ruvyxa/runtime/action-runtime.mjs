@@ -34,7 +34,7 @@ import { fetchSiteIsCrossSite, originIsCrossSite, parseForwardedScheme } from '.
 import { requestContext, runWithRequestContext } from './request-context.mjs'
 
 /** Payload encodings a server action accepts. Mirrors `action_content_type`. */
-export const ACTION_CONTENT_TYPES = Object.freeze([
+const ACTION_CONTENT_TYPES = Object.freeze([
   'application/json',
   'application/x-www-form-urlencoded',
 ])
@@ -66,7 +66,7 @@ const MAX_REALTIME_PATH_LENGTH = 2048
  * Only the media type is compared; parameters such as `; charset=utf-8` are
  * dropped, which is what a browser sends for a plain `<form method="post">`.
  */
-export function actionContentType(headers) {
+function actionContentType(headers) {
   const declared = headers.get('content-type')
   if (typeof declared !== 'string') return null
   const mediaType = declared.split(';')[0]?.trim().toLowerCase()
@@ -172,7 +172,7 @@ export function normalizeActionResult(result, invalidated) {
 }
 
 /** True when `value` is an exported Ruvyxa action rather than a plain function. */
-export function isActionExport(value) {
+function isActionExport(value) {
   return typeof value === 'function' && value.ruvyxa?.kind === 'action'
 }
 
@@ -213,7 +213,7 @@ export function actionRealtimeEvent(action, actionName, requestPath, invalidated
 }
 
 /** Readable channel for a route, hashed once it would exceed the name limit. */
-export function realtimeRouteChannel(pathname) {
+function realtimeRouteChannel(pathname) {
   const readable = `route:${pathname}`
   if (readable.length <= MAX_REALTIME_CHANNEL_LENGTH) return readable
   let hash = 0xcbf29ce484222325n

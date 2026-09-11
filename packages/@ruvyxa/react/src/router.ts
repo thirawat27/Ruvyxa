@@ -192,6 +192,20 @@ const RSC_REQUEST_HEADER = 'x-ruvyxa-rsc'
 const FLIGHT_PROTOCOL = 'ruvyxa.flight'
 const FLIGHT_PROTOCOL_VERSION = 1
 const FLIGHT_BYTE_LIMIT = 1024 * 1024
+/**
+ * The value and nesting ceilings this decoder enforces.
+ *
+ * Named rather than written into `assertFlightValue`, because they are the
+ * same two numbers `MAX_NODES` and `MAX_DEPTH` name in
+ * `packages/ruvyxa/runtime/flight.mjs` — the module that *writes* every
+ * payload this reads. Two spellings of one bound is why
+ * `tests/fixtures/flight-conformance.json` exists: the encoder producing what
+ * this refuses is not an error anybody sees, only a soft navigation that
+ * silently becomes a full page load.
+ */
+const FLIGHT_MAX_NODES = 10_000
+/** The nesting ceiling beside {@link FLIGHT_MAX_NODES}. */
+const FLIGHT_MAX_DEPTH = 64
 const FLIGHT_CACHE_LIMIT = 16
 
 interface FlightEntry {
@@ -1106,7 +1120,20 @@ function createRouter(): RouterInstance {
   }
 }
 
-function decodeFlight(payload: string, artifactVersion: string, pathname: string): FlightValue {
+/**
+ * Read one Flight payload, or throw.
+ *
+ * Exported for `test/flight-decoder.test.mjs` rather than for callers: this is
+ * the decoder every browser runs, it is the second implementation of a format
+ * `packages/ruvyxa/runtime/flight.mjs` also decodes, and it had no test of any
+ * kind while the round trip beside the encoder made the format look covered.
+ * It is not re-exported from the package index, so it is not public API.
+ */
+export function decodeFlight(
+  payload: string,
+  artifactVersion: string,
+  pathname: string,
+): FlightValue {
   const envelope: unknown = JSON.parse(payload)
   if (!isRecord(envelope)) throw new Error('Flight payload must be an object')
   if (
@@ -1123,7 +1150,9 @@ function decodeFlight(payload: string, artifactVersion: string, pathname: string
 
 function assertFlightValue(value: unknown, depth: number, state: { count: number }): void {
   state.count += 1
-  if (state.count > 10_000 || depth > 64) throw new Error('Flight payload exceeds its value limit')
+  if (state.count > FLIGHT_MAX_NODES || depth > FLIGHT_MAX_DEPTH) {
+    throw new Error('Flight payload exceeds its value limit')
+  }
   if (
     value === null ||
     typeof value === 'string' ||

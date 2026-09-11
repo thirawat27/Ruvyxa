@@ -109,6 +109,30 @@ export const REGISTRY = [
     why: 'A structured table, and one that has drifted before.',
   },
   {
+    name: 'HEARTBEAT_MIN_MS',
+    kind: 'fixture',
+    held: 'tests/fixtures/framework-endpoint-conformance.json',
+    why: 'The socket heartbeat window, validated at config time by the renderer and again by the Axum host, which is the process a bad value reaches. The path half of that rule already had this fixture; the numbers beside it were bare literals in the Rust half, so nothing could compare them — a split is a value the renderer accepts and the server then refuses at startup naming a range the renderer just allowed.',
+  },
+  {
+    name: 'HEARTBEAT_MAX_MS',
+    kind: 'fixture',
+    held: 'tests/fixtures/framework-endpoint-conformance.json',
+    why: 'The other end of the heartbeat window. Same two validators, same fixture.',
+  },
+  {
+    name: 'REALTIME_CAPACITY_MIN',
+    kind: 'fixture',
+    held: 'tests/fixtures/framework-endpoint-conformance.json',
+    why: 'The realtime broadcast capacity range, validated twice for the reason the heartbeat window is. The Axum host also builds the channel from it, so a value it accepts and the renderer refuses is a capacity no project can ever reach.',
+  },
+  {
+    name: 'REALTIME_CAPACITY_MAX',
+    kind: 'fixture',
+    held: 'tests/fixtures/framework-endpoint-conformance.json',
+    why: 'The other end of the capacity range. Same two validators, same fixture.',
+  },
+  {
     name: 'DEPLOY_MANIFEST_KEY',
     kind: 'sameValue',
     why: 'The route-manifest key the build writes the deploy manifest under and the adapter runner reads it back from. A split reads nothing and reports no error.',

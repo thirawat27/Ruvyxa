@@ -1,0 +1,103 @@
+{
+  "contract": "ruvyxa.flight",
+  "schemaVersion": 1,
+  "$comment": [
+    "The server-components wire format, and the two decoders that read it.",
+    "",
+    "`encodeFlightPayload` in packages/ruvyxa/runtime/flight.mjs writes every",
+    "payload -- for `/__ruvyxa/flight`, for `POST /__ruvyxa/rsc`, and for the",
+    "error envelope `publicFlightError` produces. Two things read one back:",
+    "",
+    "  - decodeFlightPayload, beside the encoder in flight.mjs",
+    "  - decodeFlight in packages/@ruvyxa/react/src/router.ts",
+    "",
+    "The second is the one that runs. Nothing in this repository calls the",
+    "first outside its own unit test, and nothing at all called the second: the",
+    "decoder every browser executes on every soft navigation into a",
+    "server-components route had no test, while the round-trip test beside the",
+    "encoder made the format look covered. A change to the encoder and its",
+    "sibling decoder would have stayed green and broken every browser, and the",
+    "symptom is not an error anybody sees -- `startFlight` rejects, the router",
+    "falls back to `hardNavigate`, and a soft navigation quietly becomes a full",
+    "page load.",
+    "",
+    "The three limits were the same shape. `MAX_NODES` and `MAX_DEPTH` in",
+    "flight.mjs against bare `10_000` and `64` inside `assertFlightValue`, and",
+    "`DEFAULT_FLIGHT_LIMIT` against `FLIGHT_BYTE_LIMIT` -- one number per pair,",
+    "two spellings, and both halves in JavaScript, which is outside",
+    "scripts/check-cross-language-constants.mjs entirely: it enumerates names",
+    "declared in *both languages*, so a JavaScript-to-JavaScript pair is never",
+    "compared.",
+    "",
+    "Both decoders replay `cases` below:",
+    "  - tests/packages/ruvyxa/flight.test.mjs",
+    "  - packages/@ruvyxa/react/test/flight-decoder.test.mjs"
+  ],
+
+  "protocol": "ruvyxa.flight",
+  "protocolVersion": 1,
+
+  "$limitsComment": [
+    "`byteLimit` is enforced by the browser alone, before it decodes: the",
+    "encoder has no size bound, because the thing that produces an oversize",
+    "payload is a route rendering more data than a navigation should carry, and",
+    "refusing it at encode time would fail the page rather than the",
+    "optimisation. Recorded here so the two numbers cannot drift apart -- the",
+    "server producing what the browser refuses is a permanent hard navigation",
+    "for that route with nothing in any log."
+  ],
+  "limits": { "maxNodes": 10000, "maxDepth": 64, "byteLimit": 1048576 },
+
+  "unsafeKeys": ["__proto__", "prototype", "constructor"],
+
+  "$casesComment": [
+    "`tree` is the value under test. `accept: false` means both decoders must",
+    "refuse the payload; the message is deliberately not compared, because the",
+    "two report in different registers -- RUV1830 for the framework's own",
+    "diagnostic channel, a plain Error for the browser's.",
+    "",
+    "`build` names a shape a JSON literal cannot express, so each host",
+    "constructs it. Each bound is covered from both sides, because only one of",
+    "the two directions is visible from either alone: `atDepth`/`atNodes` sit",
+    "exactly on the limit and must be accepted, which is what catches a",
+    "decoder that *narrowed* its bound below what the encoder writes, and",
+    "`deep`/`wide` sit one step past it and must be refused, which catches one",
+    "that dropped the check. A limit that only ever fails from above passes",
+    "just as happily at half its value."
+  ],
+  "cases": [
+    { "name": "a tree exactly at maxDepth", "build": "atDepth", "accept": true },
+    { "name": "a tree exactly at maxNodes", "build": "atNodes", "accept": true },
+    { "name": "a primitive tree", "tree": "hello", "accept": true },
+    { "name": "null", "tree": null, "accept": true },
+    { "name": "a finite number", "tree": 42, "accept": true },
+    { "name": "a boolean", "tree": false, "accept": true },
+    { "name": "an empty object", "tree": {}, "accept": true },
+    { "name": "an empty array", "tree": [], "accept": true },
+    {
+      "name": "a nested element tree",
+      "tree": { "a": [1, "two", { "b": null }], "c": true },
+      "accept": true
+    },
+    {
+      "name": "a client reference",
+      "tree": { "$type": "client-reference", "id": "m_0123456789abcdef", "props": {} },
+      "accept": true
+    },
+    { "name": "the __proto__ key", "tree": { "__proto__": 1 }, "accept": false },
+    { "name": "the prototype key", "tree": { "prototype": 1 }, "accept": false },
+    { "name": "the constructor key", "tree": { "constructor": 1 }, "accept": false },
+    {
+      "name": "an unsafe key nested under a safe one",
+      "tree": { "safe": { "constructor": 1 } },
+      "accept": false
+    },
+    {
+      "name": "an unsafe key inside an array member",
+      "tree": [{ "__proto__": 1 }],
+      "accept": false
+    },
+    { "name": "one level past maxDepth", "build": "deep", "accept": false },
+    { "name": "one value past maxNodes", "build": "wide", "accept": false }
+  ]
+}

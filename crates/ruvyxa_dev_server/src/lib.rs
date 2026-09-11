@@ -158,14 +158,40 @@ pub use style::{StyleCollection, collect_styles, collect_styles_for_build, minif
 
 pub mod process;
 
-const MAX_ACTION_BODY_BYTES: usize = 1024 * 1024;
-const MAX_API_BODY_BYTES: usize = 10 * 1024 * 1024;
+/// The action payload ceiling a project that configures none is given.
+///
+/// `pub` because it is the *deployed* default as well as this host's:
+/// `ruvyxa build` writes the effective security policy into `build.json` for
+/// `createHandler` to read, and it wrote its own `1024 * 1024` there. Two
+/// literals for one decision is how `defaultMaxWidth` shipped a deployment
+/// that re-encoded images at a quality the project never chose — a default
+/// changed here would have left every deployed build on the old one, for the
+/// projects that set no value and so have nothing in the manifest to correct
+/// it. Held across the language boundary by
+/// `tests/fixtures/request-body-limit-conformance.json`.
+pub const MAX_ACTION_BODY_BYTES: usize = 1024 * 1024;
+/// The API-route payload ceiling a project that configures none is given.
+///
+/// `pub` for the reason [`MAX_ACTION_BODY_BYTES`] is.
+pub const MAX_API_BODY_BYTES: usize = 10 * 1024 * 1024;
 /// Absolute upper bound for action payload buffering, regardless of project config.
 pub const MAX_ACTION_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 /// Absolute upper bound for API payload buffering, regardless of project config.
 pub const MAX_API_BODY_LIMIT_BYTES: usize = 256 * 1024 * 1024;
-const ACTION_RATE_LIMIT_MAX: usize = 600;
-const ACTION_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+/// Server-action calls a client may make per window before it is refused.
+///
+/// `pub` for the reason [`MAX_ACTION_BODY_BYTES`] is.
+pub const ACTION_RATE_LIMIT_MAX: usize = 600;
+/// The window [`ACTION_RATE_LIMIT_MAX`] is counted over.
+///
+/// `pub` for the reason [`MAX_ACTION_BODY_BYTES`] is.
+pub const ACTION_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+// A default above the ceiling `validate_limits` enforces is a value no project
+// could ask for and this host would use anyway. Checked at compile time rather
+// than in a test, because there is no run in which it could differ.
+const _: () = assert!(MAX_ACTION_BODY_BYTES <= MAX_ACTION_BODY_LIMIT_BYTES);
+const _: () = assert!(MAX_API_BODY_BYTES <= MAX_API_BODY_LIMIT_BYTES);
+const _: () = assert!(ACTION_RATE_LIMIT_MAX <= MAX_ACTION_RATE_LIMIT_REQUESTS);
 pub const MAX_ACTION_RATE_LIMIT_REQUESTS: usize = 10_000;
 pub const MAX_ACTION_RATE_LIMIT_WINDOW_SECS: u64 = 86_400;
 /// How long in-flight work may finish after a shutdown signal, before the
@@ -1330,6 +1356,25 @@ fn is_literal_transport_path(path: &str) -> bool {
     })
 }
 
+/// The heartbeat window both socket transports accept, in milliseconds.
+///
+/// Named rather than written inline three times, and named the same thing as
+/// `HEARTBEAT_MIN_MS`/`HEARTBEAT_MAX_MS` in
+/// `packages/@ruvyxa/core/src/framework-paths.ts`, which is the config-time
+/// half of the same rule. Two validators of one bound is the arrangement
+/// `validate_socket_path` already has for the *path*, and the path half earned
+/// a shared table while the numbers stayed bare literals here — invisible to
+/// `scripts/check-cross-language-constants.mjs`, which can only see a name
+/// declared in both languages. `transportBounds` in
+/// `tests/fixtures/framework-endpoint-conformance.json` holds them now.
+pub const HEARTBEAT_MIN_MS: u64 = 5_000;
+/// The upper end of [`HEARTBEAT_MIN_MS`]'s window.
+pub const HEARTBEAT_MAX_MS: u64 = 120_000;
+/// Buffered broadcast messages one realtime channel may hold.
+pub const REALTIME_CAPACITY_MIN: usize = 16;
+/// The upper end of [`REALTIME_CAPACITY_MIN`]'s range.
+pub const REALTIME_CAPACITY_MAX: usize = 4_096;
+
 /// Build the realtime transport `config.realtime` declares, if any.
 ///
 /// The renderer has already applied the defaults and bounds; they are
@@ -1338,11 +1383,13 @@ fn realtime_runtime(config: Option<&RealtimeConfig>) -> Result<Option<RealtimeRu
     let Some(config) = config else {
         return Ok(None);
     };
-    if !(5_000..=120_000).contains(&config.heartbeat_ms) || !(16..=4_096).contains(&config.capacity)
+    if !(HEARTBEAT_MIN_MS..=HEARTBEAT_MAX_MS).contains(&config.heartbeat_ms)
+        || !(REALTIME_CAPACITY_MIN..=REALTIME_CAPACITY_MAX).contains(&config.capacity)
     {
-        return Err(RuvyxaError::Message(
-            "RUV1602 config.realtime: heartbeatMs must be 5000–120000 and capacity 16–4096".into(),
-        ));
+        return Err(RuvyxaError::Message(format!(
+            "RUV1602 config.realtime: heartbeatMs must be {HEARTBEAT_MIN_MS}–{HEARTBEAT_MAX_MS} \
+             and capacity {REALTIME_CAPACITY_MIN}–{REALTIME_CAPACITY_MAX}"
+        )));
     }
     validate_socket_path(&config.path, "realtime")?;
     let (tx, _) = broadcast::channel(config.capacity);
@@ -1358,10 +1405,10 @@ fn presence_runtime(config: Option<&CollabConfig>) -> Result<Option<PresenceRunt
     let Some(config) = config else {
         return Ok(None);
     };
-    if !(5_000..=120_000).contains(&config.heartbeat_ms) {
-        return Err(RuvyxaError::Message(
-            "RUV1602 config.collab: heartbeatMs must be 5000–120000".into(),
-        ));
+    if !(HEARTBEAT_MIN_MS..=HEARTBEAT_MAX_MS).contains(&config.heartbeat_ms) {
+        return Err(RuvyxaError::Message(format!(
+            "RUV1602 config.collab: heartbeatMs must be {HEARTBEAT_MIN_MS}–{HEARTBEAT_MAX_MS}"
+        )));
     }
     validate_socket_path(&config.path, "collab")?;
     Ok(Some(PresenceRuntime {
@@ -1594,9 +1641,19 @@ fn build_app_router(config: &ServerConfig, state: Arc<AppState>) -> Router {
         .route("/__ruvyxa/client/route-manifest.json", get(client_manifest))
         .route("/__ruvyxa/client/vendor", get(client_vendor))
         .route("/__ruvyxa/flight", get(flight_endpoint))
+        // The layer is what makes `MAX_SERVER_ACTION_BODY` real. Axum applies
+        // `DefaultBodyLimit` while extracting `Bytes`, so without one its 2 MiB
+        // default decided the bound and the handler's 4 MiB was never reached:
+        // a server-function call between the two was refused here and accepted
+        // by every deployed build, which applies the handler's number. The two
+        // routes below have always carried theirs.
         .route(
             "/__ruvyxa/rsc",
-            get(rsc_payload_endpoint).post(rsc_action_endpoint),
+            get(rsc_payload_endpoint)
+                .post(rsc_action_endpoint)
+                .layer(DefaultBodyLimit::max(
+                    framework_endpoints::MAX_SERVER_ACTION_BODY,
+                )),
         )
         .route("/__ruvyxa/image", get(dynamic_image_endpoint))
         .route(
@@ -2197,51 +2254,30 @@ async fn handle_request(
     // are axum routes in front of this fallback — so no rule can redirect
     // `/__ruvyxa/action`. The header list is decided on the request as it
     // arrived and set on whatever answers it.
-    let rule_headers = match render_pipeline::route_rule_stage(
-        &state.config.route_rules,
-        &request_path,
-        &request_target,
-        &headers,
-    ) {
-        render_pipeline::RuleStage::Answer(response) => return with_security_headers(*response),
+    let mut current = worker_bridge::ForwardedRequest::new(
+        method,
+        request_path,
+        request_target,
+        headers,
+        request_body,
+    );
+    let rule_headers = match render_pipeline::route_rule_stage(&state.config.route_rules, &current)
+    {
+        render_pipeline::RuleStage::Answer(response) => {
+            return with_security_headers(*response);
+        }
         render_pipeline::RuleStage::Continue(headers) => headers,
     };
 
     // Then the config's `proxy.handler`, for the requests its matcher names,
     // then the `beforeFiles` rewrites on whatever the proxy forwarded.
-    let forwarded = match worker_bridge::run_proxy_stage(
-        &state,
-        worker_bridge::ForwardedRequest {
-            method,
-            request_path,
-            request_target,
-            headers,
-            body: request_body,
-        },
-    )
-    .await
-    {
-        worker_bridge::StageOutcome::Answer(response) => {
-            return render_pipeline::with_rule_headers(*response, &rule_headers);
-        }
-        worker_bridge::StageOutcome::Continue(forwarded) => forwarded,
-    };
-    let worker_bridge::ForwardedRequest {
-        method,
-        mut request_path,
-        mut request_target,
-        headers,
-        body: request_body,
-    } = forwarded;
-    match render_pipeline::before_files_rewrite(
-        &state.config.route_rules,
-        &request_path,
-        &request_target,
-        &headers,
-    ) {
+    if let Some(response) = worker_bridge::run_proxy_stage(&state, &mut current).await {
+        return render_pipeline::with_rule_headers(*response, &rule_headers);
+    }
+    match render_pipeline::before_files_rewrite(&state.config.route_rules, &current) {
         Ok(Some((path, full_target))) => {
-            request_path = path;
-            request_target = full_target;
+            current.request_path = path;
+            current.request_target = full_target;
         }
         Ok(None) => {}
         Err(response) => return with_security_headers(*response),
@@ -2250,23 +2286,23 @@ async fn handle_request(
     // The content engine's live artifacts, in development. Answered after the
     // rewrites so a `beforeFiles` rule can point at one, and before rendering
     // so no route has to exist for the path.
-    if let Some(response) = worker_bridge::run_content_stage(&state, &request_path).await {
+    if let Some(response) = worker_bridge::run_content_stage(&state, &current.request_path).await {
         return render_pipeline::with_rule_headers(with_security_headers(response), &rule_headers);
     }
 
     let render_result = render_request_pooled(
         &state,
-        &request_path,
-        &request_target,
-        &method,
-        &headers,
-        request_body.as_deref(),
+        &current.request_path,
+        &current.request_target,
+        &current.method,
+        &current.headers,
+        current.body.as_deref(),
     )
     .await;
     let response = match render_result {
         Ok(response) => response,
         Err(error) => {
-            error!(%error, path = %request_path, "request rendering failed");
+            error!(%error, path = %current.request_path, "request rendering failed");
             let is_dev = state.config.watch && state.config.error_overlay;
             match &error {
                 RuvyxaError::Diagnostic(diag) => {
@@ -2284,10 +2320,15 @@ async fn handle_request(
         }
     };
     let response = render_pipeline::with_rule_headers(response, &rule_headers);
-    if state.config.watch && should_log_dev_request(&request_path) {
+    if state.config.watch && should_log_dev_request(&current.request_path) {
         println!(
             "{}",
-            dev_page_request_log(&method, &request_path, response.status(), started.elapsed())
+            dev_page_request_log(
+                &current.method,
+                &current.request_path,
+                response.status(),
+                started.elapsed()
+            )
         );
     }
     response
@@ -2472,6 +2513,206 @@ mod tests {
                 "{reserved} is reserved but nothing registers it"
             );
         }
+    }
+
+    /// The transport bounds this host enforces are the ones the renderer
+    /// enforces.
+    ///
+    /// `transportPaths` in the same fixture holds the *path* rule across the
+    /// two validators; the four numbers beside it were named constants in
+    /// `framework-paths.ts` and bare literals written three times here, so
+    /// nothing compared them. A split is not a build failure — it is a config
+    /// the renderer accepts and this host refuses at startup with a range the
+    /// renderer just allowed, or a range no project can reach because the
+    /// renderer refuses it first.
+    #[test]
+    fn transport_bounds_match_the_shared_conformance_table() {
+        let contract: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/framework-endpoint-conformance.json"
+        ))
+        .expect("the framework endpoint contract must be valid JSON");
+        let bounds = &contract["transportBounds"];
+
+        assert_eq!(
+            bounds["heartbeatMs"]["min"]
+                .as_u64()
+                .expect("heartbeat min"),
+            HEARTBEAT_MIN_MS
+        );
+        assert_eq!(
+            bounds["heartbeatMs"]["max"]
+                .as_u64()
+                .expect("heartbeat max"),
+            HEARTBEAT_MAX_MS
+        );
+        assert_eq!(
+            bounds["realtimeCapacity"]["min"]
+                .as_u64()
+                .expect("capacity min"),
+            REALTIME_CAPACITY_MIN as u64
+        );
+        assert_eq!(
+            bounds["realtimeCapacity"]["max"]
+                .as_u64()
+                .expect("capacity max"),
+            REALTIME_CAPACITY_MAX as u64
+        );
+
+        // Behaviour, not just the numbers: the validators are what a project
+        // meets, and a comparison of two constants passes on a validator that
+        // stopped reading them.
+        let realtime = |heartbeat_ms: u64, capacity: usize| RealtimeConfig {
+            path: "/__ruvyxa/realtime".to_string(),
+            heartbeat_ms,
+            capacity,
+        };
+        let default_capacity = bounds["realtimeCapacity"]["default"]
+            .as_u64()
+            .expect("capacity default") as usize;
+        for edge in [HEARTBEAT_MIN_MS, HEARTBEAT_MAX_MS] {
+            assert!(realtime_runtime(Some(&realtime(edge, default_capacity))).is_ok());
+        }
+        for outside in [HEARTBEAT_MIN_MS - 1, HEARTBEAT_MAX_MS + 1] {
+            assert!(realtime_runtime(Some(&realtime(outside, default_capacity))).is_err());
+        }
+        for outside in [REALTIME_CAPACITY_MIN - 1, REALTIME_CAPACITY_MAX + 1] {
+            let heartbeat = bounds["heartbeatMs"]["default"]
+                .as_u64()
+                .expect("heartbeat default");
+            assert!(realtime_runtime(Some(&realtime(heartbeat, outside))).is_err());
+        }
+    }
+
+    /// And the layer is load-bearing: without it the framework refuses a body
+    /// the endpoint allows.
+    ///
+    /// The structural check below reads the registration; this runs it. The
+    /// same `MethodRouter` expression is driven twice — once as
+    /// `/__ruvyxa/rsc` was registered, once as it is now — with a body of
+    /// exactly `MAX_SERVER_ACTION_BODY`. Asserting the source alone would pass
+    /// on a layer that named the wrong number or attached to the wrong half of
+    /// the route.
+    #[tokio::test]
+    async fn the_server_function_body_limit_is_the_one_the_endpoint_declares() {
+        use axum::body::Bytes;
+        use tower::ServiceExt;
+
+        async fn echo(body: Bytes) -> String {
+            body.len().to_string()
+        }
+
+        async fn post_max_body(app: Router) -> StatusCode {
+            let body = vec![b'x'; framework_endpoints::MAX_SERVER_ACTION_BODY];
+            let request = axum::http::Request::builder()
+                .method(axum::http::Method::POST)
+                .uri("/")
+                .body(Body::from(body))
+                .unwrap();
+            app.oneshot(request).await.unwrap().status()
+        }
+
+        assert_eq!(
+            post_max_body(Router::new().route("/", post(echo))).await,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "axum's default has to be the smaller number, or this rule guards nothing"
+        );
+
+        assert_eq!(
+            post_max_body(Router::new().route(
+                "/",
+                post(echo).layer(DefaultBodyLimit::max(
+                    framework_endpoints::MAX_SERVER_ACTION_BODY,
+                )),
+            ))
+            .await,
+            StatusCode::OK,
+            "the endpoint's own bound must be the one that decides"
+        );
+    }
+
+    /// A route whose handler buffers the request body says how much it will
+    /// buffer.
+    ///
+    /// `DefaultBodyLimit` is 2 MiB unless a route overrides it, and axum
+    /// applies it while *extracting* `Bytes` — before the handler runs, and so
+    /// before the handler's own bound is ever consulted. `/__ruvyxa/rsc`
+    /// carried no layer, so `MAX_SERVER_ACTION_BODY` was unreachable: a
+    /// server-function call between 2 MiB and 4 MiB was refused under
+    /// `ruvyxa dev`, `ruvyxa start` and `ruvyxa preview`, and accepted by
+    /// every deployed build and by the standalone server, both of which apply
+    /// the handler's number. One call, two answers, decided by where the
+    /// project was running — and the endpoint that reports it is the one a
+    /// form submission with a file in it reaches first.
+    ///
+    /// The two neighbours already had their layer, which is what made the
+    /// third look deliberate. Read out of the source in the direction the
+    /// guard reads: from the handlers that extract a body, to the routes that
+    /// register them.
+    #[test]
+    fn every_route_that_buffers_a_body_declares_its_limit() {
+        let endpoints = include_str!("framework_endpoints.rs");
+        let mut buffering = Vec::new();
+        for fragment in endpoints.split("async fn ").skip(1) {
+            let (name, rest) = fragment
+                .split_once('(')
+                .expect("a function declaration must open its parameter list");
+            // To the body's opening brace, not to the first `)`: rustfmt wraps
+            // these signatures one parameter per line and the first `)` closes
+            // `State(state)`, which put the body parameter outside the window
+            // and read every handler as buffering nothing.
+            let signature = rest
+                .split_once('{')
+                .expect("a function signature must be followed by its body")
+                .0;
+            if signature.contains(": Bytes") {
+                buffering.push(name.trim().to_string());
+            }
+        }
+        assert!(
+            buffering.len() >= 3,
+            "only {} body-buffering handlers were read; the parse missed some",
+            buffering.len()
+        );
+
+        let source = include_str!("lib.rs");
+        let (_, body) = source
+            .split_once("fn build_app_router(")
+            .expect("build_app_router must exist");
+        let body = body
+            .split_once("\nfn ")
+            .map_or(body, |(function, _)| function);
+
+        let mut checked = 0;
+        for fragment in body.split(".route(").skip(1) {
+            let Some(rest) = fragment.trim_start().strip_prefix('"') else {
+                continue;
+            };
+            let path = rest
+                .split_once('"')
+                .expect("a route literal must be closed")
+                .0;
+            let registration = fragment
+                .split_once("\n        .route(")
+                .map_or(fragment, |(entry, _)| entry);
+            let Some(handler) = buffering
+                .iter()
+                .find(|handler| registration.contains(handler.as_str()))
+            else {
+                continue;
+            };
+            checked += 1;
+            assert!(
+                registration.contains("DefaultBodyLimit"),
+                "{path} registers {handler}, which extracts the body into memory, and \
+                 declares no DefaultBodyLimit — so axum's 2 MiB default decides the bound \
+                 instead of the one the handler enforces, and this host answers a request \
+                 every deployed build accepts"
+            );
+        }
+        assert!(
+            checked >= 3,
+            "only {checked} body-buffering routes were matched; the parse missed some"
+        );
     }
 
     /// Both hosts answer `transportPaths` the same way.
@@ -3758,6 +3999,57 @@ Host: localhost
         assert!(
             allowed <= 8192 * 4,
             "no slot may exceed its budget, allowed {allowed}"
+        );
+    }
+
+    /// The request-body ceilings this host enforces are the ones every other
+    /// host enforces.
+    ///
+    /// Four implementations hold these three numbers and only one of them is
+    /// in this crate. `build.rs` writes the effective policy into the manifest
+    /// a deployed build reads, and it carried its own `1024 * 1024` and
+    /// `10 * 1024 * 1024` beside the config lookups — so a default changed
+    /// here would have moved for `ruvyxa dev` and `ruvyxa start` and stayed
+    /// put for every deployment of a project that configured nothing. It names
+    /// these constants now; this asserts what the other language is holding
+    /// them to.
+    #[test]
+    fn request_body_limits_match_the_shared_conformance_table() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/request-body-limit-conformance.json"
+        ))
+        .unwrap();
+        let limits = &fixture["limits"];
+
+        assert_eq!(
+            limits["action"]["bytes"].as_u64().expect("action bytes"),
+            MAX_ACTION_BODY_BYTES as u64
+        );
+        assert_eq!(
+            limits["api"]["bytes"].as_u64().expect("api bytes"),
+            MAX_API_BODY_BYTES as u64
+        );
+        assert_eq!(
+            limits["serverFunction"]["bytes"]
+                .as_u64()
+                .expect("serverFunction bytes"),
+            framework_endpoints::MAX_SERVER_ACTION_BODY as u64
+        );
+        assert_eq!(
+            limits["action"]["configCeiling"]
+                .as_u64()
+                .expect("action ceiling"),
+            MAX_ACTION_BODY_LIMIT_BYTES as u64
+        );
+        assert_eq!(
+            limits["api"]["configCeiling"]
+                .as_u64()
+                .expect("api ceiling"),
+            MAX_API_BODY_LIMIT_BYTES as u64
+        );
+        assert_eq!(
+            fixture["refusalStatus"].as_u64().expect("refusalStatus"),
+            u64::from(StatusCode::PAYLOAD_TOO_LARGE.as_u16())
         );
     }
 

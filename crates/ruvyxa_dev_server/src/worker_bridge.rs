@@ -2,6 +2,8 @@
 //! format, plus the request stages that cross to the worker: `proxy.handler`
 //! and the content engine's live artifacts.
 
+use std::sync::OnceLock;
+
 use axum::body::Body;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
@@ -37,18 +39,6 @@ pub(crate) fn wire_response_into_response(response: WireResponse) -> Result<Resp
         output.headers_mut().append(name, value);
     }
     Ok(output)
-}
-
-pub(crate) fn wire_headers(headers: &HeaderMap) -> Vec<(String, String)> {
-    headers
-        .iter()
-        .filter_map(|(name, value)| {
-            value
-                .to_str()
-                .ok()
-                .map(|value| (name.to_string(), value.to_string()))
-        })
-        .collect()
 }
 
 pub(crate) fn encode_body(body: &[u8]) -> String {
@@ -215,14 +205,63 @@ pub(crate) struct ForwardedRequest {
     pub(crate) request_target: String,
     pub(crate) headers: HeaderMap,
     pub(crate) body: Option<Vec<u8>>,
+    /// `headers` as the route-rule evaluator reads them, built at most once.
+    ///
+    /// Three stages of one request ask for the same list — `headers()` and
+    /// `redirects()`, the `proxy.matcher`, and the `beforeFiles` rewrite — and
+    /// each used to build its own `Vec<(String, String)>` over every header.
+    ///
+    /// It lives *on* the request rather than beside it so it cannot describe
+    /// headers that are no longer the request's: `proxy.handler` answering
+    /// with a different `Request` builds a whole new `ForwardedRequest`, whose
+    /// list starts empty. A rewrite that changes only the path leaves it valid,
+    /// because the path is not what it holds.
+    ///
+    /// `OnceLock` rather than `OnceCell` because this is borrowed across the
+    /// `await` on the worker, and rather than an eager build because a project
+    /// that configures no rule and no proxy asks for the list zero times and
+    /// must not pay for it.
+    rule_headers: OnceLock<Vec<(String, String)>>,
 }
 
-/// What a request stage decided.
-pub(crate) enum StageOutcome {
-    /// The stage answered; nothing further runs.
-    Answer(Box<Response>),
-    /// Continue with this request, possibly changed.
-    Continue(ForwardedRequest),
+impl ForwardedRequest {
+    pub(crate) fn new(
+        method: String,
+        request_path: String,
+        request_target: String,
+        headers: HeaderMap,
+        body: Option<Vec<u8>>,
+    ) -> Self {
+        Self {
+            method,
+            request_path,
+            request_target,
+            headers,
+            body,
+            rule_headers: OnceLock::new(),
+        }
+    }
+
+    /// The header pairs every rule and matcher on this request reads.
+    pub(crate) fn rule_headers(&self) -> &[(String, String)] {
+        self.rule_headers
+            .get_or_init(|| ruvyxa_middleware::route_rules::header_pairs(&self.headers))
+    }
+
+    /// This request as a rule, a matcher, or a rewrite reads it.
+    ///
+    /// One constructor rather than the same four fields wired up at each of
+    /// the three call sites: `query` is taken from the target and `path` from
+    /// the canonical path, and a stage that mixed the two would match rules
+    /// against a string routing never resolved.
+    pub(crate) fn rule_request(&self) -> ruvyxa_middleware::RuleRequest<'_> {
+        ruvyxa_middleware::RuleRequest {
+            path: &self.request_path,
+            query: self.request_target.split_once('?').map(|(_, query)| query),
+            headers: self.rule_headers(),
+            host: ruvyxa_middleware::route_rules::host_header(&self.headers),
+        }
+    }
 }
 
 /// Run the config's `proxy.handler` on a request its matcher names.
@@ -232,45 +271,51 @@ pub(crate) enum StageOutcome {
 /// the request; one that returns a `Request` forwards it — a different path is
 /// a rewrite, different headers are carried — and one that returns nothing
 /// forwards the request unchanged.
-pub(crate) async fn run_proxy_stage(state: &AppState, current: ForwardedRequest) -> StageOutcome {
+///
+/// Answers with `Some(response)`, or with `None` after leaving `current` as the
+/// request the remaining stages continue with: untouched, or replaced whole by
+/// the one the handler built. The request is borrowed rather than moved through
+/// a two-variant outcome, because carrying it back by value made "continue" the
+/// large half of an enum every request passes through, and boxing that half
+/// would have put a heap allocation on the path of every request that
+/// configures no proxy at all.
+pub(crate) async fn run_proxy_stage(
+    state: &AppState,
+    current: &mut ForwardedRequest,
+) -> Option<Box<Response>> {
     let (Some(proxy), Some(worker)) = (state.config.proxy.as_ref(), state.worker.as_deref()) else {
-        return StageOutcome::Continue(current);
+        return None;
     };
-    let header_list = wire_headers(&current.headers);
-    let rule_request = ruvyxa_middleware::RuleRequest {
-        path: &current.request_path,
-        query: current
-            .request_target
-            .split_once('?')
-            .map(|(_, query)| query),
-        headers: &header_list,
-        host: ruvyxa_middleware::route_rules::host_header(&current.headers),
-    };
-    if !proxy.wants(&rule_request) {
-        return StageOutcome::Continue(current);
+    if !proxy.wants(&current.rule_request()) {
+        return None;
     }
     let wire = WireRequest {
         method: current.method.clone(),
         path: wire_target(&current.request_path, &current.request_target),
-        headers: header_list,
+        // Copied rather than moved: the list belongs to the request, and the
+        // request outlives this call whenever the handler forwards it.
+        headers: current.rule_headers().to_vec(),
         body_base64: current.body.as_deref().map(encode_body),
     };
     match worker.execute_proxy(&wire).await {
         Err(error) => {
             tracing::error!(%error, path = %current.request_path, "proxy.handler failed");
-            StageOutcome::Answer(Box::new(internal_error(state, &error)))
+            Some(Box::new(internal_error(state, &error)))
         }
         Ok(WireRequestResult::Response { response }) => match wire_response_into_response(response)
         {
-            Ok(response) => StageOutcome::Answer(Box::new(response)),
+            Ok(response) => Some(Box::new(response)),
             Err(error) => {
                 tracing::error!(%error, "proxy.handler returned an unusable response");
-                StageOutcome::Answer(Box::new(internal_error(state, &error)))
+                Some(Box::new(internal_error(state, &error)))
             }
         },
         Ok(WireRequestResult::Request { request }) => match forwarded_request(request) {
-            Ok(next) => StageOutcome::Continue(next),
-            Err(response) => StageOutcome::Answer(response),
+            Ok(next) => {
+                *current = next;
+                None
+            }
+            Err(response) => Some(response),
         },
     }
 }
@@ -331,13 +376,13 @@ fn forwarded_request(next: WireRequest) -> std::result::Result<ForwardedRequest,
         .split_once('?')
         .map_or_else(|| request_target.clone(), |(path, _)| path.to_string());
     let body = decode_body(next.body_base64.as_deref()).map_err(refuse)?;
-    Ok(ForwardedRequest {
+    Ok(ForwardedRequest::new(
         method,
         request_path,
         request_target,
-        headers: wire_headers_to_map(&next.headers),
+        wire_headers_to_map(&next.headers),
         body,
-    })
+    ))
 }
 
 #[cfg(test)]
@@ -383,6 +428,53 @@ mod tests {
                 "{target} must be rejected"
             );
         }
+    }
+
+    /// One request builds one header list, and a request the proxy replaced
+    /// builds its own.
+    ///
+    /// Three stages read this list on every request that configures a rule or
+    /// a proxy — `headers()`/`redirects()`, the matcher, and the `beforeFiles`
+    /// rewrite — and each used to build its own copy over every header. Sharing
+    /// it is only safe because it lives on the request: a handler that answers
+    /// with a different `Request` produces a different `ForwardedRequest`, so
+    /// there is no list to go stale.
+    #[test]
+    fn the_rule_header_list_is_built_once_and_belongs_to_its_request() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-team", HeaderValue::from_static("blue"));
+        let request = ForwardedRequest::new(
+            "GET".to_string(),
+            "/a".to_string(),
+            "/a?q=1".to_string(),
+            headers,
+            None,
+        );
+
+        let first = request.rule_headers();
+        assert_eq!(first, [("x-team".to_string(), "blue".to_string())]);
+        assert!(
+            std::ptr::eq(first, request.rule_headers()),
+            "asking twice must not build the list twice"
+        );
+
+        let rule = request.rule_request();
+        assert_eq!(rule.path, "/a");
+        assert_eq!(rule.query, Some("q=1"));
+        assert_eq!(rule.headers, first);
+
+        let replaced = forwarded_request(WireRequest {
+            method: "GET".to_string(),
+            path: "/b".to_string(),
+            headers: vec![("x-team".to_string(), "red".to_string())],
+            body_base64: None,
+        })
+        .expect("a forwarded request with a valid target");
+        assert_eq!(
+            replaced.rule_headers(),
+            [("x-team".to_string(), "red".to_string())],
+            "the replacement reads its own headers, not the ones it replaced"
+        );
     }
 
     #[test]
