@@ -3059,11 +3059,9 @@ fn find_api_renderer(root: &Path) -> Option<PathBuf> {
 pub fn find_runtime_script(root: &Path, file_name: &str) -> Option<PathBuf> {
     if file_name == "ssr-renderer.mjs"
         && let Ok(renderer) = std::env::var("RUVYXA_SSR_RENDERER")
+        && let Some(path) = accepted_runtime_script(&PathBuf::from(renderer), file_name)
     {
-        let path = PathBuf::from(renderer);
-        if path.is_file() {
-            return Some(path);
-        }
+        return Some(path);
     }
 
     if let Ok(cwd) = std::env::current_dir()
@@ -3079,12 +3077,50 @@ pub fn find_runtime_script(root: &Path, file_name: &str) -> Option<PathBuf> {
 fn find_upwards(start: &Path, relative: &Path, file_name: &str) -> Option<PathBuf> {
     let mut current = start;
     loop {
-        let candidate = current.join(relative).join(file_name);
-        if candidate.is_file() {
-            return Some(candidate);
+        if let Some(path) = accepted_runtime_script(&current.join(relative), file_name) {
+            return Some(path);
         }
         current = current.parent()?;
     }
+}
+
+/// Every runtime script this crate hands to a JavaScript runtime as its entry
+/// point comes through here, and this is the whole of what is accepted:
+///
+/// - a regular file, once symlinks are resolved,
+/// - whose name is exactly the script asked for,
+/// - inside a directory named `runtime`.
+///
+/// The directory it is looked for in is built from the project root, the
+/// working directory, or `RUVYXA_SSR_RENDERER` — all of which the developer
+/// controls, and none of which should be able to point a spawn at a file that
+/// merely happens to be on disk under a name that looks right. A path that
+/// resolves somewhere else, or to something that is not the script, is not
+/// returned at all; the caller then reports the script as missing.
+fn accepted_runtime_script(directory: &Path, file_name: &str) -> Option<PathBuf> {
+    if file_name.is_empty()
+        || !file_name.ends_with(".mjs")
+        || file_name.contains(['/', '\\'])
+        || file_name == "."
+        || file_name == ".."
+    {
+        return None;
+    }
+    let candidate = directory.join(file_name);
+    // Canonical, then without the `\?\` prefix Windows puts on it: Node
+    // reads that prefix as a drive letter and refuses the entry point.
+    let resolved =
+        ruvyxa_diagnostics::without_verbatim_prefix(&std::fs::canonicalize(&candidate).ok()?);
+    if !resolved.is_file() {
+        return None;
+    }
+    if resolved.file_name()?.to_str()? != file_name {
+        return None;
+    }
+    if resolved.parent()?.file_name()?.to_str()? != "runtime" {
+        return None;
+    }
+    Some(resolved)
 }
 
 /// Run a one-shot renderer process under a bound.
@@ -3291,6 +3327,68 @@ pub(crate) fn action_file_for(route: &RouteEntry) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A runtime script is accepted only where the package puts it, under the
+    /// name asked for. A file of the right name in the wrong directory, a
+    /// directory of the right name, or a name with a path in it must all come
+    /// back as "not found" rather than as something to execute.
+    #[test]
+    fn a_runtime_script_is_only_accepted_from_a_runtime_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = temp.path().join("packages/ruvyxa/runtime");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::write(runtime.join("worker-pool.mjs"), "export {};").unwrap();
+
+        let found = accepted_runtime_script(&runtime, "worker-pool.mjs").unwrap();
+        assert_eq!(found.file_name().unwrap(), "worker-pool.mjs");
+        assert_eq!(found.parent().unwrap().file_name().unwrap(), "runtime");
+
+        let elsewhere = temp.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("worker-pool.mjs"), "export {};").unwrap();
+        assert!(accepted_runtime_script(&elsewhere, "worker-pool.mjs").is_none());
+
+        std::fs::create_dir_all(runtime.join("dir.mjs")).unwrap();
+        assert!(accepted_runtime_script(&runtime, "dir.mjs").is_none());
+
+        assert!(accepted_runtime_script(&runtime, "../worker-pool.mjs").is_none());
+        assert!(accepted_runtime_script(&runtime, "worker-pool.js").is_none());
+        assert!(accepted_runtime_script(&runtime, "").is_none());
+    }
+
+    /// The upward walk stops at the first ancestor that has the script, and
+    /// the path it returns is the resolved one, not the one it was asked
+    /// about — so `root/../../x` cannot smuggle a location past the check.
+    #[test]
+    fn the_upward_walk_finds_the_nearest_packaged_script() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = temp.path().join("node_modules/ruvyxa/runtime");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::write(runtime.join("worker-pool.mjs"), "export {};").unwrap();
+        let deep = temp.path().join("apps/site/src");
+        std::fs::create_dir_all(&deep).unwrap();
+
+        let found = find_upwards(
+            &deep,
+            Path::new("node_modules/ruvyxa/runtime"),
+            "worker-pool.mjs",
+        )
+        .unwrap();
+        assert_eq!(
+            found,
+            ruvyxa_diagnostics::without_verbatim_prefix(
+                &std::fs::canonicalize(runtime.join("worker-pool.mjs")).unwrap()
+            )
+        );
+        assert!(
+            find_upwards(
+                &deep,
+                Path::new("node_modules/ruvyxa/runtime"),
+                "missing.mjs"
+            )
+            .is_none()
+        );
+    }
 
     /// The rendered document carries the strategy's caching contract.
     ///
