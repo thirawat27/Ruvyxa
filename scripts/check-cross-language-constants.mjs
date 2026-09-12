@@ -301,7 +301,8 @@ export const SOURCE_PATHSPEC = [
 ]
 
 /**
- * Every tracked source file of either language, in `git ls-files` order.
+ * Every source file of either language git knows about, in `git ls-files`
+ * order — tracked, or merely not ignored.
  *
  * Run from `REPO_ROOT`, not from wherever the caller happens to be. A git
  * pathspec is resolved against the working directory, so `crates/**` asked from
@@ -309,13 +310,26 @@ export const SOURCE_PATHSPEC = [
  * and this gate answers a question whose correct answer is "nothing to report"
  * either way, so it passed. `pnpm -r test` runs each package's script from that
  * package's own directory, which is exactly the caller it was silent for.
+ *
+ * `--others --exclude-standard` for the same reason. A bare `ls-files` lists
+ * the index, so a file that has not been `git add`ed is invisible to this gate
+ * until the moment it is committed — which is when CI, not the author, runs
+ * it. Two new files declared `SOURCE_EXTENSIONS` and `MANIFEST_VERSION`
+ * beside a Rust constant of the same name; the whole battery was green on the
+ * working tree that produced them and red on the first CI run after the
+ * commit. `check-silent-defaults.mjs` and `check-runtime-exports.mjs` already
+ * read the tree this way.
  */
 export function trackedSources() {
   return (
-    execFileSync('git', ['ls-files', ...SOURCE_PATHSPEC], {
-      encoding: 'utf8',
-      cwd: REPO_ROOT,
-    })
+    execFileSync(
+      'git',
+      ['ls-files', '--cached', '--others', '--exclude-standard', '--', ...SOURCE_PATHSPEC],
+      {
+        encoding: 'utf8',
+        cwd: REPO_ROOT,
+      },
+    )
       .split('\n')
       .filter(Boolean)
       // A file deleted in the working tree and not yet staged is still listed.

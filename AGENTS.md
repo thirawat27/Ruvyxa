@@ -502,6 +502,16 @@ before believing it.
     one naming a `tests/packages` react directory that has never existed, and a fixture called
     `endpoint-contract.json` that was never created at all. Paths written in string literals are
     ignored, so only comments are held.
+- A gate that walks `git ls-files` walks the index, and a new file is not in the index until it is
+  added. Every repository gate reads `--cached --others --exclude-standard` — tracked, or merely not
+  ignored — because the alternative is a gate that runs green on the working tree that produced a
+  file and red on the first CI run after the commit, which is the one run the author is not
+  watching. `check-cross-language-constants.mjs` and the Rust half of `check-silent-defaults.mjs`
+  both read the bare index until a commit carrying two new files (`scripts/check-stale-dist.mjs`,
+  `packages/@ruvyxa/react/test/flight-decoder.test.mjs`) declared `SOURCE_EXTENSIONS` and
+  `MANIFEST_VERSION` beside Rust constants of the same name and the battery, green locally three
+  times over, failed on macOS. A gate's own test should write an untracked probe and assert it is
+  reached; `reaches a file that exists but is not yet tracked` is the shape.
 - A shared record that several workers may be finishing at once is decided by **how many are still
   in flight**, not by what its state currently reads. `ArtifactTaskGraph::publish` is `begin` then
   `complete` with the lock released between them, so route builds that share one module overlap

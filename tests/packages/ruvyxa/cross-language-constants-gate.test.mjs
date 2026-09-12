@@ -290,6 +290,26 @@ describe('which files the gate can see', () => {
     )
   })
 
+  /**
+   * A file that has not been `git add`ed is still a file this gate answers
+   * for. A bare `git ls-files` lists the index, so a new script or test sat
+   * outside the gate until the commit that made it tracked — which is when CI
+   * runs, not the author. Two such files went green on the working tree that
+   * produced them and red on the next CI run.
+   */
+  it('reaches a file that exists but is not yet tracked', () => {
+    const probe = repoFile('scripts/zz-cross-language-probe.mjs')
+    writeFileSync(probe, '// probe\n')
+    try {
+      assert.ok(
+        trackedSources().includes('scripts/zz-cross-language-probe.mjs'),
+        'an untracked source file is invisible to the gate until it is committed',
+      )
+    } finally {
+      rmSync(probe, { force: true })
+    }
+  })
+
   it('registers every name the widened pathspec brings into reach', () => {
     const tracked = trackedSources()
     const { failures } = inspect(

@@ -37,7 +37,7 @@ const FIX = process.argv.includes('--fix')
 const EMIT_SUFFIXES = ['.d.ts.map', '.d.ts', '.js.map', '.js', '.d.mts', '.mjs']
 
 /** Extensions a source file may carry for one emitted base path. */
-const SOURCE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts']
+const TSC_SOURCE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts']
 
 /**
  * Files under `outDir` that are not emitted from a single source module and so
@@ -86,7 +86,7 @@ for (const dir of workspacePackageDirs().dirs) {
       unmapped.push(`${dir}/dist/${emitted}`)
       continue
     }
-    const hasSource = SOURCE_EXTENSIONS.some((extension) =>
+    const hasSource = TSC_SOURCE_EXTENSIONS.some((extension) =>
       existsSync(join(srcPath, `${base}${extension}`)),
     )
     if (!hasSource) orphans.push({ path: `${dir}/dist/${emitted}`, file })

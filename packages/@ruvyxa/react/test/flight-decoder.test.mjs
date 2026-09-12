@@ -28,7 +28,7 @@ const routerSource = readFileSync(
   'utf8',
 )
 
-const MANIFEST_VERSION = '0123456789abcdef'
+const ARTIFACT_VERSION = '0123456789abcdef'
 const ROUTE = '/guide'
 
 /**
@@ -43,7 +43,7 @@ function envelope(tree, overrides = {}) {
   return JSON.stringify({
     protocol: contract.protocol,
     protocolVersion: contract.protocolVersion,
-    manifestVersion: MANIFEST_VERSION,
+    manifestVersion: ARTIFACT_VERSION,
     route: ROUTE,
     tree,
     ...overrides,
@@ -95,10 +95,10 @@ describe('flight decoder conformance', () => {
 
     it(`${testCase.accept ? 'accepts' : 'refuses'} ${testCase.name}`, () => {
       if (testCase.accept) {
-        assert.deepEqual(decodeFlight(payload, MANIFEST_VERSION, ROUTE), tree)
+        assert.deepEqual(decodeFlight(payload, ARTIFACT_VERSION, ROUTE), tree)
         return
       }
-      assert.throws(() => decodeFlight(payload, MANIFEST_VERSION, ROUTE))
+      assert.throws(() => decodeFlight(payload, ARTIFACT_VERSION, ROUTE))
     })
   }
 
@@ -110,14 +110,14 @@ describe('flight decoder conformance', () => {
       { route: '/elsewhere' },
     ]) {
       assert.throws(
-        () => decodeFlight(envelope({ ok: true }, override), MANIFEST_VERSION, ROUTE),
+        () => decodeFlight(envelope({ ok: true }, override), ARTIFACT_VERSION, ROUTE),
         Object.keys(override)[0],
       )
     }
   })
 
   it('refuses a payload that is not an object', () => {
-    assert.throws(() => decodeFlight('"a string"', MANIFEST_VERSION, ROUTE))
-    assert.throws(() => decodeFlight('[]', MANIFEST_VERSION, ROUTE))
+    assert.throws(() => decodeFlight('"a string"', ARTIFACT_VERSION, ROUTE))
+    assert.throws(() => decodeFlight('[]', ARTIFACT_VERSION, ROUTE))
   })
 })

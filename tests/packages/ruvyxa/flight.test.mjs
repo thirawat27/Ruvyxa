@@ -75,7 +75,7 @@ describe('Flight transport contract', () => {
  * that runs.
  */
 describe('Flight wire conformance', () => {
-  const MANIFEST_VERSION = '0123456789abcdef'
+  const ARTIFACT_VERSION = '0123456789abcdef'
   const ROUTE = '/guide'
 
   /** The envelope both decoders are handed, byte for byte. */
@@ -83,7 +83,7 @@ describe('Flight wire conformance', () => {
     return JSON.stringify({
       protocol: contract.protocol,
       protocolVersion: contract.protocolVersion,
-      manifestVersion: MANIFEST_VERSION,
+      manifestVersion: ARTIFACT_VERSION,
       route: ROUTE,
       tree,
     })
@@ -139,11 +139,11 @@ describe('Flight wire conformance', () => {
         // encode is deterministic, while the browser returns `JSON.parse`'s
         // own result. What has to agree is the data and the accept/refuse
         // answer, not the prototype.
-        const decoded = decodeFlightPayload(payload, MANIFEST_VERSION).tree
+        const decoded = decodeFlightPayload(payload, ARTIFACT_VERSION).tree
         assert.deepEqual(JSON.parse(JSON.stringify(decoded)), JSON.parse(JSON.stringify(tree)))
         return
       }
-      assert.throws(() => decodeFlightPayload(payload, MANIFEST_VERSION))
+      assert.throws(() => decodeFlightPayload(payload, ARTIFACT_VERSION))
     })
   }
 
@@ -152,7 +152,7 @@ describe('Flight wire conformance', () => {
     // decision. This decoder is the one an encode goes through, so it
     // normalizes; `decodeFlight` in @ruvyxa/react feeds React directly and
     // returns what `JSON.parse` produced.
-    const decoded = decodeFlightPayload(envelope({ b: 1, a: 2 }), MANIFEST_VERSION).tree
+    const decoded = decodeFlightPayload(envelope({ b: 1, a: 2 }), ARTIFACT_VERSION).tree
     assert.equal(Object.getPrototypeOf(decoded), null)
     assert.deepEqual(Object.keys(decoded), ['a', 'b'])
   })

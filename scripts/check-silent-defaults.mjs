@@ -346,10 +346,18 @@ const ALLOWED_JS = [
   },
 ]
 
-const tracked = execFileSync('git', ['ls-files', 'crates/**/*.rs'], {
-  encoding: 'utf8',
-  cwd: REPO_ROOT,
-})
+// Tracked files *and* untracked ones that are not ignored, the same walk the
+// JavaScript pass below makes. A bare `ls-files` lists the index, so a new
+// `.rs` file sat outside this gate until the commit that made it tracked —
+// which is when CI runs it, not the author.
+const tracked = execFileSync(
+  'git',
+  ['ls-files', '--cached', '--others', '--exclude-standard', '--', 'crates/**/*.rs'],
+  {
+    encoding: 'utf8',
+    cwd: REPO_ROOT,
+  },
+)
   .split('\n')
   .filter(Boolean)
   // `--cached` also lists a file deleted in the working tree and not yet
