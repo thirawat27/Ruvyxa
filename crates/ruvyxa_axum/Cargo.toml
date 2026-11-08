@@ -1,6 +1,6 @@
 [package]
 name = "ruvyxa-axum"
-version = "1.1.5"
+version = "1.1.6"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -22,7 +22,7 @@ categories = ["web-programming::http-server"]
 # entry enables `ws`, which a published crate must not make its consumers
 # compile for. `Router` and the middleware types need no feature at all.
 axum = { version = "0.8.9", default-features = false }
-tokio = { version = "1.53.1", features = ["fs"] }
+tokio = { version = "1.54.1", features = ["fs"] }
 tower = { version = "0.5.3" }
 tower-http = { version = "0.7", features = ["fs"] }
 
@@ -32,7 +32,7 @@ tower-http = { version = "0.7", features = ["fs"] }
 axum = { version = "0.8.9", features = ["http1", "json", "tokio"] }
 serde_json.workspace = true
 tempfile.workspace = true
-tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread"] }
+tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread"] }
 tower = { version = "0.5.3", features = ["util"] }
 
 [lints]

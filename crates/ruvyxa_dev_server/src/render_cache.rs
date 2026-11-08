@@ -406,6 +406,12 @@ pub struct RenderCache {
     /// flag, so a host that cannot write its prerender directory shows up as a
     /// climbing number rather than as unexplained render load.
     forced: RwLock<ForcedRevalidations>,
+    /// Bumped by every invalidation, while it holds the entry lock.
+    ///
+    /// A render reads it before it starts and stores through
+    /// [`RenderCache::put_since`], which declines to store once it has moved:
+    /// the render read files an invalidation has since declared out of date.
+    generation: AtomicU64,
     capacity: usize,
     ttl: Duration,
     hits: AtomicU64,
@@ -418,6 +424,7 @@ impl RenderCache {
             entries: RwLock::new(HashMap::with_capacity(capacity)),
             order: RwLock::new(RecencyList::with_capacity(capacity)),
             forced: RwLock::new(ForcedRevalidations::default()),
+            generation: AtomicU64::new(0),
             capacity,
             ttl: Duration::from_secs(ttl_secs),
             hits: AtomicU64::new(0),
@@ -542,6 +549,25 @@ impl RenderCache {
     /// the original, which made a second full copy of every rendered page on top
     /// of the one this method has to make to build the `Arc`.
     pub async fn put(&self, key: String, value: String) -> CachedDocument {
+        self.store(None, key, value).await
+    }
+
+    /// The invalidation generation a render should start from. See
+    /// [`RenderCache::put_since`].
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// [`RenderCache::put`] for a render that began at `generation`.
+    ///
+    /// The document is returned either way, so the request that rendered it is
+    /// answered. It is stored only if no invalidation ran since the render
+    /// began; otherwise the next request renders afresh.
+    pub async fn put_since(&self, generation: u64, key: String, value: String) -> CachedDocument {
+        self.store(Some(generation), key, value).await
+    }
+
+    async fn store(&self, since: Option<u64>, key: String, value: String) -> CachedDocument {
         let stored: Arc<str> = Arc::from(value);
         let compressed = Arc::new(OnceLock::new());
 
@@ -559,6 +585,15 @@ impl RenderCache {
         let key: Arc<str> = Arc::from(key);
         let mut entries = self.entries.write().await;
         let mut order = self.order.write().await;
+        // Compared under the entry lock, which every invalidation holds while
+        // it bumps the generation: no invalidation can land between this check
+        // and the insert below.
+        if since.is_some_and(|since| since != self.generation.load(Ordering::Acquire)) {
+            return CachedDocument {
+                html: stored,
+                compressed,
+            };
+        }
 
         if entries.contains_key(&*key) {
             // A replacement becomes the most recently used value.
@@ -600,10 +635,14 @@ impl RenderCache {
     /// in every variant, so a change to what a route key matches had to be made
     /// in each copy or the two halves of the same operation would disagree.
     fn retain_matching(
+        &self,
         entries: &mut HashMap<Arc<str>, CacheEntry>,
         order: &mut RecencyList,
         discard: impl Fn(&str) -> bool,
     ) -> usize {
+        // Every invalidation moves the generation, matched or not: a render in
+        // flight cannot know which entries it will write until it writes them.
+        self.generation.fetch_add(1, Ordering::AcqRel);
         let before = entries.len();
         entries.retain(|key, _| !discard(key));
         order.retain(|key| !discard(key));
@@ -615,7 +654,7 @@ impl RenderCache {
     pub async fn invalidate_all(&self) -> usize {
         let mut entries = self.entries.write().await;
         let mut order = self.order.write().await;
-        Self::retain_matching(&mut entries, &mut order, |_| true)
+        self.retain_matching(&mut entries, &mut order, |_| true)
     }
 
     /// Drop every cached render of one concrete URL and force the next one.
@@ -701,7 +740,7 @@ impl RenderCache {
     pub async fn invalidate_route(&self, route_path: &str) -> usize {
         let mut entries = self.entries.write().await;
         let mut order = self.order.write().await;
-        Self::retain_matching(&mut entries, &mut order, |key| {
+        self.retain_matching(&mut entries, &mut order, |key| {
             cache_key_matches_route(key, route_path)
         })
     }
@@ -710,7 +749,7 @@ impl RenderCache {
     pub fn invalidate_all_blocking(&self) -> usize {
         let mut entries = self.entries.blocking_write();
         let mut order = self.order.blocking_write();
-        Self::retain_matching(&mut entries, &mut order, |_| true)
+        self.retain_matching(&mut entries, &mut order, |_| true)
     }
 
     /// Invalidate SSR/client entries belonging to a route pattern.
@@ -722,7 +761,7 @@ impl RenderCache {
     pub fn invalidate_route_blocking(&self, route_path: &str) -> usize {
         let mut entries = self.entries.blocking_write();
         let mut order = self.order.blocking_write();
-        Self::retain_matching(&mut entries, &mut order, |key| {
+        self.retain_matching(&mut entries, &mut order, |key| {
             cache_key_matches_route(key, route_path)
         })
     }
@@ -1025,6 +1064,41 @@ mod tests {
         assert_eq!(cache.get("a").await, None);
         assert_eq!(cache.get("b").await, None);
         assert!(cache.order.read().await.is_empty());
+        assert_index_and_order_consistent(&cache).await;
+    }
+
+    /// A render that began before an invalidation must not store its answer
+    /// after it.
+    ///
+    /// The watcher drops a route's entries when its file is saved, but a render
+    /// already sent to the worker read the old file. Its `put` landed after the
+    /// drop and, with nothing newer to replace it, the dev server served the
+    /// page as it was before the edit until the TTL ran out.
+    #[tokio::test]
+    async fn a_render_that_straddles_an_invalidation_is_served_but_not_stored() {
+        let cache = RenderCache::new(8, 300);
+        let key = "ssg:ssr:/blog";
+
+        let began = cache.generation();
+        assert_eq!(cache.invalidate_route("/blog").await, 0);
+        let document = cache
+            .put_since(began, key.to_string(), "<p>before edit</p>".into())
+            .await;
+        assert_eq!(
+            &*document.html, "<p>before edit</p>",
+            "the caller still gets its answer"
+        );
+        assert_eq!(
+            cache.get(key).await,
+            None,
+            "a pre-edit render was stored after the edit"
+        );
+
+        let fresh = cache.generation();
+        cache
+            .put_since(fresh, key.to_string(), "<p>after edit</p>".into())
+            .await;
+        assert_eq!(cache.get(key).await.as_deref(), Some("<p>after edit</p>"));
         assert_index_and_order_consistent(&cache).await;
     }
 

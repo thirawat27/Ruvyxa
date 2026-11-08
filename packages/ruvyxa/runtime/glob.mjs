@@ -147,10 +147,14 @@ function globMatches(pattern, value, patternIndex = 0, valueIndex = 0) {
     pattern[patternIndex + 1] === '*' &&
     pattern[patternIndex + 2] === '/'
   ) {
-    return (
-      globMatches(pattern, value, patternIndex + 3, valueIndex) ||
-      (valueIndex < value.length && globMatches(pattern, value, patternIndex, valueIndex + 1))
-    )
+    // `**/` is zero or more *whole* segments: nothing, or one segment through
+    // its `/` and then `**/` again. Stepping one character let
+    // `./posts/**/index.mdx` swallow the `not` of `notindex.mdx`. The Rust
+    // `glob_matches` takes the same step; tests/fixtures/glob-contract.json
+    // holds both.
+    if (globMatches(pattern, value, patternIndex + 3, valueIndex)) return true
+    const slashIndex = value.indexOf('/', valueIndex)
+    return slashIndex >= 0 && globMatches(pattern, value, patternIndex, slashIndex + 1)
   }
   if (pattern[patternIndex] === '*' && pattern[patternIndex + 1] === '*') {
     return (

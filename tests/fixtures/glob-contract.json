@@ -5,10 +5,10 @@
   "ignoredDirectories": [".git", ".ruvyxa", "dist", "node_modules", "target"],
   "cases": [
     {
-      "name": "lazy relative nested matches",
+      "name": "lazy relative nested matches, including the zero-directory case",
       "pattern": "./posts/**/*.ts",
       "eager": false,
-      "expected": ["./posts/nested/two.ts"]
+      "expected": ["./posts/nested/two.ts", "./posts/one.ts"]
     },
     {
       "name": "eager relative matches",
@@ -46,6 +46,50 @@
       "./ordered/delta.ts",
       "./ordered/Gamma.ts"
     ]
+  },
+  "matching": {
+    "why": "`**/` stands for zero or more whole path segments. Both expanders used to let it consume the value one character at a time, so `./posts/**/index.mdx` matched `./posts/notindex.mdx` — `**/` swallowed `not` and the rest matched literally — and `./posts/**/b/*.mdx` reached into `./posts/ab/`. Each pattern is expanded against `files` and must produce exactly `expected`, in code-unit order.",
+    "files": [
+      "posts/index.mdx",
+      "posts/notindex.mdx",
+      "posts/a/index.mdx",
+      "posts/a/xindex.mdx",
+      "posts/a/b/index.mdx",
+      "posts/ab/x.mdx",
+      "posts/one.ts",
+      "posts/nested/two.ts"
+    ],
+    "cases": [
+      {
+        "pattern": "./posts/**/index.mdx",
+        "expected": ["./posts/a/b/index.mdx", "./posts/a/index.mdx", "./posts/index.mdx"]
+      },
+      {
+        "pattern": "./posts/**/b/*.mdx",
+        "expected": ["./posts/a/b/index.mdx"]
+      },
+      {
+        "pattern": "./posts/**/*.ts",
+        "expected": ["./posts/nested/two.ts", "./posts/one.ts"]
+      },
+      {
+        "pattern": "./posts/*.mdx",
+        "expected": ["./posts/index.mdx", "./posts/notindex.mdx"]
+      },
+      {
+        "pattern": "./posts/a/**/*index.mdx",
+        "expected": ["./posts/a/b/index.mdx", "./posts/a/index.mdx", "./posts/a/xindex.mdx"]
+      }
+    ]
+  },
+  "symlinks": {
+    "why": "A symbolic link is never followed and never matched, whether it names a file or a directory. The JavaScript expander walks with Dirent.isDirectory()/isFile(), both false for a link; the Rust expander asked Path::is_dir(), which follows one, so a linked directory was walked — and its target, possibly outside the project, compiled — by one graph only. Creating a link can need privileges (Windows without Developer Mode), so a replay that cannot create one skips rather than fails.",
+    "real": "linked/real.ts",
+    "outside": "outside/deep.ts",
+    "fileLink": { "path": "linked/alias.ts", "target": "linked/real.ts" },
+    "directoryLink": { "path": "linked/through", "target": "outside" },
+    "pattern": "./linked/**/*.ts",
+    "expected": ["./linked/real.ts"]
   },
   "lowering": {
     "why": "An eager match must enter the static dependency graph as a namespace import. Emitting require() only worked in the Rust linker, which rewrites it; on the JavaScript graph the same text reached an ES module and threw 'require is not defined'.",

@@ -15,25 +15,23 @@ const { dirs: packageDirs, ignored: ignoredPackageDirs } = workspacePackageDirs(
 
 const failures = []
 
-// The major, and deliberately not the minor.
+// The major exactly, and the minor at least the floor's.
 //
-// The two sibling checks below are exact, and this one is not, which reads like
-// an oversight -- `@types/node` is `24.13.3` against an `engines.node` floor of
-// `>=24.19.0`, six minors apart, so APIs added after 24.13 are untyped while the
-// floor promises they exist. That much is real. What is not available is a fix
-// by pinning: DefinitelyTyped publishes `@types/node` when the *types* change,
-// not once per Node release, and there is no `24.19.x` line to move to -- the
-// newest 24.x ever published is `24.13.3`, which is what this workspace is
-// already on. Requiring minor parity, or even `>=` on the minor, would fail
-// against every version that exists.
-//
-// So the major stays the contract and both numbers go into the message, because
-// the next reader deserves to see the gap rather than rediscover it.
+// Types older than the floor leave APIs the floor promises untyped; types from a
+// newer major let code typecheck against APIs the runtime the packages ask for
+// does not have. This check used to compare the major alone, because for a while
+// no `@types/node` line reached the floor's minor -- DefinitelyTyped publishes
+// when the *types* change, not once per Node release -- and `24.13.3` sat six
+// minors under `>=24.19.0`. A `24.19.x` line exists now, so the gap is closed
+// and held closed. Should the floor ever move to a minor no types release has
+// reached yet, that is the moment to revisit this, not to loosen it silently.
+const [typesMajor, typesMinor] = (workspaceNodeTypesVersion ?? '').split('.').map(Number)
+const floorMinor = Number(requiredRuntimeNodeVersion.split('.')[1])
 check(
-  workspaceNodeTypesVersion?.split('.')[0] === requiredRuntimeNodeMajor,
-  `workspace @types/node (${workspaceNodeTypesVersion}) must match the engines.node major ` +
-    `(${requiredRuntimeNodeMajor}, floor ${requiredRuntimeNodeVersion}). The minor is not ` +
-    `compared: @types/node is published when the types change, not per Node release.`,
+  String(typesMajor) === requiredRuntimeNodeMajor && typesMinor >= floorMinor,
+  `workspace @types/node (${workspaceNodeTypesVersion}) must be on the engines.node major ` +
+    `(${requiredRuntimeNodeMajor}) at or above the floor's minor (floor ` +
+    `${requiredRuntimeNodeVersion}).`,
 )
 check(
   readFileSync('.node-version', 'utf8').trim() === requiredRuntimeNodeMajor,

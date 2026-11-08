@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/react",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "description": "React integration for Ruvyxa apps, built for SSR-first pages and browser hydration without framework noise.",
   "license": "Apache-2.0",
   "type": "module",
@@ -73,11 +73,11 @@
     "@ruvyxa/core": "workspace:^"
   },
   "peerDependencies": {
-    "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
   },
   "devDependencies": {
-    "@types/react": "^19.2.18"
+    "@types/react": "^19.3.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

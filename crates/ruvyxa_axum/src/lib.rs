@@ -37,14 +37,30 @@
 //!
 //! ## What the directory decides
 //!
-//! Nothing about policy is decided here. `_headers` is applied as written, in
-//! file order, with a later rule overriding an earlier one for the same header
-//! — which is how Netlify and Cloudflare Pages read the same file, and why a
-//! site deployed there and a site served from this crate answer alike. A path
-//! that names a directory holding an `index.html` is served as that document
-//! at the URL asked for, without a redirect, because that is what the Ruvyxa
-//! hosts and every static platform do with a pre-rendered route. A miss is the
-//! project's own `404.html` with a 404 status.
+//! The policy is the file's. `_headers` is read as Netlify and Cloudflare Pages
+//! read it — every rule whose pattern matches the path, in file order, a later
+//! rule overriding an earlier one for the same header — so a site deployed
+//! there and a site served from this crate answer alike. Two things are
+//! decided here, because a rule names a published file and not every response
+//! at its path is one:
+//!
+//! - A caching header (`Cache-Control`, `Expires`, the `CDN-Cache-Control`
+//!   family) reaches only a 2xx or 304 response. A 404 for a bundle hash that
+//!   has not shipped yet is not that bundle, and `immutable` on it is a year of
+//!   cached misses.
+//! - A caching header never replaces one the application's own route set, so
+//!   `Cache-Control: private` on a per-user response stays private behind
+//!   [`StaticSite::headers_layer`].
+//!
+//! Every other header — the security policy — is on every response, errors
+//! included, replacing whatever the route set. `_headers` and `_redirects`
+//! themselves configure the host and are not served: they are a 404, as they
+//! are on those platforms.
+//!
+//! A path that names a directory holding an `index.html` is served as that
+//! document at the URL asked for, without a redirect, because that is what the
+//! Ruvyxa hosts and every static platform do with a pre-rendered route. A miss
+//! is the project's own `404.html` with a 404 status.
 //!
 //! Content types come from the same table `ruvyxa start` and every deployed
 //! server use, replayed here from the shared conformance fixture rather than
@@ -62,8 +78,11 @@ use std::task::{Context, Poll};
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Request, State};
-use axum::http::header::{CONTENT_TYPE, HeaderName, HeaderValue};
-use axum::http::{Response, StatusCode, Uri};
+use axum::http::header::{
+    CONTENT_TYPE, HeaderName, HeaderValue, IF_MATCH, IF_MODIFIED_SINCE, IF_NONE_MATCH, IF_RANGE,
+    IF_UNMODIFIED_SINCE, RANGE,
+};
+use axum::http::{Method, Response, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use tower::{Layer, Service};
 use tower_http::services::{ServeDir, ServeFile};
@@ -154,11 +173,15 @@ impl StaticSite {
     pub fn router(&self) -> Router {
         let resolver = Arc::new(Resolver {
             root: self.root.clone(),
-            has_not_found_page: self.has_not_found_page,
+            not_found_page: self
+                .has_not_found_page
+                .then(|| self.root.join(NOT_FOUND_PAGE)),
         });
-        // Directory handling is done in `serve_resolved` before the request
-        // reaches `ServeDir`, so it must not redirect `/about` to `/about/`:
-        // a pre-rendered route is served at the URL the document links to.
+        // Resolution is done in `serve_resolved`: `ServeDir` is handed only a
+        // file the resolver found, so it must not redirect `/about` to
+        // `/about/` either — a pre-rendered route is served at the URL the
+        // document links to. Its own not-found service is for a file that
+        // went away between the two.
         let files = ServeDir::new(&self.root).append_index_html_on_directories(false);
         let router = if self.has_not_found_page {
             Router::new().fallback_service(
@@ -332,12 +355,47 @@ fn headers_for(rules: &[HeaderRule], path: &str) -> Vec<(HeaderName, HeaderValue
         .collect()
 }
 
+/// Whether `name` tells a cache how long it may keep the response.
+///
+/// `Cache-Control` and `Expires` for every cache, and the CDN-targeted
+/// variants a shared cache obeys *instead of* `Cache-Control` — which is why a
+/// service's own `Cache-Control` has to hold back all of them, not just its
+/// namesake: `private, no-store` beside a rule's `CDN-Cache-Control: max-age`
+/// is a per-user response the CDN keeps.
+fn is_caching_header(name: &HeaderName) -> bool {
+    let name = name.as_str();
+    matches!(
+        name,
+        "cache-control" | "expires" | "cdn-cache-control" | "surrogate-control"
+    ) || name.ends_with("-cdn-cache-control")
+}
+
+/// Whether a response may leave with a caching rule from `_headers`.
+///
+/// A rule names the published file at that path. A 404 or a 500 is not that
+/// file, and a lifetime on it is a lifetime on the failure — `immutable` on
+/// the miss for a bundle hash that ships a minute later is a year of 404s
+/// from every cache in between. A 304 refreshes the stored 200, so it keeps
+/// the rule.
+fn may_carry_caching_rules(status: StatusCode) -> bool {
+    status.is_success() || status == StatusCode::NOT_MODIFIED
+}
+
 /// Applies a site's `_headers` policy to every response of the wrapped service.
 ///
 /// Obtained from [`StaticSite::headers_layer`]. Rules are matched against the
-/// request path as the client sent it; a header a later rule repeats replaces
-/// the earlier value, and a header the inner service already set is replaced
-/// too, because the file is the policy.
+/// request path as the client sent it, and a header a later rule repeats
+/// replaces the earlier value. What happens next depends on the header:
+///
+/// - **Caching headers** (`Cache-Control`, `Expires`, `CDN-Cache-Control`,
+///   `Surrogate-Control`, and the `*-CDN-Cache-Control` family) are added only
+///   to a 2xx or 304 response, and only when the inner service set none of
+///   them. A miss is not the asset its URL names, and a route that answers
+///   `Cache-Control: private` knows something about its response a path
+///   pattern written for published files cannot.
+/// - **Every other header** — the security policy — is set on every response,
+///   errors included, replacing a value the inner service set, because the
+///   file is the policy.
 #[derive(Clone, Debug)]
 pub struct HeadersLayer {
     rules: Arc<[HeaderRule]>,
@@ -379,8 +437,15 @@ where
         let future = self.inner.call(request);
         Box::pin(async move {
             let mut response = future.await?;
+            let cacheable = may_carry_caching_rules(response.status());
             let headers = response.headers_mut();
+            // Read before anything is inserted, so a rule's own `Expires`
+            // does not count as the service having stated a policy.
+            let service_stated_caching = headers.keys().any(is_caching_header);
             for (name, value) in matched {
+                if is_caching_header(&name) && (!cacheable || service_stated_caching) {
+                    continue;
+                }
                 headers.insert(name, value);
             }
             Ok(response)
@@ -392,10 +457,17 @@ where
 // Files
 // ---------------------------------------------------------------------------
 
+/// Files in the publish directory that configure the host rather than belong
+/// to the site. Netlify and Cloudflare Pages read them and never serve them;
+/// served, `_headers` hands out the policy file and `_redirects` the routing
+/// table, neither of which the project published.
+const HOST_CONFIG_FILES: [&str; 2] = [HEADERS_FILE, "_redirects"];
+
 /// What `serve_resolved` needs from the site, behind one `Arc`.
 struct Resolver {
     root: PathBuf,
-    has_not_found_page: bool,
+    /// `404.html`, when the publish directory has one.
+    not_found_page: Option<PathBuf>,
 }
 
 /// Which published file a request path names, if any.
@@ -413,6 +485,9 @@ impl Resolver {
         let relative = safe_relative_path(uri_path)?;
         let candidate = self.root.join(&relative);
         if is_file(&candidate).await {
+            if self.is_host_config_file(&relative, &candidate).await {
+                return None;
+            }
             return Some(Resolved {
                 uri_path: uri_path.to_owned(),
                 file: relative,
@@ -428,6 +503,88 @@ impl Resolver {
         }
         None
     }
+
+    /// Whether `candidate` opens one of [`HOST_CONFIG_FILES`].
+    ///
+    /// Decided by which file the path opens, not by how it is spelled: on a
+    /// case-insensitive filesystem `/_HEADERS` opens `_headers`, and Windows
+    /// also opens it as `_headers.`, `_headers ` (trailing dots and spaces are
+    /// dropped), `_headers::$DATA` (its default stream), and an 8.3 short
+    /// name. A list of spellings would be one Windows quirk short. Only a
+    /// file directly in the publish directory can be one of these, so a
+    /// nested asset pays nothing.
+    async fn is_host_config_file(&self, relative: &Path, candidate: &Path) -> bool {
+        if relative.components().count() != 1 {
+            return false;
+        }
+        let Some(identity) = file_identity(candidate).await else {
+            return false;
+        };
+        for name in HOST_CONFIG_FILES {
+            if file_identity(&self.root.join(name)).await.as_ref() == Some(&identity) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The answer to a path that names no published file.
+    ///
+    /// Answered here rather than by handing the request on to `ServeDir`, so
+    /// that `resolve` is the one place that decides what is published: a path
+    /// it refused is not looked up a second time by a resolver that does not
+    /// know which files to withhold.
+    async fn miss(&self, request: Request, next: Next) -> Response<Body> {
+        if request.method() != Method::GET && request.method() != Method::HEAD {
+            // `ServeDir` answers `405` with `Allow` before it touches the disk.
+            return next.run(request).await;
+        }
+        let Some(page) = &self.not_found_page else {
+            let mut response = Response::new(Body::empty());
+            *response.status_mut() = StatusCode::NOT_FOUND;
+            return response;
+        };
+        // The page is the answer to the miss, not a resource the client holds
+        // a copy or a range of: a `304` or a `206` of it would be a 404 with
+        // no document, or with a fragment of one.
+        let (mut parts, body) = request.into_parts();
+        for name in [
+            RANGE,
+            IF_RANGE,
+            IF_MATCH,
+            IF_NONE_MATCH,
+            IF_MODIFIED_SINCE,
+            IF_UNMODIFIED_SINCE,
+        ] {
+            parts.headers.remove(name);
+        }
+        let mut service = ServeFile::new(page);
+        // Both are infallible: an unreadable page is a 404 from `ServeFile`.
+        let Ok(()) =
+            std::future::poll_fn(|cx| Service::<Request>::poll_ready(&mut service, cx)).await;
+        let Ok(response) = service.call(Request::from_parts(parts, body)).await;
+        let mut response = response.map(Body::new);
+        *response.status_mut() = StatusCode::NOT_FOUND;
+        response
+    }
+}
+
+/// What tells two paths apart as files on this platform.
+///
+/// A device and inode pair on Unix — exact, and indifferent to case folding,
+/// symlinks, and Unicode normalisation alike. Windows has no stable inode in
+/// `std`, so there it is the canonical path, which `GetFinalPathNameByHandle`
+/// answers with the file's real name whatever spelling opened it.
+#[cfg(unix)]
+async fn file_identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = tokio::fs::metadata(path).await.ok()?;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+async fn file_identity(path: &Path) -> Option<PathBuf> {
+    tokio::fs::canonicalize(path).await.ok()
 }
 
 async fn is_file(path: &Path) -> bool {
@@ -497,23 +654,28 @@ async fn serve_resolved(
     mut request: Request,
     next: Next,
 ) -> Response<Body> {
-    let resolved = resolver.resolve(request.uri().path()).await;
-    if let Some(resolved) = &resolved
-        && resolved.uri_path != request.uri().path()
-        && let Some(uri) = with_path(request.uri(), &resolved.uri_path)
-    {
-        *request.uri_mut() = uri;
-    }
-    let mut response = next.run(request).await;
-    let status = response.status();
-    if status.is_success() || status == StatusCode::NOT_MODIFIED {
-        if let Some(resolved) = &resolved {
-            response.headers_mut().insert(
-                CONTENT_TYPE,
-                HeaderValue::from_static(content_type_for(&resolved.file)),
-            );
+    let mut response = match resolver.resolve(request.uri().path()).await {
+        Some(resolved) => {
+            if resolved.uri_path != request.uri().path()
+                && let Some(uri) = with_path(request.uri(), &resolved.uri_path)
+            {
+                *request.uri_mut() = uri;
+            }
+            let mut response = next.run(request).await;
+            let status = response.status();
+            if status.is_success() || status == StatusCode::NOT_MODIFIED {
+                response.headers_mut().insert(
+                    CONTENT_TYPE,
+                    HeaderValue::from_static(content_type_for(&resolved.file)),
+                );
+            }
+            response
         }
-    } else if status == StatusCode::NOT_FOUND && resolver.has_not_found_page {
+        None => resolver.miss(request, next).await,
+    };
+    // A miss answered here, or one `ServeDir` found when the file it was
+    // handed went away in between.
+    if response.status() == StatusCode::NOT_FOUND && resolver.not_found_page.is_some() {
         response.headers_mut().insert(
             CONTENT_TYPE,
             HeaderValue::from_static(content_type_for(Path::new(NOT_FOUND_PAGE))),
@@ -752,6 +914,26 @@ mod tests {
                 "{path}"
             );
         }
+
+        // The page answers the miss whole: a range or a validator the client
+        // sends is about the URL it asked for, not about the 404 document.
+        let (_, page_headers, _) = get_path(&router, "/404.html").await;
+        let last_modified = header(&page_headers, "last-modified").unwrap().to_owned();
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/nope")
+                    .header(header::RANGE, "bytes=0-2")
+                    .header(header::IF_MODIFIED_SINCE, last_modified)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&body[..], b"<h1>SMOKE-NOT-FOUND-MARKER</h1>");
     }
 
     #[tokio::test]
@@ -875,6 +1057,148 @@ mod tests {
         let (status, _, body) = get_path(&app, "/about").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, "<h1>about</h1>");
+    }
+
+    /// A miss is not the asset it names. A CDN in front of this server reads
+    /// `immutable` on a 404 for a not-yet-deployed bundle hash as "this URL is
+    /// a 404 for a year", and serves that miss after the bundle ships.
+    #[tokio::test]
+    async fn a_caching_rule_reaches_only_a_response_that_can_be_cached() {
+        let temp = publish_dir();
+        let site = site(&temp);
+        let app = Router::new()
+            .route(
+                "/__ruvyxa/client/broken.js",
+                get(|| async { (StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+            )
+            .layer(site.headers_layer())
+            .fallback_service(site.router());
+
+        for path in [
+            "/__ruvyxa/client/missing-hash.js",
+            "/missing.svg",
+            "/__ruvyxa/client/broken.js",
+        ] {
+            let (status, headers, _) = get_path(&app, path).await;
+            assert!(!status.is_success(), "{path}: {status}");
+            assert_eq!(header(&headers, "cache-control"), None, "{path}");
+            // The security policy is not a caching rule: every response has it.
+            for (name, value) in security_headers_fixture() {
+                assert_eq!(
+                    header(&headers, &name),
+                    Some(value.as_str()),
+                    "{name} on {path}"
+                );
+            }
+        }
+
+        // A 304 refreshes the stored response, so it carries the policy.
+        let (_, headers, _) = get_path(&app, "/__ruvyxa/client/abc123.js").await;
+        let last_modified = header(&headers, "last-modified").unwrap().to_owned();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/__ruvyxa/client/abc123.js")
+                    .header(header::IF_MODIFIED_SINCE, last_modified)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            header(response.headers(), "cache-control"),
+            Some("public, max-age=31536000, immutable")
+        );
+    }
+
+    /// A route that answers per user says so with its own caching headers; a
+    /// `/*.png` rule meant for published images must not make that response
+    /// shared-cacheable — not by replacing `Cache-Control`, and not by adding a
+    /// `CDN-Cache-Control` or `Expires` a shared cache would obey instead.
+    #[tokio::test]
+    async fn a_cache_policy_the_application_set_is_not_replaced() {
+        let temp = publish_dir();
+        let mut headers = String::from("/*\n  X-Frame-Options: DENY\n");
+        headers.push_str(
+            "/*.png\n  Cache-Control: public, max-age=3600\n  CDN-Cache-Control: max-age=86400\n  Expires: Thu, 01 Dec 2099 16:00:00 GMT\n",
+        );
+        std::fs::write(temp.path().join("site/_headers"), headers).unwrap();
+        let site = site(&temp);
+        let app = Router::new()
+            .route(
+                "/api/avatar.png",
+                get(|| async {
+                    (
+                        [
+                            (header::CACHE_CONTROL, "private, no-store"),
+                            (header::X_FRAME_OPTIONS, "SAMEORIGIN"),
+                        ],
+                        "per-user",
+                    )
+                }),
+            )
+            .route("/api/logo.png", get(|| async { "shared" }))
+            .layer(site.headers_layer())
+            .fallback_service(site.router());
+
+        let (status, headers, _) = get_path(&app, "/api/avatar.png").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(header(&headers, "cache-control"), Some("private, no-store"));
+        assert_eq!(header(&headers, "cdn-cache-control"), None);
+        assert_eq!(header(&headers, "expires"), None);
+        // Security headers keep their rule: the file is the policy for them.
+        assert_eq!(header(&headers, "x-frame-options"), Some("DENY"));
+
+        // A response that states no caching policy of its own gets the file's.
+        let (status, headers, _) = get_path(&app, "/api/logo.png").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            header(&headers, "cache-control"),
+            Some("public, max-age=3600")
+        );
+        assert_eq!(header(&headers, "cdn-cache-control"), Some("max-age=86400"));
+        assert_eq!(
+            header(&headers, "expires"),
+            Some("Thu, 01 Dec 2099 16:00:00 GMT")
+        );
+    }
+
+    /// `_headers` and `_redirects` configure the host; no static platform
+    /// publishes them, and neither does this one — under any spelling the
+    /// filesystem would open as the same file.
+    #[tokio::test]
+    async fn the_hosts_own_config_files_are_not_published() {
+        let temp = publish_dir();
+        std::fs::write(temp.path().join("site/_redirects"), "/old /new 301\n").unwrap();
+        let router = site(&temp).router();
+        for path in [
+            "/_headers",
+            "/_redirects",
+            "/./_headers",
+            "/_headers/",
+            "/%5Fheaders",
+            "/_HEADERS",
+            "/_Redirects",
+            "/_headers.",
+            "/_headers%20",
+            "/_headers::$DATA",
+        ] {
+            for method in [Method::GET, Method::HEAD] {
+                let (status, headers, body) = request(&router, method.clone(), path).await;
+                assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
+                assert!(!body.contains("Cache-Control"), "{method} {path}: {body}");
+                assert!(!body.contains("/old"), "{method} {path}: {body}");
+                assert_eq!(header(&headers, "cache-control"), None, "{method} {path}");
+                if method == Method::GET {
+                    assert!(body.contains("SMOKE-NOT-FOUND-MARKER"), "{path}: {body}");
+                }
+            }
+        }
+        // The policy still applies, so the file was read — just not served.
+        let (_, headers, _) = get_path(&router, "/").await;
+        assert_eq!(header(&headers, "x-frame-options"), Some("DENY"));
     }
 
     #[tokio::test]

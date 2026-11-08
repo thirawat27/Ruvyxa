@@ -247,7 +247,10 @@ prerender bypass token ที่ adapter เขียนลงใน `<route>.pr
 function ที่ส่ง token กลับไป
 
 ตั้ง `RUVYXA_PREVIEW_SECRET` ใน build environment adapter จะ hash ค่านั้นเป็น token
-ตัวค่าจริงจึงไม่เคย ไปโผล่ใน output ที่ deploy
+ตัวค่าจริงจึงไม่เคย ไปโผล่ใน output ที่ deploy draft mode อ่านตัวแปรเดียวกันตอนรับ request
+เพื่อลงลายเซ็นและตรวจ cookie ของมัน project ที่ใช้ `draftMode()` จึงต้องตั้งค่านี้ใน runtime
+environment ด้วย ดูหัวข้อ "เปิด draft mode" ใน
+[ข้อมูล, action และ API route](05-data-actions-api.md)
 
 ถ้าไม่ตั้ง token จะ derive จาก build id ซึ่งทำให้ `ruvyxa build` ยัง reproducible แต่ก็แปลว่า token
 เป็น ฟังก์ชันของสิ่งที่ build เปิดเผยอยู่แล้ว ทั้งชื่อ asset, path ของเอกสาร และตาราง route

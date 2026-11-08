@@ -25,14 +25,14 @@
     "@parcel/watcher": false
   },
   "dependencies": {
-    "@ruvyxa/react": "^1.1.5",
-    "ruvyxa": "^1.1.5",
-    "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "@ruvyxa/react": "^1.1.6",
+    "ruvyxa": "^1.1.6",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
   },
   "devDependencies": {
-    "@types/react": "^19.2.18",
-    "@types/react-dom": "^19.2.7",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "typescript": "^7.0.2"
   },
   "engines": {

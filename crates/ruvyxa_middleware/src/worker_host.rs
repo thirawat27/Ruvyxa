@@ -95,6 +95,11 @@ struct Worker {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    /// Set before a request is written and cleared once its response line has
+    /// been read. Still set when the next caller takes the lock means the
+    /// previous call's future was dropped in between, leaving its answer (or
+    /// half a request) in the pipe for whoever reads next.
+    in_flight: bool,
 }
 
 /// Spawn parameters retained so a crashed worker can be restarted.
@@ -254,6 +259,19 @@ impl WorkerHost {
         hook: &str,
         payload: serde_json::Value,
     ) -> Result<serde_json::Value> {
+        // The protocol carries no request id, so a response belongs to
+        // whichever caller reads next. A caller dropped mid-call (a client
+        // that disconnected while `proxy.handler` ran) releases the lock with
+        // its own answer still unread, and this call would read it as its own:
+        // one request served another's result. The stream cannot be
+        // resynchronised, so the process is replaced, as a timeout replaces it.
+        if worker.in_flight {
+            warn!(
+                target: "ruvyxa::worker",
+                "a project worker call was abandoned mid-flight; replacing the worker before reusing it"
+            );
+            replace_worker(&mut worker, &self.spawn)?;
+        }
         match call_worker_with_timeout(&mut worker, hook, payload.clone(), self.call_timeout).await
         {
             Ok(value) => Ok(value),
@@ -352,6 +370,7 @@ fn spawn_worker(spawn: &SpawnConfig) -> Result<Worker> {
         child,
         stdin,
         stdout: BufReader::new(stdout),
+        in_flight: false,
     })
 }
 
@@ -422,6 +441,9 @@ async fn call_worker(
         )))
     })?;
     encoded.push(b'\n');
+    // Cleared only once a whole response line is read; every exit in between
+    // either replaces this worker or leaves the flag for the next caller to.
+    worker.in_flight = true;
     // A broken pipe here means the request never reached the worker, so the
     // call definitely did not run and is safe to replay.
     worker.stdin.write_all(&encoded).await.map_err(|error| {
@@ -453,6 +475,7 @@ async fn call_worker(
             "RUV1700 the project worker exited before responding (status: {status})"
         ))));
     }
+    worker.in_flight = false;
     let output = decode_runtime_output(line.trim())?;
     if output.ok {
         return Ok(output.result.unwrap_or(serde_json::Value::Null));
@@ -537,6 +560,70 @@ mod tests {
         assert!(hook_is_idempotent("describe"));
         assert!(hook_is_idempotent("content.artifact"));
         assert!(!hook_is_idempotent("proxy"));
+    }
+
+    /// A worker that answers strictly in order, echoing the requested path,
+    /// and takes its time over `/slow`.
+    const ORDERED_ECHO_WORKER: &str = r#"
+const lines = require('node:readline').createInterface({ input: process.stdin })
+let chain = Promise.resolve()
+lines.on('line', (line) => {
+  chain = chain.then(() => new Promise((resolve) => {
+    const request = JSON.parse(line)
+    const result = request.hook === 'describe' ? {} : { body: request.path, contentType: 'text/plain' }
+    setTimeout(() => {
+      process.stdout.write(JSON.stringify({ ok: true, result }) + '\n')
+      resolve()
+    }, request.path === '/slow' ? 300 : 0)
+  }))
+})
+"#;
+
+    /// Dropping a call after its request was written must not hand its
+    /// response to the next caller.
+    ///
+    /// The stdio protocol carries no request id: a response is whichever line
+    /// comes next. A caller whose future was dropped mid-read — a client that
+    /// disconnected while `proxy.handler` ran — released the worker with its
+    /// answer still in the pipe, and the next request, possibly another
+    /// user's, read that answer as its own.
+    #[tokio::test]
+    async fn a_call_dropped_mid_flight_does_not_answer_the_next_one() {
+        let directory = std::env::temp_dir().join(format!(
+            "ruvyxa-worker-host-drop-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let script = directory.join("ordered-echo-worker.cjs");
+        std::fs::write(&script, ORDERED_ECHO_WORKER).unwrap();
+
+        let host = WorkerHost::start_pool(
+            &directory,
+            &script,
+            Path::new("node"),
+            &[],
+            1,
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("node runs the echo worker");
+
+        let abandoned =
+            tokio::time::timeout(Duration::from_millis(50), host.content_artifact("/slow")).await;
+        assert!(abandoned.is_err(), "the slow call must still be in flight");
+
+        let next = host
+            .content_artifact("/fast")
+            .await
+            .expect("the next call is answered")
+            .expect("the echo worker always answers");
+        drop(host);
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(next.body, "/fast", "a dropped call's response leaked");
     }
 
     #[test]

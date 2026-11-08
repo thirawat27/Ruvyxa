@@ -420,6 +420,11 @@ function actionFileFor(route) {
  * while this file compiles and imports `ruvyxa.config` itself.
  */
 function adapterOptionsFor(config) {
+  // The local standalone pass `ruvyxa build` runs so `ruvyxa start` has a
+  // server (`run_local_standalone_runner` in
+  // `crates/ruvyxa_cli/src/runtime_config.rs`). It is not the adapter the
+  // project selected, so the selected adapter's options are not its options.
+  if (process.env.RUVYXA_ADAPTER_RUNNER_LOCAL_STANDALONE === '1') return {}
   const options = config?.adapterOptions
   if (options === undefined) return {}
   if (!options || typeof options !== 'object' || Array.isArray(options)) {

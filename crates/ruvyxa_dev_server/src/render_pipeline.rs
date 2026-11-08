@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -22,6 +23,9 @@ use ruvyxa_graph::{
 use serde::Deserialize;
 use tokio::sync::broadcast;
 
+use crate::action_security::{
+    PAGE_FORM_RATE_LIMIT_MESSAGE, page_form_action_rejection, page_form_rate_limit_key,
+};
 use crate::document_stream::StreamedDocument;
 use crate::html_document::{
     bootstrap_data_block, client_hydration_script, compose_localized_document, error_page,
@@ -531,6 +535,7 @@ pub(crate) async fn render_request_pooled(
     method: &str,
     request_headers: &HeaderMap,
     request_body: Option<&[u8]>,
+    peer: SocketAddr,
 ) -> Result<Response> {
     render_request_inner(
         state,
@@ -539,6 +544,7 @@ pub(crate) async fn render_request_pooled(
         method,
         request_headers,
         request_body,
+        peer,
         true,
     )
     .await
@@ -552,6 +558,7 @@ pub(crate) async fn render_request_pooled(
 /// and `fallback` when nothing matched at all. A rewritten request is looked
 /// up again from the top, files included, with `apply_rewrites` off so a rule
 /// is never checked against its own result.
+#[allow(clippy::too_many_arguments)]
 async fn render_request_inner(
     state: &AppState,
     request_path: &str,
@@ -559,6 +566,7 @@ async fn render_request_inner(
     method: &str,
     request_headers: &HeaderMap,
     request_body: Option<&[u8]>,
+    peer: SocketAddr,
     apply_rewrites: bool,
 ) -> Result<Response> {
     if let Some(client_response) = serve_client_file(
@@ -628,6 +636,7 @@ async fn render_request_inner(
                 method,
                 request_headers,
                 request_body,
+                peer,
                 false,
             ))
             .await;
@@ -690,9 +699,30 @@ async fn render_request_inner(
 
     match route_match.route.kind {
         RouteKind::Page => {
+            let form_action = posted_form(route_match.route, method, request_headers, request_body);
+            // A posted form runs the server function its hidden fields name, so
+            // it gets the action endpoint's two gates before anything renders:
+            // the origin pair, then the rate limit. Without them a cross-site
+            // page could auto-submit a form here with the visitor's cookies
+            // while the same request to `/__ruvyxa/action` was refused with 403.
+            if form_action.is_some() {
+                if let Some(refusal) =
+                    page_form_action_rejection(request_headers, &state.config, peer)
+                {
+                    return Ok(with_security_headers(refusal));
+                }
+                let rate_key =
+                    page_form_rate_limit_key(peer, request_headers, request_path, &state.config);
+                if let Some(refusal) = crate::framework_endpoints::action_rate_limit_refusal(
+                    state,
+                    &rate_key,
+                    PAGE_FORM_RATE_LIMIT_MESSAGE,
+                ) {
+                    return Ok(refusal);
+                }
+            }
             let styles = state.runtime_cache.style_tag(&state.config).await?;
             let page_headers = worker_request_headers(request_headers);
-            let form_action = posted_form(route_match.route, method, request_headers, request_body);
             let page_request = PageRequestContext {
                 path: request_path,
                 target: request_target,
@@ -1129,6 +1159,8 @@ async fn render_page_ssg_fresh(
     cache_key: &str,
     forced: Option<ForcedRevalidationClaim>,
 ) -> Result<CachedDocument> {
+    // Read before any input is: see `RenderCache::put_since`.
+    let generation = state.render_cache.generation();
     // In production, serve the pre-rendered HTML file. Read it from disk once
     // and serve subsequent requests from the in-memory render cache — a
     // synchronous file open per request otherwise dominates the hot path.
@@ -1199,7 +1231,10 @@ async fn render_page_ssg_fresh(
         params,
     );
 
-    let document = state.render_cache.put(cache_key.to_string(), html).await;
+    let document = state
+        .render_cache
+        .put_since(generation, cache_key.to_string(), html)
+        .await;
     settle_forced_revalidation(state, request_path, forced, &document.html, None).await;
     Ok(document)
 }
@@ -1262,6 +1297,8 @@ async fn render_page_isr_fresh(
     cache_key: &str,
     forced: Option<ForcedRevalidationClaim>,
 ) -> Result<CachedDocument> {
+    // Read before any input is: see `RenderCache::put_since`.
+    let generation = state.render_cache.generation();
     // In production, try the pre-rendered HTML file. Storing it means the first
     // background revalidation waits until the route's declared interval instead
     // of firing once per request. A path `revalidatePath()` named skips it: the
@@ -1290,7 +1327,10 @@ async fn render_page_isr_fresh(
 
     // No cached version — render synchronously (blocking fallback)
     let html = render_isr_background(state, route, request_path, params, styles).await?;
-    let document = state.render_cache.put(cache_key.to_string(), html).await;
+    let document = state
+        .render_cache
+        .put_since(generation, cache_key.to_string(), html)
+        .await;
     settle_forced_revalidation(
         state,
         request_path,
@@ -1560,7 +1600,7 @@ where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<CachedDocument>>,
 {
-    match flight.claim(cache_key) {
+    match flight.claim(&flight_key(cache, cache_key)) {
         RenderClaim::Follower(updates) => {
             if let Some(document) = await_shared_document(updates, cache, cache_key).await {
                 return Ok(document);
@@ -1575,6 +1615,16 @@ where
             rendered
         }
     }
+}
+
+/// The single-flight key for `cache_key` as of now.
+///
+/// A request that arrives after an invalidation must not wait on a render that
+/// began before it: that render read the files the invalidation declared out of
+/// date, and joining it handed the pre-edit page to every request in the burst.
+/// Keying the flight by generation starts a new leader instead.
+fn flight_key(cache: &RenderCache, cache_key: &str) -> String {
+    format!("{}#{cache_key}", cache.generation())
 }
 
 /// Wait for the render that claimed this key, or `None` if it produced nothing
@@ -2012,6 +2062,8 @@ async fn render_page_csr(
     params: &RouteParams,
     styles: &str,
 ) -> Result<CachedDocument> {
+    // Read before any input is: see `RenderCache::put_since`.
+    let generation = state.render_cache.generation();
     let cache_key = render_cache::page_cache_key("csr:", request_path, params);
     if let Some(cached) = state.render_cache.get_document(&cache_key).await {
         return Ok(cached);
@@ -2069,7 +2121,10 @@ async fn render_page_csr(
         // Cached rather than per-request: the claim is retired below only once
         // the build's shell has been replaced, and the fresh shell answers the
         // requests that arrive before then.
-        let document = state.render_cache.put(cache_key, shell).await;
+        let document = state
+            .render_cache
+            .put_since(generation, cache_key, shell)
+            .await;
         settle_forced_revalidation(state, request_path, forced, &document.html, None).await;
         Ok(document)
     } else {
@@ -2130,6 +2185,8 @@ async fn render_page_ppr_fresh(
     cache_key: &str,
     forced: Option<ForcedRevalidationClaim>,
 ) -> Result<CachedDocument> {
+    // Read before any input is: see `RenderCache::put_since`.
+    let generation = state.render_cache.generation();
     // In production, serve the pre-rendered PPR shell. The cache lookup above
     // must come first: reading the shell from disk before consulting the cache
     // made the cache unreachable and re-read the same file on every request.
@@ -2202,7 +2259,10 @@ async fn render_page_ppr_fresh(
         params,
     );
 
-    let document = state.render_cache.put(cache_key.to_string(), html).await;
+    let document = state
+        .render_cache
+        .put_since(generation, cache_key.to_string(), html)
+        .await;
     settle_forced_revalidation(state, request_path, forced, &document.html, None).await;
     Ok(document)
 }
@@ -2310,7 +2370,10 @@ async fn render_page_pooled(
         return render_page_pooled_fresh(state, route, request, params, styles, &cache_key).await;
     }
 
-    match state.single_flight.claim(&cache_key) {
+    match state
+        .single_flight
+        .claim(&flight_key(&state.render_cache, &cache_key))
+    {
         RenderClaim::Follower(updates) => {
             if let Some(document) =
                 await_shared_document(updates, &state.render_cache, &cache_key).await
@@ -2342,6 +2405,8 @@ async fn render_page_pooled_fresh(
     styles: &str,
     cache_key: &str,
 ) -> Result<RenderedPage> {
+    // Read before any input is: see `RenderCache::put_since`.
+    let generation = state.render_cache.generation();
     // The page source is deliberately not read here. Confirming the default
     // export is route validation's job (`ruvyxa check`, and `validate_app` on
     // every build), and doing it again per request meant a full
@@ -2450,7 +2515,10 @@ async fn render_page_pooled_fresh(
     // Cache the fully rendered page for subsequent requests, and serve the very
     // allocation that was stored.
     Ok(RenderedPage::shared(
-        state.render_cache.put(cache_key.to_string(), html).await,
+        state
+            .render_cache
+            .put_since(generation, cache_key.to_string(), html)
+            .await,
     ))
 }
 
@@ -2618,6 +2686,10 @@ pub(crate) async fn render_client_bundle_pooled(
     state: &AppState,
     request_path: &str,
 ) -> Result<ClientBundle> {
+    // Read before any input is: see `RenderCache::put_since`. A bundle built
+    // from the pre-edit source and stored after the edit was the stale client
+    // that HMR then reloaded into.
+    let generation = state.render_cache.generation();
     let (manifest, router) = state.runtime_cache.router(&state.config).await?;
     let Some(route_match) = router.find(&manifest, request_path) else {
         return Err(Diagnostic::new("RUV1303", "Client route was not found")
@@ -2690,7 +2762,10 @@ pub(crate) async fn render_client_bundle_pooled(
     })?;
 
     // Cache the bundled client script
-    let document = state.render_cache.put(cache_key, script).await;
+    let document = state
+        .render_cache
+        .put_since(generation, cache_key, script)
+        .await;
 
     Ok(ClientBundle {
         document,
@@ -3797,6 +3872,39 @@ mod tests {
         assert!(!streams_document(&route));
     }
 
+    /// A recognised form post is gated before anything renders.
+    ///
+    /// `page_form_posts_match_the_shared_conformance_table` in
+    /// `action_security.rs` holds what the gate answers; this holds that the page
+    /// path asks it, in order — origin pair, then rate limit, then the render
+    /// that runs the action. Both used to be missing here while
+    /// `/__ruvyxa/action` refused the same cross-site submission with 403, and
+    /// driving the real path needs a worker pool a unit test cannot start.
+    #[test]
+    fn a_posted_form_is_gated_before_the_page_renders() {
+        let source = include_str!("render_pipeline.rs");
+        let body = source
+            .split_once("async fn render_request_inner(")
+            .and_then(|(_, rest)| rest.split_once("\nasync fn ").map(|(body, _)| body))
+            .expect("render_request_inner must exist");
+        let position = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("render_request_inner must call {needle}"))
+        };
+        let recognised = position("posted_form(");
+        let origin = position("page_form_action_rejection(");
+        let limited = position("action_rate_limit_refusal(");
+        let styles = position("style_tag(");
+        let rendered = position("render_page_form_action(");
+        assert!(recognised < origin, "the gate needs the recognised form");
+        assert!(
+            origin < limited,
+            "a cross-site post must not spend a budget"
+        );
+        assert!(limited < styles, "a refused post must do no render work");
+        assert!(styles < rendered);
+    }
+
     /// Which requests are treated as a form submission, spelled out.
     ///
     /// Recognising one too eagerly costs a body forwarded to the worker and a
@@ -4007,9 +4115,14 @@ mod tests {
     /// Without it the leader could finish before the others arrive, and they
     /// would each start a render of their own — which is what the count is
     /// supposed to be measuring the absence of.
-    async fn wait_for_waiters(flight: &Arc<RenderSingleFlight>, expected: usize) {
+    async fn wait_for_waiters(
+        flight: &Arc<RenderSingleFlight>,
+        cache: &RenderCache,
+        expected: usize,
+    ) {
+        let key = flight_key(cache, BURST_KEY);
         tokio::time::timeout(Duration::from_secs(10), async {
-            while flight.waiting(BURST_KEY) < expected {
+            while flight.waiting(&key) < expected {
                 tokio::task::yield_now().await;
             }
         })
@@ -4076,7 +4189,7 @@ mod tests {
             });
         }
 
-        wait_for_waiters(&flight, BURST - 1).await;
+        wait_for_waiters(&flight, &cache, BURST - 1).await;
         release.add_permits(BURST);
 
         let mut documents = Vec::new();
@@ -4126,7 +4239,7 @@ mod tests {
             });
         }
 
-        wait_for_waiters(&flight, BURST - 1).await;
+        wait_for_waiters(&flight, &cache, BURST - 1).await;
         release.add_permits(BURST);
 
         let answered = tokio::time::timeout(Duration::from_secs(10), async {
@@ -4147,10 +4260,36 @@ mod tests {
             "each waiter falls back to rendering for itself"
         );
         assert_eq!(
-            flight.waiting(BURST_KEY),
+            flight.waiting(&flight_key(&cache, BURST_KEY)),
             0,
             "no claim may outlive the render that took it"
         );
+    }
+
+    /// A request that arrives after an invalidation starts its own render
+    /// instead of waiting on one that read the files from before it.
+    #[tokio::test]
+    async fn an_invalidation_starts_a_new_flight() {
+        let cache = RenderCache::new(16, 60);
+        let flight = Arc::new(RenderSingleFlight::default());
+        let RenderClaim::Leader(before) = flight.claim(&flight_key(&cache, BURST_KEY)) else {
+            panic!("the first claim leads");
+        };
+        assert!(matches!(
+            flight.claim(&flight_key(&cache, BURST_KEY)),
+            RenderClaim::Follower(_)
+        ));
+
+        cache.invalidate_route("/pricing").await;
+
+        assert!(
+            matches!(
+                flight.claim(&flight_key(&cache, BURST_KEY)),
+                RenderClaim::Leader(_)
+            ),
+            "a post-edit request joined a render of the pre-edit page"
+        );
+        drop(before);
     }
 
     /// A route whose renders read cookies, headers, or draft mode is never

@@ -215,8 +215,39 @@ export default function Dashboard() {
   because not every cookie is encoded and decoding one that is not throws.
 - `headers()` returns a read-only standard `Headers`, so `get`, `has`, and iteration behave exactly
   as they do on a `Request`.
-- `draftMode()` reports whether the `__ruvyxa_draft` cookie is present. Set it from an API route
-  after checking whatever secret your CMS shares with the application.
+- `draftMode().isEnabled` is true only when the `__ruvyxa_draft` cookie carries a value this server
+  signed. A cookie that merely exists is ignored, because a visitor can send any cookie they like.
+
+### Turning draft mode on
+
+Set `RUVYXA_PREVIEW_SECRET` to a random string of at least 32 characters in the server's environment
+(`.env` works under `ruvyxa dev`). It is the same variable the Vercel adapter reads for its
+prerender bypass token, and every instance of a deployment must see the same value. Then add an API
+route that checks whatever secret your CMS shares with the application and answers with the cookie
+`draftMode().enableCookie()` returns:
+
+```ts
+// app/api/draft/route.ts
+import { draftMode } from 'ruvyxa/server'
+
+export const GET = ({ request }: { request: Request }) => {
+  const url = new URL(request.url)
+  if (url.searchParams.get('secret') !== process.env.CMS_PREVIEW_SECRET) {
+    return new Response('Invalid token', { status: 401 })
+  }
+  return new Response(null, {
+    status: 307,
+    headers: { location: '/', 'set-cookie': draftMode().enableCookie() },
+  })
+}
+```
+
+- `enableCookie()` returns a `Set-Cookie` value whose cookie is an HMAC-SHA256 of
+  `RUVYXA_PREVIEW_SECRET`, marked `HttpOnly`, `Secure`, and `SameSite=Lax`. It throws when the
+  variable is unset or shorter than 32 characters, and without it `isEnabled` is always false.
+- `disableCookie()` returns a `Set-Cookie` value that expires the cookie; it needs no secret.
+- Both return the header value rather than setting it, so attach it to the response you build.
+- Changing `RUVYXA_PREVIEW_SECRET` signs every browser out of draft mode at once.
 
 ### These calls change how the page is cached
 

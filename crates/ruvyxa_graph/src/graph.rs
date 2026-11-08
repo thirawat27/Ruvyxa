@@ -52,6 +52,21 @@ pub(crate) struct ModuleCache {
     aliases: Option<Arc<ruvyxa_bundler::resolver::TsConfigPaths>>,
 }
 
+/// Read and scan one module. Markdown routes drop their code examples first,
+/// so an `import` shown in a fenced block is not an edge.
+fn parse_file(path: &Path) -> std::io::Result<Arc<ParsedModule>> {
+    let source = fs::read_to_string(path)?;
+    let source = if is_markdown_route(path) {
+        markdown_without_code_examples(&source)
+    } else {
+        source
+    };
+    Ok(Arc::new(ParsedModule {
+        ast: ruvyxa_bundler::ast::parse_module(&source),
+        source: Arc::from(source),
+    }))
+}
+
 impl ModuleCache {
     pub(crate) fn in_root(root: &Path) -> Self {
         Self {
@@ -79,17 +94,7 @@ impl ModuleCache {
             return cached.clone();
         }
 
-        let parsed = fs::read_to_string(&key).ok().map(|source| {
-            let source = if is_markdown_route(&key) {
-                markdown_without_code_examples(&source)
-            } else {
-                source
-            };
-            Arc::new(ParsedModule {
-                ast: ruvyxa_bundler::ast::parse_module(&source),
-                source: Arc::from(source),
-            })
-        });
+        let parsed = parse_file(&key).ok();
         self.modules.insert(key, parsed.clone());
         parsed
     }
@@ -102,9 +107,18 @@ impl ModuleCache {
         if let Some(module) = self.module(file) {
             return Ok(module);
         }
-        // Only reached on the error path, so re-reading to recover the real
-        // `io::Error` costs nothing in the common case.
-        Err(fs::read_to_string(file).unwrap_err().into())
+        // Only reached on the error path: `module` caches an unreadable file
+        // as `None`, so the real `io::Error` needs a second read. That read is
+        // a fresh question, not a confirmation — a page replaced by an atomic
+        // save fails one read and passes the next. It used to `unwrap_err()`
+        // the answer and panicked then. A readable page is a module, so the
+        // stale `None` is replaced, along with anything derived from it.
+        let key = self.canonical(file);
+        let module = parse_file(&key)?;
+        self.modules.insert(key.clone(), Some(Arc::clone(&module)));
+        self.edges.remove(&key);
+        self.masked.remove(&key);
+        Ok(module)
     }
 
     /// Source with strings, template text, comments, and regex literals blanked.

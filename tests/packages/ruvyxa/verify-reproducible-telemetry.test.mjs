@@ -9,6 +9,7 @@ import {
   differsOnlyInTelemetry,
   isTelemetryField,
   parseArgs,
+  prerenderedPageClassifier,
   withoutTelemetry,
 } from '../../../scripts/verify-reproducible.mjs'
 
@@ -146,5 +147,39 @@ describe('the script itself', () => {
       /^try \{\n {2}main\(\)/m,
       'an unguarded `main()` here runs two full cargo builds on import',
     )
+  })
+})
+
+describe('prerendered page classification', () => {
+  it('classifies a deployment stage copy with the prerendered page it copies', () => {
+    const first = new Map([
+      ['prerender/isr-page/index.html', 'a1'],
+      ['deploy/node/public/isr-page/index.html', 'a1'],
+      ['deploy/node/server/entry.mjs', 'e1'],
+      ['client/app.js', 'c1'],
+    ])
+    const second = new Map([
+      ['prerender/isr-page/index.html', 'a2'],
+      ['deploy/node/public/isr-page/index.html', 'a2'],
+      ['deploy/node/server/entry.mjs', 'e2'],
+      ['client/app.js', 'c2'],
+    ])
+    const isPrerendered = prerenderedPageClassifier(first, second)
+    assert.equal(isPrerendered('prerender/isr-page/index.html'), true)
+    assert.equal(isPrerendered('deploy/node/public/isr-page/index.html'), true)
+    assert.equal(isPrerendered('deploy/node/server/entry.mjs'), false, 'emitted code stays code')
+    assert.equal(isPrerendered('client/app.js'), false)
+  })
+
+  it('does not excuse a file that matched a prerendered page in only one build', () => {
+    const first = new Map([
+      ['prerender/a/index.html', 'h1'],
+      ['deploy/node/public/a/index.html', 'h1'],
+    ])
+    const second = new Map([
+      ['prerender/a/index.html', 'h2'],
+      ['deploy/node/public/a/index.html', 'x2'],
+    ])
+    assert.equal(prerenderedPageClassifier(first, second)('deploy/node/public/a/index.html'), false)
   })
 })

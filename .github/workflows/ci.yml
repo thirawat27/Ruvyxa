@@ -193,6 +193,20 @@ jobs:
         run: |
           cargo run -p ruvyxa_cli -- build --root examples/deploy-smoke --adapter node
           node scripts/smoke-runtime-adapter.mjs node examples/deploy-smoke/.ruvyxa/deploy/node 4390
+      # The same build, launched the way an operator launches it: `ruvyxa start`
+      # finds the stamped standalone server, supervises two workers, and puts the
+      # image service in front of them. The lane also kills a worker and, off
+      # Windows, drains on SIGTERM. The binary is named rather than reached
+      # through `cargo run`, so the smoke signals `start` and not the wrapper.
+      - name: Launch the build through ruvyxa start
+        timeout-minutes: 15
+        shell: bash
+        env:
+          RUVYXA_CLI: ${{ github.workspace }}/target/debug/ruvyxa${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: |
+          cargo build -p ruvyxa_cli
+          cargo run -p ruvyxa_cli -- build --root examples/deploy-smoke
+          node scripts/smoke-runtime-adapter.mjs start examples/deploy-smoke 4402
       - name: Set up Bun runtime parity
         if: matrix.os == 'ubuntu-latest' || matrix.os == 'windows-latest'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2

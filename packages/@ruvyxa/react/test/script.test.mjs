@@ -13,6 +13,7 @@ import { describe, it, beforeEach } from 'node:test'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 
+import * as scriptModule from '../dist/script.js'
 import { Script, injectScript, resetInjectedScripts } from '../dist/script.js'
 
 function stubDocument() {
@@ -157,5 +158,137 @@ describe('client injection', () => {
     })
     assert.equal(doc.appended[0].textContent, 'window.x = 1')
     assert.ok(loaded)
+  })
+
+  /**
+   * The key used to be claimed at injection and read as "loaded", so a second
+   * `<Script src=X onLoad>` mounting while X was still downloading had its
+   * `onLoad` called on the spot — before `window.Stripe` existed.
+   */
+  it('reports load to a second caller only once the script has actually loaded', () => {
+    const doc = stubDocument()
+    const loaded = []
+    inject(doc, { key: 'stripe', src: 'https://js.stripe.com/v3', onLoad: () => loaded.push(1) })
+    inject(doc, { key: 'stripe', src: 'https://js.stripe.com/v3', onLoad: () => loaded.push(2) })
+
+    assert.equal(doc.appended.length, 1, 'the second caller must not inject a second copy')
+    assert.deepEqual(loaded, [], 'nothing has loaded yet')
+
+    doc.appended[0].listeners.load()
+    assert.deepEqual(loaded, [1, 2], 'every caller waiting on the script hears it load, once')
+
+    inject(doc, { key: 'stripe', src: 'https://js.stripe.com/v3', onLoad: () => loaded.push(3) })
+    assert.deepEqual(loaded, [1, 2, 3], 'a caller arriving after load is told immediately')
+    assert.equal(doc.appended.length, 1)
+  })
+
+  it('reports an error to every caller waiting on the same script', () => {
+    const doc = stubDocument()
+    const errors = []
+    const loaded = []
+    for (const caller of [1, 2]) {
+      inject(doc, {
+        key: 'flaky',
+        src: 'https://cdn.example.com/flaky.js',
+        onLoad: () => loaded.push(caller),
+        onError: (error) => errors.push([caller, error]),
+      })
+    }
+    doc.appended[0].listeners.error('boom')
+
+    assert.deepEqual(errors, [
+      [1, 'boom'],
+      [2, 'boom'],
+    ])
+    assert.deepEqual(loaded, [])
+  })
+
+  it('stops reporting to a caller that unsubscribed before the script loaded', () => {
+    // An unmounted component must not have its `onLoad` run.
+    const doc = stubDocument()
+    const loaded = []
+    const unsubscribe = injectScript(doc, {
+      key: 'widget',
+      src: 'https://cdn.example.com/widget.js',
+      inlineCode: null,
+      attributes: {},
+      onLoad: () => loaded.push('unmounted'),
+      onError: () => {},
+    })
+    inject(doc, {
+      key: 'widget',
+      src: 'https://cdn.example.com/widget.js',
+      onLoad: () => loaded.push('mounted'),
+    })
+    assert.equal(typeof unsubscribe, 'function')
+    unsubscribe()
+    doc.appended[0].listeners.load()
+
+    assert.deepEqual(loaded, ['mounted'])
+  })
+})
+
+describe('lazyOnload scheduling', () => {
+  function stubWindow() {
+    const listeners = new Map()
+    return {
+      listeners,
+      addEventListener(type, handler) {
+        listeners.set(type, handler)
+      },
+      removeEventListener(type, handler) {
+        if (listeners.get(type) === handler) listeners.delete(type)
+      },
+    }
+  }
+
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 20))
+
+  it('runs the task once the window has loaded and the browser is idle', async () => {
+    const win = stubWindow()
+    let ran = 0
+    scriptModule.whenLoadedAndIdle(win, { readyState: 'loading' }, () => {
+      ran += 1
+    })
+    await settle()
+    assert.equal(ran, 0, 'nothing runs before the window load event')
+
+    win.listeners.get('load')()
+    await settle()
+    assert.equal(ran, 1)
+  })
+
+  /**
+   * The cleanup used to remove only the `load` listener. Once `load` had fired
+   * the idle callback was already queued, so an unmount in that gap still
+   * injected the script and ran the unmounted component's `onLoad`.
+   */
+  it('cancels the queued idle task when cleaned up after the window load event', async () => {
+    const win = stubWindow()
+    let ran = 0
+    const cancel = scriptModule.whenLoadedAndIdle(win, { readyState: 'loading' }, () => {
+      ran += 1
+    })
+    win.listeners.get('load')()
+    cancel()
+    await settle()
+    assert.equal(ran, 0, 'a cleaned-up schedule must not inject')
+  })
+
+  it('removes the load listener when cleaned up before the window load event', async () => {
+    const win = stubWindow()
+    const cancel = scriptModule.whenLoadedAndIdle(win, { readyState: 'loading' }, () => {})
+    cancel()
+    assert.equal(win.listeners.has('load'), false)
+  })
+
+  it('cancels an idle task scheduled on an already-loaded document', async () => {
+    let ran = 0
+    const cancel = scriptModule.whenLoadedAndIdle(stubWindow(), { readyState: 'complete' }, () => {
+      ran += 1
+    })
+    cancel()
+    await settle()
+    assert.equal(ran, 0)
   })
 })

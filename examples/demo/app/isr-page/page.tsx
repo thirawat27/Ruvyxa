@@ -11,6 +11,9 @@
 export const revalidate = 60
 
 export default function IsrPage() {
+  // Impure on purpose: the render time is what this page demonstrates, and a
+  // revalidated copy is told apart from the cached one only by it.
+  // oxlint-disable-next-line react/purity
   const now = new Date().toISOString()
 
   return (

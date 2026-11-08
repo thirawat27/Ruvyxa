@@ -10,6 +10,7 @@ import {
   isrTemporaryCacheDirSource,
   platformDocumentStoreSource,
 } from './utils.js'
+import { clusterSource } from './standalone-cluster.js'
 
 /**
  * A runtime the standalone server can be emitted for.
@@ -132,7 +133,7 @@ import { WorkerAdmissionController } from './worker-admission.mjs';
 // Imported so the directory stays deployable through any bundler that a host
 // puts in front of it, matching the serverless adapters.
 import manifest from './manifest.mjs';
-import { readFileSync, realpathSync, writeFileSync, mkdirSync, statSync } from 'node:fs';${temporaryIsrCache ? "\n// Only the temporary ISR cache needs one: it is what names the directory.\nimport { createHash } from 'node:crypto';" : ''}
+import { readFileSync, realpathSync, writeFileSync, renameSync, rmSync, mkdirSync, statSync } from 'node:fs';${temporaryIsrCache ? "\n// Only the temporary ISR cache needs one: it is what names the directory.\nimport { createHash } from 'node:crypto';" : ''}
 // Imported by specifier rather than taken from the global scope: \`process\` is a
 // global on Node and on Bun, and on Deno only under its Node compatibility
 // layer, which the specifier is what turns on.
@@ -167,6 +168,53 @@ ${isrCacheSetup}const publicDir = path.resolve(here, '..', 'public');
 
 ${platformDocumentStoreSource()}
 
+// \`ruvyxa start\` serves the Rust image pipeline on a loopback port and names it
+// here; a deployment started any other way has neither variable, passes no
+// optimizer, and answers /__ruvyxa/image with 404 as it always has. One
+// pipeline, reached the way the Vercel and Cloudflare adapters reach theirs.
+const IMAGE_SERVICE = (process.env.RUVYXA_IMAGE_SERVICE ?? '').trim();
+const IMAGE_SERVICE_TOKEN = process.env.RUVYXA_IMAGE_SERVICE_TOKEN ?? '';
+// Hop-by-hop, or describing bytes \`fetch\` has already decoded: forwarded as-is
+// they would declare a length or an encoding the relayed body no longer has.
+const IMAGE_SERVICE_DROPPED_HEADERS = ['content-encoding', 'content-length', 'transfer-encoding', 'connection'];
+const imageServiceOptimizer =
+  runtimePolicy.image?.onDemand === true && IMAGE_SERVICE !== ''
+    ? async (request, { src, width, quality }) => {
+        const target = new URL('/__ruvyxa/image', IMAGE_SERVICE);
+        target.searchParams.set('src', src);
+        target.searchParams.set('w', String(width));
+        target.searchParams.set('q', String(quality));
+        const headers = { 'x-ruvyxa-image-token': IMAGE_SERVICE_TOKEN };
+        const ifNoneMatch = request.headers.get('if-none-match');
+        if (ifNoneMatch) headers['if-none-match'] = ifNoneMatch;
+        let answer;
+        try {
+          // Bounded like a render, read when the request arrives: the constant
+          // is declared further down and settled long before any request.
+          answer = await fetch(target, {
+            headers,
+            signal: RENDER_TIMEOUT_MS > 0 ? AbortSignal.timeout(RENDER_TIMEOUT_MS) : undefined,
+          });
+        } catch (error) {
+          log('error', 'image service unavailable', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return new Response('Image service unavailable', {
+            status: 502,
+            headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
+          });
+        }
+        const relayed = new Headers(answer.headers);
+        for (const name of IMAGE_SERVICE_DROPPED_HEADERS) relayed.delete(name);
+        // A body nobody reads holds its connection to the service open.
+        if (request.method === 'HEAD') await answer.body?.cancel();
+        return new Response(request.method === 'HEAD' ? null : answer.body, {
+          status: answer.status,
+          headers: relayed,
+        });
+      }
+    : undefined;
+
 const handler = createHandler({
   routes: manifest.routes,
   middleware: runtimePolicy.middleware,
@@ -179,6 +227,7 @@ const handler = createHandler({
   importAction: loadActionModule,
   proxy: projectProxy,
   security: runtimePolicy.security,
+  optimizeImage: imageServiceOptimizer,
   logFormat: LOG_FORMAT,
 ${documentCacheOptionsSource('platformReadPrerendered', 'platformWritePrerendered')}
   // The project's own not-found page, pre-rendered by the build and carried
@@ -672,6 +721,7 @@ const DRAIN_DELAY_MS = Math.min(
     : positiveNumber('RUVYXA_DRAIN_DELAY', 5_000),
   SHUTDOWN_GRACE_MS / 2,
 );
+${clusterSource(runtime)}
 
 /**
  * How long the handler may take to produce a response.
@@ -957,7 +1007,7 @@ function overloaded(reason) {
  * stylesheet down with it.
  */
 async function handleAdmitted(buildRequest, pathname) {
-  if (!admission) return handleWithTimeout(await buildRequest());
+  if (!admission) return (await handleWithTimeout(await buildRequest())).response;
   const admitted = await admission.acquire();
   if (!admitted) {
     // Either the queue is full or the server is draining. Both mean the same
@@ -968,18 +1018,39 @@ async function handleAdmitted(buildRequest, pathname) {
       \`refused \${pathname}: \${MAX_CONCURRENT_RENDERS} renders running and \${MAX_QUEUED_RENDERS} waiting\`,
     );
   }
+  // A render that outlived its deadline is still running when its 503 goes
+  // out. Its slot is released once that work settles, not when the answer
+  // does: releasing it with the answer let any number of timed-out handlers
+  // run under a limit of one.
+  let abandoned = null;
   try {
-    return await handleWithTimeout(await buildRequest());
+    const outcome = await handleWithTimeout(await buildRequest());
+    abandoned = outcome.abandoned ?? null;
+    return outcome.response;
   } finally {
-    admission.release();
+    if (abandoned) void abandoned.finally(() => admission.release());
+    else admission.release();
   }
 }
 
 const RENDER_TIMED_OUT = Symbol('ruvyxa.renderTimedOut');
 
+/**
+ * Run the handler under the render deadline.
+ *
+ * Answers \`{ response }\`, plus \`abandoned\` when the deadline won: a promise
+ * that settles once the handler that lost has, or after one more deadline if it
+ * never does. The handler's request carries a signal the deadline aborts, so
+ * work that listens stops; a response that arrives late is cancelled, so a
+ * stream nobody will read does not keep producing.
+ */
 async function handleWithTimeout(request) {
-  if (RENDER_TIMEOUT_MS === 0) return handler(request);
+  if (RENDER_TIMEOUT_MS === 0) return { response: await handler(request) };
 
+  const deadlineAbort = new AbortController();
+  const bounded = new Request(request, {
+    signal: AbortSignal.any([request.signal, deadlineAbort.signal]),
+  });
   let expire;
   const deadline = new Promise((resolve) => {
     expire = setTimeout(() => resolve(RENDER_TIMED_OUT), RENDER_TIMEOUT_MS);
@@ -987,7 +1058,7 @@ async function handleWithTimeout(request) {
   // A rejection is carried rather than thrown, so that losing the race cannot
   // leave it unhandled: the request that would have caught it has already been
   // answered by the time it arrives.
-  const rendered = handler(request).then(
+  const rendered = handler(bounded).then(
     (response) => ({ response }),
     (error) => ({ error }),
   );
@@ -996,25 +1067,62 @@ async function handleWithTimeout(request) {
     const settled = await Promise.race([rendered, deadline]);
     if (settled === RENDER_TIMED_OUT) {
       renderTimeouts += 1;
-      return overloaded(
-        \`render timed out after \${RENDER_TIMEOUT_MS}ms: \${new URL(request.url).pathname}\`,
-      );
+      deadlineAbort.abort(new Error(\`render deadline of \${RENDER_TIMEOUT_MS}ms exceeded\`));
+      return {
+        response: overloaded(
+          \`render timed out after \${RENDER_TIMEOUT_MS}ms: \${new URL(request.url).pathname}\`,
+        ),
+        abandoned: settleAbandoned(rendered),
+      };
     }
     if ('error' in settled) throw settled.error;
-    return settled.response;
+    return { response: settled.response };
   } finally {
     clearTimeout(expire);
   }
+}
+
+// Cancels a response that arrives after its 503, and settles when the handler
+// has or one more deadline has passed. The cap is what keeps a handler that
+// ignores its signal from holding a slot for the life of the process.
+function settleAbandoned(rendered) {
+  const discarded = rendered.then((settled) => settled.response?.body?.cancel().catch(() => {}));
+  let cap;
+  const capped = new Promise((resolve) => {
+    cap = setTimeout(resolve, RENDER_TIMEOUT_MS);
+    cap?.unref?.();
+  });
+  return Promise.race([discarded, capped]).finally(() => clearTimeout(cap));
 }
 
 // SIGTERM is what an orchestrator sends and SIGINT is what an operator sends.
 // Registered one at a time inside a try: Deno on Windows supports only a subset
 // of POSIX signals and throws on the rest, and losing SIGINT because SIGTERM
 // could not be registered would leave the process unstoppable from a terminal.
+//
+// A repeat inside DUPLICATE_SIGNAL_WINDOW_MS of the first is the same stop
+// delivered twice, not an operator asking for "now": systemd's default
+// KillMode=control-group signals every process in the unit, so a server run
+// by \`ruvyxa start\` gets SIGTERM directly and again as the one its supervisor
+// forwards, and any wrapper that signals a whole process tree does the same.
+// Read as an escalation, that pair cut every drain short. Only a repeat after
+// the window reaches \`handle\` and forces. Shared by both transports and the
+// cluster supervisor, so the three cannot disagree about what a repeat means.
+const DUPLICATE_SIGNAL_WINDOW_MS = 1000;
+
 function onShutdownSignal(handle) {
+  let firstSignalAt = null;
   for (const signal of ['SIGTERM', 'SIGINT']) {
     try {
-      process.on(signal, () => handle(\`received \${signal}\`, 0));
+      process.on(signal, () => {
+        const now = performance.now();
+        if (firstSignalAt !== null && now - firstSignalAt < DUPLICATE_SIGNAL_WINDOW_MS) {
+          log('info', 'duplicate signal ignored', { signal });
+          return;
+        }
+        if (firstSignalAt === null) firstSignalAt = now;
+        handle(\`received \${signal}\`, 0);
+      });
     } catch {
       // this runtime and platform do not deliver that signal
     }
@@ -1224,8 +1332,16 @@ const server = createServer(async (req, res) => {
     // had asked whether there was anywhere to put them. A caller refused here
     // is refused before it has finished sending, and the unread remainder is
     // discarded by \`node:http\` rather than buffered by this program.
+    // Bun and Deno hand the handler their own Request, which carries a signal
+    // that fires when the client goes away. This one is rebuilt from node:http,
+    // so it gets the same signal by hand: without it, a route waiting on
+    // request.signal ran on for nobody, on this transport alone.
+    const disconnected = new AbortController();
+    res.on('close', () => {
+      if (!res.writableFinished) disconnected.abort();
+    });
     const response = await handleAdmitted(async () => {
-      const requestInit = { method: req.method, headers };
+      const requestInit = { method: req.method, headers, signal: disconnected.signal };
       if (!isRead) {
         requestInit.body = await readRequestBody(req);
       }
@@ -1239,6 +1355,10 @@ const server = createServer(async (req, res) => {
         ifRange: req.headers['if-range'],
       });
       if (plan) {
+        // The handler's 404 is replaced, so its body is never read. Cancel it
+        // rather than drop it: a stream's cancel() is how its source learns to
+        // stop.
+        response.body?.cancel().catch(() => {});
         sendStatic(req, res, plan);
         return;
       }
@@ -1272,6 +1392,11 @@ const server = createServer(async (req, res) => {
     }
 
     if (req.method === 'HEAD') {
+      // A HEAD answered by a GET handler may come back with that GET's body.
+      // Cancelled, not dropped: a push stream's interval is cleared only by
+      // its cancel(), and a probe sending HEAD once a minute left one running
+      // per probe.
+      response.body?.cancel().catch(() => {});
       res.end();
       return;
     }
@@ -1396,6 +1521,8 @@ let shuttingDown = false;
 function shutdown(reason, exitCode) {
   // A second signal means now. An operator pressing Ctrl-C twice, or a platform
   // escalating, must not be held for a window that exists for a load balancer.
+  // A repeat inside the duplicate window never arrives here; see
+  // onShutdownSignal.
   if (shuttingDown) {
     log('warn', 'shutdown forced', { reason });
     process.exit(exitCode);
@@ -1436,32 +1563,47 @@ function shutdown(reason, exitCode) {
   stopAccepting.unref();
 }
 
-onShutdownSignal(shutdown);
+if (IS_SUPERVISOR) {
+  runSupervisor();
+} else {
+  onShutdownSignal(shutdown);
 
-// One route that rejects outside the request's own try/catch would otherwise
-// terminate the process — Node's default for an unhandled rejection — and take
-// every other in-flight request down with it. A single bad request must not be
-// able to do that, so this is reported and the server keeps serving.
-process.on('unhandledRejection', (reason) => {
-  log('error', 'unhandled promise rejection', { reason: String(reason) });
-});
-
-// An uncaught exception is different: the process state after it is undefined,
-// so continuing to serve from it is not trustworthy. Drain what is in flight,
-// then leave with a non-zero code so the supervisor restarts a clean process.
-process.on('uncaughtException', (error) => {
-  log('error', 'uncaught exception', {
-    error: error instanceof Error ? error.message : String(error),
+  // A cluster worker is asked to drain over IPC rather than by signal; see
+  // \`stopWorker\`. Outside a cluster nothing ever sends this message. A worker
+  // already draining ignores it: Ctrl-C reaches the whole process group, and a
+  // second shutdown call is the forced exit that would cut the drain short.
+  process.on('message', (message) => {
+    if (message && message.ruvyxa === 'shutdown' && !shuttingDown) {
+      shutdown('supervisor requested shutdown', 0);
+    }
   });
-  shutdown('uncaught exception', 1);
-});
 
-server.listen(port, host, () => {
-  log('info', 'listening on', {
-    runtime: RUVYXA_RUNTIME,
-    url: \`http://\${host === '0.0.0.0' ? 'localhost' : host}:\${port}\`,
+  // One route that rejects outside the request's own try/catch would otherwise
+  // terminate the process — Node's default for an unhandled rejection — and take
+  // every other in-flight request down with it. A single bad request must not be
+  // able to do that, so this is reported and the server keeps serving.
+  process.on('unhandledRejection', (reason) => {
+    log('error', 'unhandled promise rejection', { reason: String(reason) });
   });
-});
+
+  // An uncaught exception is different: the process state after it is undefined,
+  // so continuing to serve from it is not trustworthy. Drain what is in flight,
+  // then leave with a non-zero code so the supervisor restarts a clean process.
+  process.on('uncaughtException', (error) => {
+    log('error', 'uncaught exception', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    shutdown('uncaught exception', 1);
+  });
+
+  server.listen(port, host, () => {
+    log('info', 'listening on', {
+      runtime: RUVYXA_RUNTIME,
+      url: \`http://\${host === '0.0.0.0' ? 'localhost' : host}:\${port}\`,
+      pid: process.pid,
+    });
+  });
+}
 `
 }
 
@@ -1550,9 +1692,10 @@ const idleTimeout = Number.isFinite(idleSeconds) && idleSeconds > 0
   ? { idleTimeout: Math.min(255, Math.max(1, Math.round(idleSeconds / 1000))) }
   : {};
 
-const server = Bun.serve({
+const server = IS_SUPERVISOR ? null : Bun.serve({
   port,
   hostname: host,
+  reusePort: process.env.RUVYXA_REUSE_PORT === '1',
   ...idleTimeout,
   fetch: handleRequest,
   // Outside \`handleRequest\`, and therefore outside the one place the security
@@ -1577,7 +1720,7 @@ const server = Bun.serve({
 // is the draining form; \`stop(true)\` would cut open responses off, which is
 // the failure a graceful shutdown exists to prevent.
 function closeServer() {
-  return server.stop(false);
+  return server?.stop(false);
 }`
       : `const server = Deno.serve(
   {
@@ -1587,6 +1730,7 @@ function closeServer() {
       log('info', 'listening on', {
         runtime: RUVYXA_RUNTIME,
         url: \`http://\${hostname === '0.0.0.0' ? 'localhost' : hostname}:\${boundPort}\`,
+        pid: process.pid,
       });
     },
     // Outside \`handleRequest\`, for the reason the Bun transport's \`error\` hook
@@ -1614,10 +1758,12 @@ function closeServer() {
 
   const banner =
     runtime === 'bun'
-      ? `log('info', 'listening on', {
-  runtime: RUVYXA_RUNTIME,
-  url: \`http://\${host === '0.0.0.0' ? 'localhost' : host}:\${port}\`,
-});
+      ? `
+  log('info', 'listening on', {
+    runtime: RUVYXA_RUNTIME,
+    url: \`http://\${host === '0.0.0.0' ? 'localhost' : host}:\${port}\`,
+    pid: process.pid,
+  });
 `
       : ''
 
@@ -1812,7 +1958,11 @@ async function handleRequest(request, connection) {
       ifModifiedSince: request.headers.get('if-modified-since'),
       ifRange: request.headers.get('if-range'),
     });
-    if (plan) return withCompression(await staticResponse(plan, request.method), request);
+    if (plan) {
+      // The handler's 404 is replaced, so cancel its body: see nodeTransport.
+      response.body?.cancel().catch(() => {});
+      return withCompression(await staticResponse(plan, request.method), request);
+    }
   }
   return withCompression(withSecurityHeaders(response), request);
 }
@@ -1824,6 +1974,8 @@ let shuttingDown = false;
 async function shutdown(reason, exitCode) {
   // A second signal means now. An operator pressing Ctrl-C twice, or a platform
   // escalating, must not be held for a window that exists for a load balancer.
+  // A repeat inside the duplicate window never arrives here; see
+  // onShutdownSignal.
   if (shuttingDown) {
     log('warn', 'shutdown forced', { reason });
     process.exit(exitCode);
@@ -1859,25 +2011,44 @@ async function shutdown(reason, exitCode) {
   process.exit(exitCode);
 }
 
-onShutdownSignal(shutdown);
+if (IS_SUPERVISOR) {
+  runSupervisor();
+} else {
+  onShutdownSignal(shutdown);
 
-// One route that rejects outside the request's own try/catch would otherwise
-// terminate the process and take every other in-flight request down with it. A
-// single bad request must not be able to do that, so this is reported and the
-// server keeps serving.
-process.on('unhandledRejection', (reason) => {
-  log('error', 'unhandled promise rejection', { reason: String(reason) });
-});
+  // A worker the supervisor spawned has an IPC channel, and only such a worker
+  // has \`process.send\`: a process started on its own registers neither. A drain
+  // is asked for by message, as on Node, and ignored once one is running,
+  // because a second shutdown call is the forced exit. A closed channel means
+  // the supervisor is gone, and a worker nobody supervises must not outlive it.
+  if (typeof process.send === 'function') {
+    process.on('message', (message) => {
+      if (message && message.ruvyxa === 'shutdown' && !shuttingDown) {
+        void shutdown('supervisor requested shutdown', 0);
+      }
+    });
+    process.on('disconnect', () => {
+      if (!shuttingDown) void shutdown('supervisor gone', 0);
+    });
+  }
 
-// An uncaught exception is different: the process state after it is undefined,
-// so continuing to serve from it is not trustworthy. Drain what is in flight,
-// then leave with a non-zero code so the supervisor restarts a clean process.
-process.on('uncaughtException', (error) => {
-  log('error', 'uncaught exception', {
-    error: error instanceof Error ? error.message : String(error),
+  // One route that rejects outside the request's own try/catch would otherwise
+  // terminate the process and take every other in-flight request down with it. A
+  // single bad request must not be able to do that, so this is reported and the
+  // server keeps serving.
+  process.on('unhandledRejection', (reason) => {
+    log('error', 'unhandled promise rejection', { reason: String(reason) });
   });
-  void shutdown('uncaught exception', 1);
-});
 
-${banner}`
+  // An uncaught exception is different: the process state after it is undefined,
+  // so continuing to serve from it is not trustworthy. Drain what is in flight,
+  // then leave with a non-zero code so the supervisor restarts a clean process.
+  process.on('uncaughtException', (error) => {
+    log('error', 'uncaught exception', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    void shutdown('uncaught exception', 1);
+  });
+${banner}}
+`
 }

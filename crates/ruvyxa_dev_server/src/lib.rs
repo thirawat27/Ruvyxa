@@ -48,6 +48,7 @@ mod env_file;
 /// renderings of the same asset.
 pub mod image_codec;
 pub mod image_decode;
+pub mod image_service;
 #[cfg(test)]
 use env_file::parse_env_source;
 pub use env_file::project_env;
@@ -2216,6 +2217,18 @@ async fn handle_request(
 ) -> impl IntoResponse {
     let started = Instant::now();
     let (parts, body) = request.into_parts();
+    // The transport peer, which the posted-form gate in `render_request_inner`
+    // needs for the same two questions the action endpoint asks of it: whether
+    // a proxy vouched for the scheme, and which client to charge. Read from the
+    // extensions rather than extracted, because a router served without connect
+    // info must still render pages; the unspecified address it falls back to
+    // is trusted for nothing and shares one rate-limit bucket, which is the
+    // direction both checks are allowed to be wrong in.
+    let peer = parts
+        .extensions
+        .get::<axum::extract::ConnectInfo<SocketAddr>>()
+        .map(|info| info.0)
+        .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
     let headers = parts.headers;
     let method = parts.method.as_str().to_string();
     let request_path = match canonical_request_path(parts.uri.path()) {
@@ -2297,6 +2310,7 @@ async fn handle_request(
         &current.method,
         &current.headers,
         current.body.as_deref(),
+        peer,
     )
     .await;
     let response = match render_result {

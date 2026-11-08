@@ -17,6 +17,7 @@
 
 use std::io::{self, Read};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 /// How often the wait loop re-checks a child that has not exited yet.
@@ -24,6 +25,16 @@ use std::time::{Duration, Instant};
 /// Short enough that a fast command is not noticeably delayed, long enough that
 /// waiting out a slow type check does not spin a core.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// How long the pipes may stay open after the child has exited or been
+/// stopped.
+///
+/// A pipe closes when every process holding it has gone, not when the child
+/// has. A process the child started inherits both pipes — a `.cmd` shim's
+/// `node.exe`, a wrapper script's tool, a daemon the command forks — and kept
+/// the drain threads, and so the call, waiting for that process instead of the
+/// budget. Past this grace the output is abandoned and the call answers.
+const PIPE_GRACE: Duration = Duration::from_secs(1);
 
 /// Why a bounded child process did not produce output.
 #[derive(Debug)]
@@ -91,10 +102,8 @@ pub fn output_with_timeout(
     // than one pipe buffer of output — which a failing `tsc` easily does — since
     // the child blocks on a full pipe and never reaches the exit this loop is
     // waiting for.
-    let mut stdout_pipe = child.stdout.take();
-    let mut stderr_pipe = child.stderr.take();
-    let stdout_reader = std::thread::spawn(move || drain(stdout_pipe.as_mut()));
-    let stderr_reader = std::thread::spawn(move || drain(stderr_pipe.as_mut()));
+    let stdout_reader = spawn_drain(child.stdout.take());
+    let stderr_reader = spawn_drain(child.stderr.take());
 
     let deadline = Instant::now() + timeout;
     // The loop breaks with a value rather than returning, so every exit from it
@@ -126,15 +135,24 @@ pub fn output_with_timeout(
         }
     };
 
-    // Joined after the child is gone either way, so the pipes are closed and
-    // neither reader can still be blocked. Joined before `waited` is inspected,
-    // so a failed wait unwinds the threads too rather than detaching them.
-    let stdout = stdout_reader.join().unwrap_or_else(|_| Ok(Vec::new()))?;
-    let stderr = stderr_reader.join().unwrap_or_else(|_| Ok(Vec::new()))?;
+    // Collected after the child is gone either way, and before `waited` is
+    // inspected. The child's own handles are closed by now, but a process it
+    // started may still hold the pipes open, so the collection is bounded too:
+    // the budget, or the grace after the child exited, whichever ends later.
+    let collect_by = deadline.max(Instant::now()) + PIPE_GRACE;
+    let stdout = collect(&stdout_reader, collect_by);
+    let stderr = collect(&stderr_reader, collect_by);
 
     let Some(status) = waited? else {
         return Err(ProcessError::TimedOut { after: timeout });
     };
+    let (Some(stdout), Some(stderr)) = (stdout, stderr) else {
+        // The command answered, but something it started still holds its
+        // output open. That output is not complete, and waiting for it is the
+        // unbounded wait this module replaces.
+        return Err(ProcessError::TimedOut { after: timeout });
+    };
+    let (stdout, stderr) = (stdout?, stderr?);
 
     Ok(Output {
         status,
@@ -149,8 +167,47 @@ pub fn output_with_timeout(
 /// process that has already exited is an error on some platforms, and the
 /// `wait` is what releases the operating-system entry so no zombie is left.
 fn stop(child: &mut Child) {
+    // Windows ends one process, not its tree, and every `.cmd` tool the CLI
+    // runs (`tsc.cmd`, `tailwindcss.cmd`) is `cmd.exe /c` starting `node.exe`:
+    // killing the shim left the tool running. `taskkill /T` ends the tree while
+    // the root's id still names it, so it runs before `kill` reaps the root.
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &child.id().to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// Drain `pipe` on its own thread and hand the result back over a channel, so
+/// the caller can stop waiting without joining a thread that may never end.
+fn spawn_drain(
+    mut pipe: Option<impl Read + Send + 'static>,
+) -> mpsc::Receiver<io::Result<Vec<u8>>> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        // A receiver that has given up is not an error worth reporting.
+        let _ = sender.send(drain(pipe.as_mut()));
+    });
+    receiver
+}
+
+/// The drained output, or `None` once `by` has passed with the pipe still
+/// open. A reader that panicked reports empty output, as a join did before.
+fn collect(
+    reader: &mpsc::Receiver<io::Result<Vec<u8>>>,
+    by: Instant,
+) -> Option<io::Result<Vec<u8>>> {
+    match reader.recv_timeout(by.saturating_duration_since(Instant::now())) {
+        Ok(output) => Some(output),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Some(Ok(Vec::new())),
+        Err(mpsc::RecvTimeoutError::Timeout) => None,
+    }
 }
 
 fn drain(pipe: Option<&mut impl Read>) -> io::Result<Vec<u8>> {
@@ -242,6 +299,73 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(10),
             "the wait must end on its own budget"
+        );
+    }
+
+    /// A `.cmd` shim on Windows, or any wrapper script, is a process that
+    /// starts the real tool as its own child. Killing the wrapper left the tool
+    /// running and holding the inherited stdout and stderr, so the drain
+    /// threads — and the call — waited for the tool instead of the budget.
+    #[test]
+    fn a_grandchild_holding_the_pipes_does_not_outlive_the_budget() {
+        if !node_available() {
+            eprintln!("skipping: node is not available on this machine");
+            return;
+        }
+        let mut command = Command::new(crate::JavaScriptRuntime::Node.executable());
+        command.arg("-e").arg(
+            "require('child_process').spawn(process.execPath, \
+             ['-e', 'setTimeout(() => {}, 20000)'], { stdio: 'inherit' }); \
+             setInterval(() => {}, 1000)",
+        );
+
+        let started = Instant::now();
+        // Long enough that the wrapper has started its child before it is
+        // killed; a kill that lands first proves nothing.
+        let error = output_with_timeout(&mut command, Duration::from_secs(2))
+            .expect_err("a wedged wrapper must time out");
+
+        assert!(
+            matches!(error, ProcessError::TimedOut { .. }),
+            "expected a timeout, got {error}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "the call waited {:?} on a grandchild's pipes",
+            started.elapsed()
+        );
+    }
+
+    /// The shape the defect was reported in: `tsc.cmd` and `tailwindcss.cmd`
+    /// run through `cmd.exe /c`, and the shim starts `node.exe` as its child.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_cmd_shim_does_not_outlive_the_budget() {
+        if !node_available() {
+            eprintln!("skipping: node is not available on this machine");
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let shim = temp.path().join("wedged.cmd");
+        std::fs::write(
+            &shim,
+            "@echo off\r\nnode -e \"setInterval(() => {}, 1000)\"\r\n",
+        )
+        .unwrap();
+        let mut command = Command::new(&shim);
+
+        let started = Instant::now();
+        let error = output_with_timeout(&mut command, Duration::from_secs(2))
+            .expect_err("a wedged shim must time out");
+
+        assert!(
+            matches!(error, ProcessError::TimedOut { .. }),
+            "expected a timeout, got {error}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "the call waited {:?} on the shim's child",
+            started.elapsed()
         );
     }
 

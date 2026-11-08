@@ -6,6 +6,9 @@
 
 <h1 align="center">@ruvyxa/realtime</h1>
 
+> **Experimental.** This package ships without a production guarantee: its API and behaviour may
+> change in a minor release, and it is not part of the release gate the framework itself passes.
+
 <p align="center">
   Action-driven realtime updates using Ruvyxa's native Axum WebSocket transport. No Socket.IO or<br/>
   application-owned WebSocket server is required.<br/><br/>

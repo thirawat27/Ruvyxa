@@ -397,6 +397,104 @@ describe('client router navigation state', () => {
       }
     }
   })
+
+  /**
+   * A second navigation aborts the first one's Flight controller, and that
+   * controller belongs to the shared cache entry. The entry's own `.catch` only
+   * evicts it microtasks later, while the second navigation's `await
+   * ensureManifest()` resumes after one — so navigating to the same URL twice
+   * in quick succession used to pick the aborted entry back up, settle it as a
+   * failure, and fall back to a full document load.
+   */
+  it('does not reuse an aborted flight when the same URL is navigated to twice', async () => {
+    const previousFetch = Object.getOwnPropertyDescriptor(globalThis, 'fetch')
+    const requests = []
+    globalThis.fetch = (_url, init) =>
+      new Promise((resolve, reject) => {
+        const respond = (tree) =>
+          resolve({
+            ok: true,
+            status: 200,
+            headers: { get: () => null },
+            text: async () =>
+              JSON.stringify({
+                protocol: 'ruvyxa.flight',
+                protocolVersion: 1,
+                manifestVersion: 'v1',
+                route: '/blog/hello',
+                tree,
+              }),
+          })
+        // What a real `fetch` does: the abort rejects the request immediately.
+        init.signal.addEventListener('abort', () => {
+          reject(new DOMException('The operation was aborted.', 'AbortError'))
+        })
+        requests.push({ respond })
+      })
+    const assigned = []
+    const replaced = []
+    try {
+      await withGlobals(
+        {
+          window: {
+            ...browserWindow('/'),
+            location: {
+              ...browserWindow('/').location,
+              assign: (href) => assigned.push(href),
+              replace: (href) => replaced.push(href),
+            },
+          },
+          __RUVYXA_REQUEST_PATH__: '/',
+          __RUVYXA_ROUTES__: { '/blog/[slug]': (context) => ({ flight: context.flight }) },
+          __RUVYXA_ROUTE_ARTIFACTS__: { '/blog/[slug]': 'v1' },
+          __RUVYXA_ROOT__: { render() {} },
+          __RUVYXA_ROUTE_MANIFEST__: {
+            routes: [
+              {
+                path: '/blog/[slug]',
+                src: '/chunks/blog.js',
+                flight: true,
+                artifactVersion: 'v1',
+              },
+            ],
+          },
+        },
+        async () => {
+          const router = getRouterInstance()
+          const first = router.navigate('/blog/hello')
+          // Let the first navigation reach its Flight request.
+          for (let turn = 0; turn < 10 && requests.length === 0; turn += 1) {
+            await Promise.resolve()
+          }
+          assert.equal(requests.length, 1, 'the first navigation must have asked for its payload')
+
+          const second = router.navigate('/blog/hello')
+          for (let turn = 0; turn < 10 && requests.length < 2; turn += 1) {
+            await Promise.resolve()
+          }
+          assert.equal(requests.length, 2, 'the second navigation must ask for a fresh payload')
+          requests[1].respond('fresh')
+          await Promise.all([first, second])
+
+          assert.deepEqual(assigned, [], 'no document load may replace the soft navigation')
+          assert.deepEqual(replaced, [])
+          assert.equal(router.getSnapshot().pathname, '/blog/hello')
+          assert.equal(router.getSnapshot().flight, 'fresh')
+
+          // The fix must not throw away a payload that did arrive: this
+          // navigation aborts the controller of the fulfilled entry, which is
+          // still the right answer for this URL.
+          await router.navigate('/blog/hello')
+          assert.equal(requests.length, 2, 'a fulfilled payload stays cached after an abort')
+          assert.equal(router.getSnapshot().flight, 'fresh')
+          assert.deepEqual(assigned, [])
+        },
+      )
+    } finally {
+      if (previousFetch) Object.defineProperty(globalThis, 'fetch', previousFetch)
+      else delete globalThis.fetch
+    }
+  })
 })
 
 describe('client router navigation safety', () => {

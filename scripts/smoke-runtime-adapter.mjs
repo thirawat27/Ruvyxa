@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import {
   createReadStream,
   existsSync,
@@ -42,8 +42,9 @@ const RUNTIMES = [
   'firebase',
   'static',
   'axum',
+  'start',
 ]
-const SPAWNED = new Set(['node', 'bun', 'deno', 'aws', 'railway', 'render'])
+const SPAWNED = new Set(['node', 'bun', 'deno', 'aws', 'railway', 'render', 'start'])
 /**
  * Spawned lanes whose program is Node rather than a runtime of the same name.
  *
@@ -90,6 +91,12 @@ if (!RUNTIMES.includes(runtime) || !deploymentDirectory || !portArg || !APPS.inc
     '  platform publishes as static, and the config file that platform reads its asset headers',
   )
   console.error('  from — so the header assertion lands on the artifact, not on this script.')
+  console.error(
+    '  start takes the project root and runs `ruvyxa start` from RUVYXA_CLI against it;',
+  )
+  console.error(
+    '  RUVYXA_SMOKE_RUNTIME (node|bun|deno, default node) and RUVYXA_SMOKE_WORKERS (default 2).',
+  )
   console.error(
     `  --app <${APPS.join('|')}> selects whose expectations to check; default deploy-smoke.`,
   )
@@ -191,8 +198,32 @@ async function settleFileStreams() {
 const PROXIED = new Set(['aws'])
 const innerPort = PROXIED.has(runtime) ? port + 1_000 : port
 
+/**
+ * The `start` lane's JavaScript runtime and worker count.
+ *
+ * `start` serves whichever standalone server the build staged — a project
+ * built with `--runtime bun` leaves `deploy/bun` — so the runtime is named
+ * once here and drives both the `--runtime` flag and the publish directory,
+ * rather than the lane assuming Node. `RUVYXA_SMOKE_RUNTIME` defaults to node;
+ * `RUVYXA_SMOKE_WORKERS` defaults to two, so every check is also a check that
+ * a cluster answers like one process. Bun refuses more than one worker off
+ * Linux and Deno refuses it everywhere (RUV1025), so those lanes run with 1.
+ */
+const START_RUNTIME = process.env.RUVYXA_SMOKE_RUNTIME ?? 'node'
+const START_WORKERS = process.env.RUVYXA_SMOKE_WORKERS ?? '2'
+if (runtime === 'start' && !['node', 'bun', 'deno'].includes(START_RUNTIME)) {
+  console.error(`RUVYXA_SMOKE_RUNTIME must be node, bun, or deno, got ${START_RUNTIME}`)
+  process.exit(2)
+}
+if (runtime === 'start' && START_WORKERS !== 'auto' && !/^[1-9][0-9]*$/.test(START_WORKERS)) {
+  throw new Error(
+    `RUVYXA_SMOKE_WORKERS must be "auto" or a positive integer, got "${START_WORKERS}"`,
+  )
+}
+
 if (runtime === 'static') await startStaticSite()
 else if (runtime === 'axum') startAxumHost()
+else if (runtime === 'start') startRuvyxaStart()
 else if (FETCH_MODULE.has(runtime)) await startFetchModule()
 else if (NODE_HANDLER.has(runtime)) await startNodeHandler()
 else {
@@ -246,6 +277,173 @@ function startAxumHost() {
   })
   child.stdout.on('data', (chunk) => (output += chunk))
   child.stderr.on('data', (chunk) => (output += chunk))
+}
+
+/**
+ * Run `ruvyxa start` itself rather than the program it launches.
+ *
+ * The node lane proves the standalone server; this one proves that `start`
+ * finds the server the build left, passes the bind address through, and puts
+ * the image service and the worker count in front of it — the launcher is the
+ * part no other lane touches. Takes the *project* root, not a deployment
+ * directory, because that is what `start` is pointed at. `RUVYXA_CLI` names
+ * the built binary, as it does for the dev-server smoke.
+ */
+function startRuvyxaStart() {
+  const program = process.env.RUVYXA_CLI
+  if (!program) throw new Error('RUVYXA_CLI must name the built ruvyxa binary')
+  child = spawn(
+    program,
+    [
+      'start',
+      '--root',
+      path.resolve(deploymentDirectory),
+      '--runtime',
+      START_RUNTIME,
+      '--host',
+      '127.0.0.1',
+      '--port',
+      String(innerPort),
+      '--workers',
+      START_WORKERS,
+    ],
+    // JSON logs, so the cluster checks below can read each worker's pid.
+    { env: { ...process.env, RUVYXA_LOG_FORMAT: 'json' }, stdio: ['ignore', 'pipe', 'pipe'] },
+  )
+  child.on('error', (error) => (output += `failed to spawn ${program}: ${error}\n`))
+  child.stdout.on('data', (chunk) => (output += chunk))
+  child.stderr.on('data', (chunk) => (output += chunk))
+}
+
+/** Poll a condition until it holds, failing with the server's output if it never does. */
+async function waitForCondition(condition, timeoutMs, description) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await condition()) return
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+  throw new Error(`${runtime}: ${description} within ${timeoutMs}ms\n${output}`)
+}
+
+/** Every worker pid a `listening on` record has reported so far, in order. */
+function listeningPids() {
+  return output
+    .split('\n')
+    .filter((line) => line.includes('"msg":"listening on"'))
+    .flatMap((line) => {
+      const match = line.match(/"pid":(\d+)/)
+      return match ? [Number(match[1])] : []
+    })
+}
+
+/**
+ * What a cluster behind `start` must do that one process need not.
+ *
+ * A response from a cluster carries no worker id, so "every worker answers" is
+ * read as: the supervisor reported the count, every worker logged its pid, and
+ * a burst of concurrent probes all succeed. Then one worker is killed outright
+ * and must be replaced, and — off Windows, where a signal to `start` is a hard
+ * kill rather than a request — a SIGTERM must reach every worker as a drain,
+ * visible on the health endpoint before the socket closes.
+ */
+async function checkStartCluster() {
+  const workers = START_WORKERS === 'auto' ? null : Number(START_WORKERS)
+  const clustered = workers === null || workers > 1
+  if (clustered) {
+    if (!output.includes('supervising workers')) {
+      throw new Error(`start: the standalone server did not supervise workers\n${output}`)
+    }
+    // Readiness is the first worker answering; the pids are every worker.
+    await waitForCondition(
+      () => listeningPids().length >= (workers ?? 2),
+      10_000,
+      'not every worker reported listening',
+    )
+  }
+  const burst = await Promise.all(
+    Array.from({ length: 20 }, () =>
+      fetch(`${base}/__ruvyxa/health`).then(async (response) => {
+        await response.arrayBuffer()
+        return response.status
+      }),
+    ),
+  )
+  if (!burst.every((status) => status === 200)) {
+    throw new Error(`start: a health probe failed: ${burst.join(',')}\n${output}`)
+  }
+  console.log(`[ok] start · 20 concurrent health probes all answer 200`)
+
+  if (clustered) {
+    const respawns = () => (output.match(/worker exited, respawning/g) ?? []).length
+    const before = respawns()
+    const listening = listeningPids().length
+    process.kill(listeningPids()[0], 'SIGKILL')
+    await waitForCondition(() => respawns() > before, 10_000, 'a killed worker was not respawned')
+    await waitForCondition(
+      () => listeningPids().length > listening,
+      15_000,
+      'the respawned worker never listened',
+    )
+    const after = await fetch(`${base}/__ruvyxa/health`)
+    await after.arrayBuffer()
+    if (after.status !== 200)
+      throw new Error(`start: health answered ${after.status} after respawn`)
+    console.log(`[ok] start · a killed worker is replaced and the cluster still answers`)
+  }
+
+  if (process.platform === 'win32') {
+    // `child.kill` on Windows is TerminateProcess: no signal reaches `start`,
+    // so there is no drain to observe — only the tree to clean up.
+    console.log(`[skip] start · drain on SIGTERM — a signal is a hard kill on Windows`)
+    return
+  }
+  const exited = new Promise((resolve) => child.once('exit', resolve))
+  child.kill('SIGTERM')
+  // The 4 s window fits inside the default 5 s RUVYXA_DRAIN_DELAY, after which the socket closes.
+  await waitForCondition(
+    async () => {
+      try {
+        const response = await fetch(`${base}/__ruvyxa/health`)
+        const body = await response.json()
+        return body.status === 'draining'
+      } catch {
+        // A reset connection or a non-JSON answer: keep polling.
+        return false
+      }
+    },
+    4_000,
+    'health never reported draining after SIGTERM',
+  )
+  console.log(`[ok] start · health reads draining after SIGTERM, before the socket closes`)
+  const code = await Promise.race([
+    exited,
+    new Promise((resolve) => setTimeout(() => resolve('timeout'), 30_000)),
+  ])
+  if (code === 'timeout') throw new Error(`start: did not exit after its drain\n${output}`)
+}
+
+/**
+ * End `ruvyxa start` and everything under it.
+ *
+ * On Windows `child.kill` terminates `ruvyxa.exe` alone and orphans the
+ * runtime it launched — which keeps holding the port — so the whole tree is
+ * ended with `taskkill /T` *while the parent is still alive*, since the walk is
+ * by parent pid. Elsewhere SIGTERM is forwarded and drained; the wait covers
+ * the drain window before escalating.
+ */
+async function stopRuvyxaStart() {
+  if (child.exitCode !== null || child.signalCode !== null) return
+  const exited = new Promise((resolve) => child.once('exit', () => resolve(true)))
+  if (process.platform === 'win32') {
+    spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' })
+  } else {
+    child.kill('SIGTERM')
+  }
+  const done = await Promise.race([
+    exited,
+    new Promise((resolve) => setTimeout(() => resolve(false), 30_000)),
+  ])
+  if (!done) child.kill('SIGKILL')
 }
 
 /** Serve the published files, then hand everything else to the spawned server. */
@@ -403,6 +601,11 @@ async function startStaticSite() {
  */
 function publishDirectory() {
   if (assetsArg) return path.resolve(assetsArg)
+  // `start` is pointed at the project, and serves the standalone server the
+  // build staged for its runtime.
+  if (runtime === 'start') {
+    return path.resolve(deploymentDirectory, '.ruvyxa', 'deploy', START_RUNTIME, 'public')
+  }
   return path.resolve(path.join(deploymentDirectory, '..', 'assets'))
 }
 
@@ -1455,6 +1658,10 @@ try {
     await checkServerFunction()
     ran += 2
   }
+  if (runtime === 'start') {
+    await checkStartCluster()
+    ran += 1
+  }
   console.log(`[ok] ${runtime} deployment artifact passed ${ran} checks`)
 } finally {
   await stopServing()
@@ -1505,6 +1712,10 @@ async function stopServing() {
     await new Promise((resolve) => server.close(resolve))
     // A proxied lane has both: the front server and the program behind it.
     if (!child) return
+  }
+  if (runtime === 'start') {
+    await stopRuvyxaStart()
+    return
   }
   child.kill()
   await Promise.race([

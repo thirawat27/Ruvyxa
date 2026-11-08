@@ -30,13 +30,21 @@ export class WorkerAdmissionController {
   /**
    * Acquire an execution slot or join the bounded FIFO wait queue.
    *
-   * `false` means the queue is full or the controller is closed. Closing is
-   * not counted as overload because it is an intentional lifecycle event.
+   * `false` means the queue is full, the controller is closed, or `signal`
+   * aborted before a slot was handed over. Neither closing nor a withdrawal is
+   * counted as overload: both are intentional, not a sign of saturation.
    *
+   * A waiter whose `signal` aborts leaves the queue on the same turn. Without
+   * that, a request the host had abandoned kept its place until a slot freed
+   * and only then noticed — so the bound counted requests nobody was waiting
+   * for and turned live ones away. An abort after admission changes nothing
+   * here: the owner still holds the slot and releases it itself.
+   *
+   * @param {AbortSignal} [signal]
    * @returns {true | false | Promise<boolean>}
    */
-  acquire() {
-    if (this.#closed) return false
+  acquire(signal) {
+    if (this.#closed || signal?.aborted) return false
     if (this.#activeRequests < this.maxConcurrentRequests) {
       this.#activeRequests++
       return true
@@ -45,7 +53,20 @@ export class WorkerAdmissionController {
       this.#rejectedRequests++
       return false
     }
-    return new Promise((resolve) => this.#queue.push(resolve))
+    return new Promise((resolve) => {
+      const withdraw = () => {
+        const index = this.#queue.indexOf(settle)
+        if (index === -1) return
+        this.#queue.splice(index, 1)
+        resolve(false)
+      }
+      const settle = (admitted) => {
+        signal?.removeEventListener('abort', withdraw)
+        resolve(admitted)
+      }
+      this.#queue.push(settle)
+      signal?.addEventListener('abort', withdraw, { once: true })
+    })
   }
 
   /** Release one owned slot and admit the oldest waiter, if any. */

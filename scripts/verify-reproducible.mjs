@@ -158,6 +158,26 @@ export function withoutTelemetry(value) {
  * Returns false for anything that is not JSON, or that still differs — those
  * are real artifact differences.
  */
+/**
+ * Which changed files are prerendered pages, given each build's fingerprints
+ * (relative path to content hash).
+ *
+ * A deployment stage (`deploy/<runtime>/`) publishes the prerendered pages
+ * again, byte for byte, under its own paths. A copy differs exactly when its
+ * source does, so it is classified with its source: by content, in each build,
+ * rather than by guessing which path a stage copies to. Without this, a page
+ * that renders a clock failed the check as emitted code once per stage copy.
+ */
+export function prerenderedPageClassifier(first, second) {
+  const prerenderedHashes = (prints) =>
+    new Set([...prints].filter(([file]) => file.startsWith('prerender/')).map(([, hash]) => hash))
+  const firstPrerendered = prerenderedHashes(first)
+  const secondPrerendered = prerenderedHashes(second)
+  return (file) =>
+    file.startsWith('prerender/') ||
+    (firstPrerendered.has(first.get(file)) && secondPrerendered.has(second.get(file)))
+}
+
 export function differsOnlyInTelemetry(file, before, after) {
   if (!file.endsWith('.json')) return false
   try {
@@ -225,11 +245,13 @@ function main() {
     (file) => second.has(file) && first.get(file) !== second.get(file),
   )
 
+  const isPrerenderedPage = prerenderedPageClassifier(first, second)
+
   const artifacts = []
   const telemetry = []
   const prerendered = []
   for (const file of changed) {
-    if (file.startsWith('prerender/')) {
+    if (isPrerenderedPage(file)) {
       prerendered.push(file)
       continue
     }

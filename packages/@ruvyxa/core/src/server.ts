@@ -1223,6 +1223,15 @@ export interface RequestContextHost {
   peek?(): RequestContext | null
   /** Whether this request has read cookies, headers, or draft state. */
   wasRead?(): boolean
+  /**
+   * The signed draft cookie value, for `draftMode().enableCookie()`.
+   *
+   * On the host because signing needs `node:crypto`, which this module cannot
+   * import. Throws when no usable `RUVYXA_PREVIEW_SECRET` is configured.
+   * Optional so an older host still type-checks; `enableCookie()` reports one
+   * that lacks it.
+   */
+  draftModeToken?(): string
 }
 
 const CONTEXT_KEY = '__RUVYXA_REQUEST_CONTEXT__'
@@ -1515,22 +1524,75 @@ export function params(): Readonly<Record<string, string | string[]>> {
 
 /** Draft mode state for the request being served. */
 export interface DraftMode {
-  /** Whether this request is in draft mode. */
+  /** Whether this request carries a draft cookie this server signed. */
   readonly isEnabled: boolean
+  /**
+   * A `Set-Cookie` value that turns draft mode on for the browser receiving it.
+   *
+   * The value is an HMAC of `RUVYXA_PREVIEW_SECRET`, so only the server can
+   * produce it. Throws when that variable is unset or shorter than 32
+   * characters. Attach the result to the response yourself — it is returned
+   * rather than queued because the response is the route's to build.
+   */
+  enableCookie(): string
+  /** A `Set-Cookie` value that expires the draft cookie. Needs no secret. */
+  disableCookie(): string
 }
 
 /**
  * Whether the request is previewing unpublished content.
  *
- * Enabled by the `__ruvyxa_draft` cookie, which an API route sets after
- * checking whatever secret the CMS shares with the application. A request in
- * draft mode is never served from a static or incrementally regenerated cache,
- * for the same reason a request that reads cookies is not.
+ * Enabled by the `__ruvyxa_draft` cookie carrying a value signed with
+ * `RUVYXA_PREVIEW_SECRET`. An API route checks whatever secret the CMS shares
+ * with the application and answers with `draftMode().enableCookie()`; a cookie
+ * that merely exists is ignored, because a visitor can write any cookie they
+ * like. A request in draft mode is never served from a static or incrementally
+ * regenerated cache, for the same reason a request that reads cookies is not.
+ *
+ * @example
+ * ```ts
+ * export const GET = ({ request }: { request: Request }) => {
+ *   const url = new URL(request.url)
+ *   if (url.searchParams.get('secret') !== process.env.CMS_PREVIEW_SECRET) {
+ *     return new Response('Invalid token', { status: 401 })
+ *   }
+ *   return new Response(null, {
+ *     status: 307,
+ *     headers: { location: '/', 'set-cookie': draftMode().enableCookie() },
+ *   })
+ * }
+ * ```
  */
 export function draftMode(): DraftMode {
   const context = activeRequest('draftMode()')
-  return { isEnabled: context.draft }
+  return {
+    isEnabled: context.draft,
+    enableCookie() {
+      const sign = host()?.draftModeToken
+      if (typeof sign !== 'function') {
+        throw new Error(
+          'draftMode().enableCookie() needs a Ruvyxa runtime host that can sign the draft ' +
+            'cookie, and the one serving this request provides none. Upgrade the `ruvyxa` ' +
+            'package so the host and `@ruvyxa/core` match.',
+        )
+      }
+      return `${DRAFT_MODE_COOKIE}=${sign()}; ${DRAFT_COOKIE_ATTRIBUTES}`
+    },
+    disableCookie() {
+      return `${DRAFT_MODE_COOKIE}=; ${DRAFT_COOKIE_ATTRIBUTES}; Max-Age=0`
+    },
+  }
 }
+
+/**
+ * Attributes on both draft cookies.
+ *
+ * `HttpOnly` because no script needs the value and one that read it could hand
+ * it on; `Secure` because the value is a bearer credential for unpublished
+ * content; `SameSite=Lax` so a link out of a CMS still arrives with it.
+ * Browsers accept `Secure` from `http://localhost`, so `ruvyxa dev` works.
+ */
+const DRAFT_COOKIE_ATTRIBUTES = 'Path=/; HttpOnly; Secure; SameSite=Lax'
 
 /**
  * Ask the server to re-render one URL on its next request.

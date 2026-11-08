@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url'
  * own directory, where `existsSync('packages')` is false, so the walk returned
  * an empty list and every gate built on it passed by having looked at no files.
  */
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 /**
  * The published packages in this workspace, discovered the way pnpm discovers

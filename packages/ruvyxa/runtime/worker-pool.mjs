@@ -597,11 +597,16 @@ rl.on('line', async (line) => {
   if (!needsSlot) slotlessRequests += 1
 
   if (needsSlot) {
-    const admitted = await admission.acquire()
+    // The signal withdraws this request from the queue the moment the host
+    // cancels it, so an abandoned waiter does not hold a place a live request
+    // could have had.
+    const admitted = await admission.acquire(cancellation.signal)
     if (!admitted) {
       // `close()` settles parked handlers as false during shutdown. That is a
       // lifecycle event, not overload, and stdout may already be unavailable.
-      if (isShuttingDown) {
+      // A withdrawal is owed no frame either: the host abandoned the request
+      // before it ran, exactly as in the post-admission check below.
+      if (isShuttingDown || cancellation.signal.aborted) {
         inflightRequests.delete(id)
         return
       }
@@ -630,9 +635,11 @@ rl.on('line', async (line) => {
     }
   }
 
+  const work = dispatchRequest(request, cancellation.signal)
+  let abandoned = null
   try {
     const result = await withTimeout(
-      dispatchRequest(request, cancellation.signal),
+      work,
       WORKER_REQUEST_TIMEOUT_MS,
       `Request ${request.type}:${id} timed out after ${WORKER_REQUEST_TIMEOUT_MS}ms`,
     )
@@ -642,6 +649,12 @@ rl.on('line', async (line) => {
       await writeWorkerMessage({ id, ...result, retainedModuleUrls: registeredModuleUrls.size })
     }
   } catch (error) {
+    // The host is answered now, but the dispatch is still running: abort it so
+    // the handler can stop, and settle it below before the slot is released.
+    if (error instanceof WorkerTimeoutError) {
+      cancellation.abort(error)
+      abandoned = work
+    }
     try {
       await writeWorkerMessage({
         id,
@@ -655,6 +668,7 @@ rl.on('line', async (line) => {
     // After the terminal frame, so a cancel that arrives while the response is
     // being written still reaches a live controller.
     inflightRequests.delete(id)
+    if (abandoned) await settleAbandonedDispatch(abandoned, cancellation.signal.reason)
     if (needsSlot) admission.release()
     else slotlessRequests -= 1
     if (isShuttingDown && workerIsIdle()) process.exit(0)
@@ -743,10 +757,13 @@ async function dispatchRequest(request, signal) {
 }
 
 // --- Timeout Utility ---
+/** The rejection `withTimeout` gives; the request loop tells it from a failure. */
+class WorkerTimeoutError extends Error {}
+
 function withTimeout(promise, ms, message) {
   if (!ms || ms <= 0) return promise
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(message)), ms)
+    const timer = setTimeout(() => reject(new WorkerTimeoutError(message)), ms)
     timer.unref()
     promise.then(
       (value) => {
@@ -759,6 +776,47 @@ function withTimeout(promise, ms, message) {
       },
     )
   })
+}
+
+/**
+ * Wait for a dispatch the timeout gave up on, and discard what it produces.
+ *
+ * The request loop holds the admission slot across this wait. Releasing it the
+ * moment the timeout answered the host let the slot count drop while the work
+ * it bounded was still running, so a stream of slow requests could run any
+ * number of handlers at once under a limit of one. Its signal is already
+ * aborted, so a handler that observes it settles promptly.
+ *
+ * Bounded, because a handler may ignore the signal and never settle: the slot
+ * is reclaimed one further timeout window after the abort, so a hung handler
+ * costs its own memory but cannot wedge the worker by pinning every slot. A
+ * result that arrives after that is still discarded — the `then` below stays
+ * attached — so a late stream is cancelled whenever it turns up.
+ */
+async function settleAbandonedDispatch(work, reason) {
+  const settled = work.then(
+    (result) => discardDispatchResult(result, reason),
+    () => {},
+  )
+  try {
+    await withTimeout(settled, WORKER_REQUEST_TIMEOUT_MS, 'abandoned dispatch did not settle')
+  } catch {
+    // Reclaimed without it; see above.
+  }
+}
+
+/**
+ * Release what a dispatch nobody is waiting for returned: the stream body it
+ * would have framed, and the server-components render behind it.
+ */
+async function discardDispatchResult(result, reason) {
+  if (!(result?.streamResponse instanceof Response)) return
+  discardResponseBody(result.streamResponse, reason)
+  try {
+    await result.cancelStream?.(reason)
+  } catch {
+    // Already settled or failed; nothing is left to release.
+  }
 }
 
 function workerError(error) {
@@ -1125,7 +1183,23 @@ async function handleSsrCoalesced(request) {
   // context would therefore return the first request's HTML to the second.
   // Hash the complete context to keep the map key bounded while preserving the
   // ordered duplicate values carried by the worker protocol.
+  if (!isCoalescibleRender(request)) return handleSsr(request)
   return coalesce(`ssr:${requestContextKey(request)}`, () => handleSsr(request))
+}
+
+/**
+ * Whether two identical copies of this render may share one result.
+ *
+ * Only a safe, body-less read. A form post runs its action inside the render
+ * (`runPostedFormAction`), so two identical posts are two submissions: sharing
+ * a render ran the action once and handed both callers its answer. The key
+ * cannot be widened to tell them apart — two posts with the same body are
+ * still two posts — so a non-GET/HEAD method or any form body renders alone.
+ */
+function isCoalescibleRender(request) {
+  if (request.formBody) return false
+  const method = String(request.method || 'GET').toUpperCase()
+  return method === 'GET' || method === 'HEAD'
 }
 
 /**
@@ -1642,7 +1716,12 @@ async function handleApi(request, signal) {
   // A `HEAD` answered by the route's `GET` keeps every header and drops the
   // content. The Rust host strips it again at the socket; doing it here as well
   // costs nothing and means the rule lives in one place across all three hosts.
-  const body = selected.omitBody ? '' : await response.text()
+  // Dropped by cancelling it, not by leaving it unread: a push stream's source
+  // releases its timer or subscription only in `cancel()`, so an unread body
+  // leaked one per HEAD for the life of this process.
+  let body = ''
+  if (selected.omitBody) discardResponseBody(response)
+  else body = await response.text()
 
   return {
     ok: true,
@@ -1653,6 +1732,19 @@ async function handleApi(request, signal) {
     ...dependencyMetadata,
     body,
   }
+}
+
+/**
+ * Cancel a response body nobody will read.
+ *
+ * Not awaited: the source's `cancel()` runs synchronously inside
+ * `ReadableStream.cancel()`, which is the part that stops it, and a source
+ * whose cancel promise never settles must not hold the request that dropped it.
+ * A body that is already locked or errored rejects; there is nothing left to
+ * release then.
+ */
+function discardResponseBody(response, reason) {
+  response?.body?.cancel(reason).catch(() => {})
 }
 
 function dependencyResponseMetadata(inputsVersion, inputs, knownInputsVersion) {

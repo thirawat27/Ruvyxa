@@ -2755,3 +2755,36 @@ fn a_dotted_layout_id_is_not_rewritten_into_another_file() {
         "`app/layout.mobile` must not resolve to `app/layout.tsx`",
     );
 }
+
+/// `require` re-reads a file `module` cached as unreadable, to report why.
+/// That second read is a fresh question: a page replaced by an atomic save
+/// (unlinked, then renamed into place) fails one read and passes the next. It
+/// used to `unwrap_err()` the second answer and panicked when it succeeded;
+/// the page is readable, so it is a module, and the stale `None` — and the
+/// empty edge list derived from it — must not outlive the answer.
+#[test]
+fn require_reads_a_page_that_reappeared_after_a_failed_read() {
+    let temp = tempfile::tempdir().unwrap();
+    let page = temp.path().join("page.tsx");
+    fs::write(temp.path().join("dep.ts"), "export const dep = 1;").unwrap();
+
+    let mut cache = ModuleCache::default();
+    assert!(cache.module(&page).is_none(), "the page does not exist yet");
+    assert!(cache.edges(&page).is_empty());
+
+    fs::write(
+        &page,
+        "import { dep } from './dep'; export default function Page() { return dep; }",
+    )
+    .unwrap();
+    let module = cache.require(&page).expect("the page is readable now");
+    assert!(module.ast.has_default_export);
+    assert!(cache.module(&page).is_some(), "the stale `None` was kept");
+    assert_eq!(cache.edges(&page).len(), 1, "the stale edge list was kept");
+
+    let missing = temp.path().join("missing.tsx");
+    assert!(
+        cache.require(&missing).is_err(),
+        "a file that stays missing is an error, not a panic"
+    );
+}

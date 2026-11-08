@@ -10,6 +10,7 @@ const coreServerModule = path.join(workspaceRoot, 'packages/@ruvyxa/core/dist/se
 
 const {
   MAX_TRACKED_RATE_LIMIT_KEYS,
+  actionNonceSubject,
   boundedKey,
   consumeFixedWindow,
   createHandler,
@@ -205,6 +206,69 @@ describe('serverless request body limits', () => {
     // The pool is a tenth full, so every other address is unaffected — the
     // whole point of the quota.
     assert.equal((await invoke('fedcba9876543210', '198.51.100.8')).status, 200)
+  })
+
+  it('keys the per-client quota by the shared conformance table', () => {
+    const { clientSubject } = JSON.parse(
+      readFileSync(path.join(workspaceRoot, 'tests/fixtures/action-contract.json'), 'utf8'),
+    ).nonce
+    assert.equal(clientSubject.ipv6PrefixLength, 64)
+    for (const { address, subject } of clientSubject.cases) {
+      assert.equal(actionNonceSubject(address), subject, address)
+    }
+    // An address that identifies nobody is one anonymous client, as before.
+    assert.equal(actionNonceSubject('unknown'), 'unknown')
+  })
+
+  it('counts every address in one IPv6 /64 as one client', async () => {
+    // One IPv6 subscriber is handed a whole /64. Keyed by the full address,
+    // ten of its addresses each took a full share and saturated the pool,
+    // refusing every client's versioned actions with 503 for a TTL.
+    const fixture = JSON.parse(
+      readFileSync(path.join(workspaceRoot, 'tests/fixtures/action-contract.json'), 'utf8'),
+    )
+    const { maxEntries, perClientMaxEntries, clientSaturation } = fixture.nonce
+    const submit = async (input) => input
+    submit.ruvyxa = { kind: 'action' }
+    const handler = createHandler({
+      routes: [{ ...pageRoute(fixture.routeId, '/target'), actionReferenceId: fixture.expected }],
+      importPage: async () => ({}),
+      importApi: async () => ({}),
+      importAction: async () => ({ submit }),
+      security: { actionRateLimit: { max: maxEntries * 2, window: 60 } },
+      clientIpHeaders: ['cf-connecting-ip'],
+    })
+    const invoke = (nonce, client) =>
+      handler(
+        new Request(
+          `http://localhost/__ruvyxa/action?path=/target&name=submit&id=${encodeURIComponent(fixture.expected)}`,
+          {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              host: 'localhost',
+              origin: 'http://localhost',
+              'sec-fetch-site': 'same-origin',
+              'x-ruvyxa-action-nonce': nonce,
+              'cf-connecting-ip': client,
+            },
+            body: '{}',
+          },
+        ),
+      )
+
+    // Ten addresses, one /64, a tenth of the quota each.
+    for (let index = 0; index < perClientMaxEntries; index++) {
+      const client = `2001:db8:1:2::${(index % 10) + 1}`
+      assert.equal((await invoke(`n${String(index).padStart(16, '0')}`, client)).status, 200)
+    }
+
+    const refused = await invoke('fedcba9876543210', '2001:db8:1:2:ffff::9')
+    assert.equal(refused.status, clientSaturation.status)
+    assert.equal(await refused.text(), clientSaturation.message)
+
+    // The neighbouring /64 is somebody else.
+    assert.equal((await invoke('fedcba9876543210', '2001:db8:1:3::1')).status, 200)
   })
 
   it('stops reading a lengthless action body at the action limit', async () => {
@@ -656,6 +720,47 @@ describe('Fetch-native built-in middleware parity', () => {
     assert.equal(limited.status, 429)
     assert.equal(limited.headers.get('retry-after'), '60')
     assert.equal((await handler(request('b'))).status, 200)
+  })
+})
+
+describe('a HEAD answered by a GET route', () => {
+  it('cancels the GET body it drops', async (t) => {
+    // The replacement Response carried the GET's headers and no body, and the
+    // GET's own body was simply never read. A push stream's source releases its
+    // interval only in `cancel()`, so a warm function leaked one per HEAD.
+    let live = 0
+    let cancelled = 0
+    let timer
+    // Cleared here too, so a regression fails this test instead of keeping
+    // the test process alive.
+    t.after(() => clearInterval(timer))
+    const handler = createHandler({
+      routes: [{ id: 'stream', path: '/stream', kind: 'api', file: 'stream.ts', render: {} }],
+      importPage: async () => ({}),
+      importApi: async () => ({
+        GET: () => {
+          const stream = new ReadableStream({
+            start(controller) {
+              live += 1
+              timer = setInterval(() => controller.enqueue(new Uint8Array([116])), 10)
+            },
+            cancel() {
+              clearInterval(timer)
+              live -= 1
+              cancelled += 1
+            },
+          })
+          return new Response(stream, { headers: { 'content-type': 'text/event-stream' } })
+        },
+      }),
+    })
+
+    const response = await handler(new Request('http://localhost/stream', { method: 'HEAD' }))
+    assert.equal(response.status, 200)
+    assert.equal(response.headers.get('content-type'), 'text/event-stream')
+    assert.equal(response.body, null)
+    assert.equal(cancelled, 1, 'the dropped GET body must be cancelled')
+    assert.equal(live, 0)
   })
 })
 
@@ -1427,10 +1532,17 @@ describe('server functions on a deployed server-components route', () => {
     })
 
     const body = new URLSearchParams({ $ACTION_REF_1: '', version: '1.0.30' })
+    // A browser sends `Origin` on every form POST. The page URL is held to the
+    // action endpoint's origin policy, which fails closed without it — see the
+    // `pageFormPost` cases in tests/fixtures/action-contract.json.
     const response = await handler(
       new Request('http://localhost/rsc', {
         method: 'POST',
-        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          host: 'localhost',
+          origin: 'http://localhost',
+        },
         body,
       }),
     )
@@ -1465,6 +1577,102 @@ describe('server functions on a deployed server-components route', () => {
       }),
     )
     assert.equal(seen.at(-1), null)
+  })
+})
+
+/**
+ * A no-JavaScript `<form action={fn}>` posts to the page's own URL, and the
+ * page render runs the server function it names. `/__ruvyxa/action` and
+ * `/__ruvyxa/rsc` refused a cross-site request and the page URL did not, so a
+ * third-party page could auto-submit a form at it with the visitor's cookies
+ * and the action ran. `pageFormPost` in tests/fixtures/action-contract.json is
+ * the table; `page_form_action_rejection` in the native host replays it too.
+ */
+describe('a no-JavaScript form post to a server-components page', () => {
+  const contract = JSON.parse(
+    readFileSync(path.join(workspaceRoot, 'tests/fixtures/action-contract.json'), 'utf8'),
+  ).pageFormPost
+
+  function formHandler(rendered, security) {
+    return createHandler({
+      routes: [
+        {
+          id: 'app/todos/page',
+          path: '/todos',
+          kind: 'page',
+          file: 'app/todos/page.tsx',
+          render: { strategy: 'ssr', serverComponents: true },
+        },
+      ],
+      importPage: async () => ({
+        render: async (ctx) => {
+          rendered.push(ctx.formData)
+          return `<html>${ctx.formData ? 'submitted' : 'initial'}</html>`
+        },
+      }),
+      importApi: async () => ({}),
+      security,
+    })
+  }
+
+  function formPost(headers) {
+    return new Request(`http://${contract.host}/todos`, {
+      method: 'POST',
+      headers: {
+        host: contract.host,
+        'content-type': 'application/x-www-form-urlencoded',
+        ...headers,
+      },
+      body: new URLSearchParams({ '$ACTION_ID_ruv:s_abc#deleteAll': '' }),
+    })
+  }
+
+  for (const testCase of contract.cases) {
+    it(testCase.name, async () => {
+      const rendered = []
+      const handler = formHandler(rendered, testCase.policy)
+      const response = await handler(formPost(testCase.headers))
+      if (testCase.admitted) {
+        assert.equal(response.status, 200)
+        assert.equal(await response.text(), '<html>submitted</html>')
+        assert.equal(rendered.length, 1)
+        return
+      }
+      assert.equal(response.status, testCase.status)
+      assert.equal(await response.text(), testCase.message)
+      // Refused before the render: the action never ran and no page was built.
+      assert.deepEqual(rendered, [])
+    })
+  }
+
+  it('charges each submission to the action rate limit, per client and route', async () => {
+    const rendered = []
+    const handler = formHandler(rendered, { actionRateLimit: { max: 2, window: 60 } })
+    const sameOrigin = { origin: `http://${contract.host}` }
+
+    const statuses = []
+    for (let attempt = 0; attempt < 3; attempt++) {
+      statuses.push((await handler(formPost(sameOrigin))).status)
+    }
+    assert.deepEqual(statuses, [200, 200, contract.rateLimit.status])
+    const refused = await handler(formPost(sameOrigin))
+    assert.equal(await refused.text(), contract.rateLimit.message)
+    assert.equal(rendered.length, 2)
+
+    // A read of the same page is not a submission and spends nothing.
+    const read = await handler(
+      new Request(`http://${contract.host}/todos`, { headers: { host: contract.host } }),
+    )
+    assert.equal(read.status, 200)
+  })
+
+  it('refuses a cross-site submission without spending the client budget', async () => {
+    const rendered = []
+    const handler = formHandler(rendered, { actionRateLimit: { max: 1, window: 60 } })
+    const crossSite = await handler(formPost({ origin: 'https://evil.example' }))
+    assert.equal(crossSite.status, 403)
+    const own = await handler(formPost({ origin: `http://${contract.host}` }))
+    assert.equal(own.status, 200)
   })
 })
 

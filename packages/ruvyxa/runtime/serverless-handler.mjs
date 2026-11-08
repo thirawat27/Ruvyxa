@@ -66,7 +66,8 @@ const ACTION_NONCE_TTL_MS = 10 * 60 * 1000
 const MAX_ACTION_NONCES = 10_000
 
 /**
- * Live nonces one client address may hold, a tenth of the whole pool.
+ * Live nonces one client may hold, a tenth of the whole pool. A client is an
+ * IPv4 address or an IPv6 /64 — `actionNonceSubject` says why.
  *
  * `actionRateLimitResponse` runs in front of this guard but is keyed per client
  * *and per path and action*, so one caller spreading requests over two actions
@@ -662,8 +663,20 @@ export function createHandler(options) {
    * skipped: a rewrite is checked once, never against its own result.
    */
   async function rewriteTo(target, request, runtimeContext) {
+    // A substituted parameter is the path decoded once, so `%252e%252e`
+    // arrives here as `%2e%2e` — a dot-segment `new URL()` and `fetch()`
+    // collapse, which dispatched `/help/%252e%252e/admin` as `/admin` past
+    // `proxy.handler`, and fetched outside an external destination's prefix.
+    // Canonicalize the destination's path first and refuse it, as
+    // `rewrite_target` in crates/ruvyxa_dev_server/src/render_pipeline.rs does.
+    if (!rewriteDestinationIsCanonical(target)) {
+      return textResponse(400, 'Request path contains an unsafe segment')
+    }
     if (/^https?:\/\//i.test(target)) {
-      return fetch(new Request(target, request))
+      // `manual`: the upstream's redirect is the client's to follow. Following
+      // it here sent the client's own headers to wherever the upstream
+      // pointed, from inside the server's network.
+      return fetch(new Request(target, request), { redirect: 'manual' })
     }
     const url = new URL(target, request.url)
     return dispatch(new Request(url, request), runtimeContext, { rewritten: true })
@@ -979,6 +992,12 @@ export function createHandler(options) {
     // content. There is no transport under a serverless function to do it: the
     // `Response` goes to the platform as it is.
     if (!selected.omitBody) return response
+    // The GET's body is cancelled rather than left unread: a push stream's
+    // source releases its timer or subscription only in `cancel()`, and a warm
+    // function instance outlives the request. Not awaited, because the source's
+    // `cancel()` runs synchronously inside this call and a cancel promise that
+    // never settles must not hold the HEAD.
+    response.body?.cancel().catch(() => {})
     return new Response(null, { status: response.status, headers: response.headers })
   }
 
@@ -1098,6 +1117,34 @@ export function createHandler(options) {
     }
     if (actionPolicy.fetchMeta !== false && fetchSiteIsCrossSite(headers)) {
       return textResponse(403, 'Cross-site server-components request blocked')
+    }
+    return null
+  }
+
+  /**
+   * Refuse a no-JavaScript form submission to a server-components page that is
+   * not provably same-origin.
+   *
+   * Such a form posts to the page's own URL and the page render runs the server
+   * function its hidden fields name, so it is the third door to the same
+   * functions `/__ruvyxa/action` and `/__ruvyxa/rsc` guard — and it was the one
+   * left open: a third-party page auto-submitting a urlencoded form at it ran
+   * the action with the visitor's cookies. The same two policy fields, read the
+   * same way, including the fail-closed answer when neither `Origin` nor
+   * `Sec-Fetch-Site: same-origin` is present; a browser sends `Origin` on every
+   * form `POST`. Mirrors `page_form_action_rejection` on the native host, and
+   * both replay `pageFormPost` in tests/fixtures/action-contract.json.
+   */
+  function pageFormActionRejection(headers) {
+    const trustedScheme = parseForwardedScheme(headers.get('x-forwarded-proto'))
+    if (
+      actionPolicy.sameOrigin !== false &&
+      originIsCrossSite(headers, headers.get('host') ?? '', { trustedScheme })
+    ) {
+      return textResponse(403, 'Cross-origin form action request blocked')
+    }
+    if (actionPolicy.fetchMeta !== false && fetchSiteIsCrossSite(headers)) {
+      return textResponse(403, 'Cross-site form action request blocked')
     }
     return null
   }
@@ -1532,7 +1579,8 @@ export function createHandler(options) {
     if (!/^[A-Za-z0-9._~-]{16,128}$/.test(nonce)) {
       return textResponse(400, 'Versioned action requests require a valid replay nonce')
     }
-    const client = clientAddress(headers, trustedProxies, ingressHeaders)
+    // Counted per /64 for IPv6, not per address: see `actionNonceSubject`.
+    const client = actionNonceSubject(clientAddress(headers, trustedProxies, ingressHeaders))
     const now = Date.now()
 
     // Every nonce is stored with the same TTL, so a Map's insertion order is
@@ -1772,6 +1820,23 @@ export function createHandler(options) {
     // and the answer belongs to one visitor.
     const formData = await postedFormData(route, request)
     if (formData) {
+      // The render runs the server function the hidden fields name, so this is
+      // a mutation and gets the action endpoint's two gates before it: the
+      // origin pair, then the rate limit. Without them a cross-site page could
+      // auto-submit a form here with the visitor's cookies while the same
+      // request to `/__ruvyxa/action` was refused with 403.
+      const refused =
+        pageFormActionRejection(request.headers) ??
+        consumeFixedWindow(
+          actionBuckets,
+          boundedKey(
+            `form:${clientAddress(request.headers, trustedProxies, ingressHeaders)}:${pathname}`,
+          ),
+          actionRateLimit.max,
+          actionRateLimit.window,
+          { message: 'Form action rate limit exceeded' },
+        )
+      if (refused) return refused
       const rendered = await renderPage(route, pathname, params, request, formData)
       rendered.headers.set('cache-control', 'no-store')
       return rendered
@@ -2527,6 +2592,28 @@ export function clientAddress(headers, trustedProxies, ingressHeaders = []) {
   return 'unknown'
 }
 
+/**
+ * The identity the action replay guard's per-client quota counts under.
+ *
+ * The whole address for IPv4, and the /64 for IPv6. One IPv6 subscriber is
+ * routinely handed a whole /64, so keyed by the full address ten of its
+ * addresses each took a full share and saturated the pool — refusing every
+ * client's versioned actions with 503 for a TTL. `parseIpAddress` has already
+ * collapsed an IPv4-mapped address to its four bytes, so a dual-stack peer is
+ * the IPv4 client it names. Anything that does not parse — `clientAddress`
+ * answers `'unknown'` — stays one anonymous client. Mirrors
+ * `action_nonce_subject` in `crates/ruvyxa_dev_server/src/action_security.rs`;
+ * both replay `nonce.clientSubject` in tests/fixtures/action-contract.json.
+ *
+ * @param {string} client
+ * @returns {string}
+ */
+export function actionNonceSubject(client) {
+  const address = parseIpAddress(client)
+  if (!address) return client
+  return formatAddress(address.length === 16 ? maskAddress(address, 64) : address)
+}
+
 /** Stable text form of a parsed address, for use as a bucket key. */
 function formatAddress(address) {
   if (address.length === 4) return address.join('.')
@@ -2580,13 +2667,22 @@ function parseIpPrefix(value) {
   const addressText = slash < 0 ? text : text.slice(0, slash)
   const address = parseIpAddress(addressText)
   if (!address) return null
-  const hostBits = address.length * 8
+  // `parseIpAddress` already collapsed an IPv4-mapped literal to four bytes,
+  // but its prefix is still written in IPv6 bits: `::ffff:10.0.0.0/104` is
+  // `10.0.0.0/8`. Below `/96` it names no IPv4 range and is refused, as
+  // `IpPrefix::parse` in crates/ruvyxa_middleware/src/client_ip.rs refuses it.
+  const mapped = address.length === 4 && addressText.includes(':')
+  const hostBits = mapped ? 128 : address.length * 8
   let prefixLength = hostBits
   if (slash >= 0) {
     const declared = text.slice(slash + 1).trim()
     if (!/^\d{1,3}$/.test(declared)) return null
     prefixLength = Number(declared)
     if (prefixLength > hostBits) return null
+  }
+  if (mapped) {
+    if (prefixLength < 96) return null
+    prefixLength -= 96
   }
   return { bytes: maskAddress(address, prefixLength), prefixLength }
 }
@@ -2746,6 +2842,20 @@ function isBodyLimitError(error) {
     if (typeof current.message === 'string' && current.message.includes('RUV2212')) return true
   }
   return false
+}
+
+/**
+ * Whether a rewrite destination's path — read as written, before any URL
+ * parser resolves dot-segments — is one `canonicalRoutePath` accepts. An
+ * external destination's path is held to the same rule, so a parameter cannot
+ * climb out of the prefix the destination names on the upstream host.
+ */
+function rewriteDestinationIsCanonical(target) {
+  const origin = /^https?:\/\/[^/?#]*/i.exec(target)
+  const rest = origin ? target.slice(origin[0].length) : target
+  const end = rest.search(/[?#]/)
+  const path = end === -1 ? rest : rest.slice(0, end)
+  return canonicalRoutePath(origin && path === '' ? '/' : path) !== null
 }
 
 function textResponse(status, message) {

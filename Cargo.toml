@@ -38,8 +38,8 @@ axum = { version = "0.8.9", features = ["ws"] }
 base64 = "0.23.1"
 blake3 = "1.8.7"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
-clap = { version = "4.6.6", features = ["derive"] }
-fancy-regex = "0.19.0"
+clap = { version = "4.6.7", features = ["derive"] }
+fancy-regex = "0.20.0"
 dashmap = "6.2.1"
 futures-core = "0.3.34"
 # Already compiled as part of axum's dependency tree; declaring it directly adds
@@ -78,22 +78,22 @@ jpeg-encoder = "0.7.1"
 # 3628 ms with `image::imageops` (scalar), 72 ms with `fast_image_resize`,
 # 89 ms here with `ThreadingPolicy::Adaptive`. The 17 ms is the price of a
 # lockfile with no unmaintained crate in it.
-pic-scale = "0.7.11"
+pic-scale = "0.7.12"
 markdown = "1.0.0"
-notify = "8.2.0"
+notify = "8.2.1"
 # Pinned exactly and kept in lockstep with `oxc-transform` in
 # packages/ruvyxa/package.json: the Rust bundler compiles the client bundle and
 # the Node runtime compiles the server bundle, so a version split would let the
 # two halves of one page disagree. `scripts/check-oxc-lockstep.mjs` enforces it.
-oxc = { version = "=0.148.0", default-features = false, features = ["codegen", "minifier", "semantic", "transformer"] }
+oxc = { version = "=0.157.0", default-features = false, features = ["codegen", "minifier", "semantic", "transformer"] }
 parking_lot = "0.12.5"
 rayon = "1.12.0"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+serde_json = "1.0.154"
 serde_yaml_ng = "0.10.0"
 tempfile = "3.27.0"
-thiserror = "2.0.20"
-tokio = { version = "1.53.1", features = ["full"] }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["full"] }
 tower = { version = "0.5.3" }
 tower-http = { version = "0.7", features = ["fs", "trace", "compression-gzip", "compression-br"] }
 tracing = "0.1.44"

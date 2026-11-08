@@ -334,6 +334,11 @@ before believing it.
   served with its `no-store` row and no validator. `tests/fixtures/stored-document-conformance.json`
   holds all three implementations; add a case there before changing what an answer means or what a
   strategy does with it.
+- Two request hosts, for now. Production has one host (`createHandler`, run as the standalone server
+  that `ruvyxa build` stages and `ruvyxa start` spawns); `dev` still runs on Axum until Phase 2, as
+  does `start --legacy-host`, so a feature still has to work in both for now. The fixtures that
+  exist only to hold the two together are listed in
+  `docs/superpowers/specs/2026-10-12-single-production-host-design.md`.
 - A rule the two module graphs both enforce needs one table, not two implementations that happen to
   agree today. The client/server module lane is the newest example: `references.rs` read a module's
   leading directive and then its file stem, while `compiler.mjs` matched the single literal filename

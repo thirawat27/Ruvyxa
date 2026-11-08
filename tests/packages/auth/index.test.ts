@@ -365,6 +365,28 @@ describe('@ruvyxa/auth', () => {
     assert.equal((await attempt('grace@example.com', '198.51.100.200'))!.status, 401)
   })
 
+  it('refuses a pathological magic-link address without backtracking', async () => {
+    const sent: string[] = []
+    const auth = magicLinkRuntime({ id: 'magic-redos', email: 'redos@example.com' }, (url) =>
+      sent.push(url),
+    )
+    const send = (email: string) =>
+      auth.handle(
+        new Request(`${origin}/__ruvyxa/auth/magic-link`, {
+          method: 'POST',
+          headers: { origin },
+          body: JSON.stringify({ email }),
+        }),
+      )
+    for (const email of ['@.'.repeat(4000) + 'x', 'a@b@c.d', 'a@' + 'b.'.repeat(127) + 'c']) {
+      const started = performance.now()
+      assert.equal((await send(email))!.status, 400, `accepted ${email.slice(0, 20)}`)
+      assert.ok(performance.now() - started < 250, 'validation must be linear in the input')
+    }
+    assert.equal((await send('valid@example.com'))!.status, 200)
+    assert.equal(sent.length, 1)
+  })
+
   it('gives a magic-link send a tighter identity budget than a credential attempt', async () => {
     // `startMagicLink` sends mail before any user exists, deliberately, so as
     // not to leak enumeration — which makes the endpoint an outbound-mail

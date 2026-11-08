@@ -353,6 +353,18 @@
       "result": { "location": "https://docs.example.com/a/b", "status": 308 }
     },
     {
+      "$why": "a parameter is substituted as it was decoded, never re-encoded: `%2f%2f` from `/go/%252f%252f…` stays a path on this origin in `Location`, never `//evil.example`",
+      "rules": [{ "source": "/go/:path*", "destination": "/:path*", "permanent": false }],
+      "request": { "path": "/go/%2f%2fevil.example" },
+      "result": { "location": "/%2f%2fevil.example", "status": 307 }
+    },
+    {
+      "$why": "an encoded dot-segment in a parameter reaches `Location` as written; the browser resolves it on this origin and the next request passes the proxy like any other",
+      "rules": [{ "source": "/old/:path*", "destination": "/new/:path*", "permanent": false }],
+      "request": { "path": "/old/%2e%2e/admin" },
+      "result": { "location": "/new/%2e%2e/admin", "status": 307 }
+    },
+    {
       "$why": "the first matching rule wins",
       "rules": [
         { "source": "/a", "destination": "/first", "permanent": false },
@@ -399,6 +411,44 @@
       "rules": [{ "source": "/:first/:second", "destination": "/:first?second=:second" }],
       "request": { "path": "/a/b", "query": "x=1" },
       "result": "/a?second=b&x=1"
+    },
+    {
+      "$why": "a `%` not followed by two hex digits is literal, even before non-ASCII text",
+      "rules": [{ "source": "/about", "destination": "/" }],
+      "request": { "path": "/about", "query": "q=%aé&r=%é&s=%" },
+      "result": "/?q=%25a%C3%A9&r=%25%C3%A9&s=%25"
+    },
+    {
+      "$why": "a signed digit pair after `%` is not a hex escape: `+` is a space first",
+      "rules": [{ "source": "/about", "destination": "/" }],
+      "request": { "path": "/about", "query": "q=%+1&r=%41%c3%a9" },
+      "result": "/?q=%25+1&r=A%C3%A9"
+    },
+    {
+      "$why": "a parameter is the path decoded once (`%252e%252e` arrives as `%2e%2e`) and is substituted as is: the destination is a dot-segment, which each host refuses with 400 when it canonicalizes the target, before any URL parser can collapse it",
+      "rules": [{ "source": "/help/:path*", "destination": "/docs/:path*" }],
+      "request": { "path": "/help/%2e%2e/admin/users" },
+      "result": "/docs/%2e%2e/admin/users"
+    },
+    {
+      "$why": "the same holds for the one-dot-encoded spelling a URL parser also collapses",
+      "rules": [{ "source": "/help/:path*", "destination": "/docs/:path*" }],
+      "request": { "path": "/help/.%2e/admin/users" },
+      "result": "/docs/.%2e/admin/users"
+    },
+    {
+      "$why": "an encoded slash in a parameter stays encoded; canonicalizing the target refuses it rather than splitting the segment",
+      "rules": [{ "source": "/help/:path*", "destination": "/docs/:path*" }],
+      "request": { "path": "/help/a%2fb" },
+      "result": "/docs/a%2fb"
+    },
+    {
+      "$why": "an external destination is substituted the same way; the deployed host refuses the dot-segment before fetching, and the native host fetches no external destination at all",
+      "rules": [
+        { "source": "/api/:path*", "destination": "https://backend.internal/public/:path*" }
+      ],
+      "request": { "path": "/api/%2e%2e/admin/users" },
+      "result": "https://backend.internal/public/%2e%2e/admin/users"
     },
     {
       "$why": "an external destination is allowed",

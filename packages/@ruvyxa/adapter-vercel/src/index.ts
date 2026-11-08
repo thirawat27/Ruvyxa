@@ -98,7 +98,7 @@ import { projectProxy, documentCacheHandler, loadActionModule, loadRouteModule }
 import manifest from './manifest.mjs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, rmSync, mkdirSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';

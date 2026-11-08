@@ -322,7 +322,17 @@ export function matchRule(
 
 const TOKEN = /:([A-Za-z0-9_]+)[*+?]?/g
 
-/** Replace `:name` tokens; an absent parameter substitutes the empty string. */
+/**
+ * Replace `:name` tokens; an absent parameter substitutes the empty string.
+ *
+ * A value is pasted as the canonical path carried it — decoded once, never
+ * re-encoded — exactly as `substitute` in `route_rules.rs` does, so the two
+ * hosts produce the same destination text. That text is a raw URL path: a
+ * request for `/help/%252e%252e` yields a value `%2e%2e`, which every WHATWG
+ * URL parser collapses as `..`. A host must therefore canonicalize a rewrite
+ * destination's path (and refuse it) before `new URL()` or `fetch()` sees it,
+ * as the native host's `rewrite_target` does. The fixture pins the text.
+ */
 export function substitute(template: string, params: RuleParams): string {
   return template.replace(TOKEN, (_, name: string) => params[name] ?? '')
 }

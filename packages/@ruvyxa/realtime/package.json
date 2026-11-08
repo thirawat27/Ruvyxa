@@ -1,11 +1,14 @@
 {
   "name": "@ruvyxa/realtime",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "description": "Native WebSocket realtime and collaboration rooms for self-hosted Ruvyxa applications.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "ruvyxa": {
+    "tier": "experimental"
+  },
   "files": ["dist", "src", "README.md"],
   "keywords": [
     "ruvyxa",
@@ -74,8 +77,8 @@
     "@ruvyxa/core": "workspace:^"
   },
   "devDependencies": {
-    "@types/node": "24.13.3",
-    "@types/react": "^19.2.18"
+    "@types/node": "24.19.2",
+    "@types/react": "^19.3.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -85,7 +88,7 @@
     "prepack": "pnpm run build"
   },
   "peerDependencies": {
-    "react": "^19.2.8"
+    "react": "^19.3.1"
   },
   "peerDependenciesMeta": {
     "react": {

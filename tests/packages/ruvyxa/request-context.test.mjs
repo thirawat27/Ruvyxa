@@ -10,6 +10,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { createHmac } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, it } from 'node:test'
@@ -42,6 +43,48 @@ const REVALIDATION_CONFORMANCE = JSON.parse(
 
 function sourceOf(relative) {
   return readFileSync(fileURLToPath(new URL(relative, import.meta.url)), 'utf8')
+}
+
+const PREVIEW_SECRET_VARIABLE = 'RUVYXA_PREVIEW_SECRET'
+const PREVIEW_SECRET = 'a-preview-secret-of-at-least-32-characters'
+
+/**
+ * The draft cookie value for `secret`, computed independently of the runtime.
+ *
+ * Written out here rather than asked of the module under test, so a change to
+ * what is signed — or a regression to "any value will do" — fails a known
+ * answer instead of agreeing with itself.
+ */
+function signedDraftValue(secret = PREVIEW_SECRET) {
+  return createHmac('sha256', secret).update('ruvyxa-draft-mode').digest('base64url')
+}
+
+function withPreviewSecret(secret, task) {
+  const previous = process.env[PREVIEW_SECRET_VARIABLE]
+  if (secret === undefined) delete process.env[PREVIEW_SECRET_VARIABLE]
+  else process.env[PREVIEW_SECRET_VARIABLE] = secret
+  try {
+    return task()
+  } finally {
+    if (previous === undefined) delete process.env[PREVIEW_SECRET_VARIABLE]
+    else process.env[PREVIEW_SECRET_VARIABLE] = previous
+  }
+}
+
+/** `draftMode().enableCookie()` inside a request, or the error it threw. */
+function enableInARequest() {
+  return runWithRequestContext(requestContext({ headerPairs: [] }), () => {
+    try {
+      return draftMode().enableCookie()
+    } catch (error) {
+      return error
+    }
+  })
+}
+
+function draftEnabledFor(cookieHeader) {
+  const store = requestContext({ headerPairs: [['cookie', cookieHeader]] })
+  return runWithRequestContext(store, () => draftMode().isEnabled)
 }
 
 describe('the two halves agree', () => {
@@ -141,15 +184,17 @@ describe('accessors inside a request', () => {
     })
   })
 
-  it('reports draft mode from the cookie', () => {
-    runWithRequestContext(context(), () => {
-      assert.equal(draftMode().isEnabled, false)
-    })
-    const drafting = requestContext({
-      headerPairs: [['cookie', `theme=dark; ${CORE_DRAFT_COOKIE}=1`]],
-    })
-    runWithRequestContext(drafting, () => {
-      assert.equal(draftMode().isEnabled, true)
+  it('reports draft mode from a cookie the server signed', () => {
+    withPreviewSecret(PREVIEW_SECRET, () => {
+      runWithRequestContext(context(), () => {
+        assert.equal(draftMode().isEnabled, false)
+      })
+      const drafting = requestContext({
+        headerPairs: [['cookie', `theme=dark; ${CORE_DRAFT_COOKIE}=${signedDraftValue()}`]],
+      })
+      runWithRequestContext(drafting, () => {
+        assert.equal(draftMode().isEnabled, true)
+      })
     })
   })
 
@@ -174,6 +219,79 @@ describe('accessors inside a request', () => {
       )
 
     assert.deepEqual(await Promise.all([read('a'), read('b')]), ['a', 'b'])
+  })
+})
+
+describe('draft mode is a cookie only the server can produce', () => {
+  // The defect this suite exists for: draft mode used to be on whenever a
+  // cookie named `__ruvyxa_draft` was present, whatever its value. A cookie is
+  // client-written, so `curl -H 'Cookie: __ruvyxa_draft=1'` showed unpublished
+  // content to anyone who knew the name — and the name is in the docs.
+  it('ignores a cookie that merely exists', () => {
+    withPreviewSecret(PREVIEW_SECRET, () => {
+      for (const value of ['1', 'true', '', 'yes', signedDraftValue().slice(0, -1)]) {
+        assert.equal(draftEnabledFor(`${CORE_DRAFT_COOKIE}=${value}`), false, `value ${value}`)
+      }
+    })
+  })
+
+  it('ignores a value signed with a different secret', () => {
+    withPreviewSecret(PREVIEW_SECRET, () => {
+      const forged = signedDraftValue('another-secret-of-at-least-32-characters!')
+      assert.equal(draftEnabledFor(`${CORE_DRAFT_COOKIE}=${forged}`), false)
+    })
+  })
+
+  it('accepts the value signed with the configured secret', () => {
+    withPreviewSecret(PREVIEW_SECRET, () => {
+      assert.equal(draftEnabledFor(`a=1; ${CORE_DRAFT_COOKIE}=${signedDraftValue()}; b=2`), true)
+    })
+  })
+
+  // Without a secret there is nothing to verify against, so there is no value
+  // an attacker could not also send. Off is the only honest answer.
+  it('stays off when no secret is configured, or the secret is too short to key an HMAC', () => {
+    for (const secret of [undefined, '', 'short-secret']) {
+      withPreviewSecret(secret, () => {
+        assert.equal(
+          draftEnabledFor(`${CORE_DRAFT_COOKIE}=${signedDraftValue(secret || 'x')}`),
+          false,
+        )
+      })
+    }
+  })
+
+  it('enableCookie() writes the signed value with attributes a browser keeps private', () => {
+    withPreviewSecret(PREVIEW_SECRET, () => {
+      const header = enableInARequest()
+      assert.equal(typeof header, 'string', String(header))
+      const [pair, ...attributes] = header.split(';').map((part) => part.trim())
+      assert.equal(pair, `${CORE_DRAFT_COOKIE}=${signedDraftValue()}`)
+      for (const attribute of ['Path=/', 'HttpOnly', 'Secure', 'SameSite=Lax']) {
+        assert.ok(attributes.includes(attribute), `${attribute} missing from ${header}`)
+      }
+      // And the value it wrote is the one the next request is checked against.
+      assert.equal(draftEnabledFor(pair), true)
+    })
+  })
+
+  it('enableCookie() refuses rather than writing a value it cannot sign', () => {
+    for (const secret of [undefined, 'short-secret']) {
+      const attempt = withPreviewSecret(secret, enableInARequest)
+      assert.ok(attempt instanceof Error, `secret ${secret} must not sign`)
+      assert.match(attempt.message, /RUVYXA_PREVIEW_SECRET/)
+    }
+  })
+
+  it('disableCookie() expires the cookie and needs no secret', () => {
+    withPreviewSecret(undefined, () => {
+      const header = runWithRequestContext(requestContext({ headerPairs: [] }), () =>
+        draftMode().disableCookie(),
+      )
+      assert.match(header, new RegExp(`^${CORE_DRAFT_COOKIE}=;`))
+      assert.match(header, /Max-Age=0/)
+      assert.match(header, /Path=\//)
+    })
   })
 })
 

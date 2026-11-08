@@ -154,6 +154,9 @@ pub(crate) async fn client_manifest(State(state): State<Arc<AppState>>) -> Respo
         return with_security_headers(response);
     }
 
+    if let Some(refused) = without_on_demand_compiler(&state.config) {
+        return refused;
+    }
     let body = synthesized_route_manifest(&state).await;
     let mut response = body.to_string().into_response();
     response.headers_mut().insert(
@@ -602,13 +605,15 @@ fn rsc_action_rate_limit_key(
 /// refusal the caller must return when that client's budget is spent.
 ///
 /// `None` admits the call. Both mutation endpoints — `/__ruvyxa/action` and
-/// the server-function `POST` on `/__ruvyxa/rsc` — run this gate at the same
-/// position, after validation and before a worker is asked for anything, and
+/// the server-function `POST` on `/__ruvyxa/rsc` — and the no-JavaScript form
+/// post to a server-components page (`render_request_inner` in
+/// `render_pipeline.rs`) run this gate at the same position, after validation
+/// and before a worker is asked for anything, and
 /// each used to spell the lock, the poisoned-mutex branch, and the `429` out
 /// by hand. A poisoned limiter refuses with `503` rather than admitting: the
 /// gate exists to protect the worker pool, and a gate that fails open under
 /// the one condition it cannot reason about is no gate.
-fn action_rate_limit_refusal(
+pub(crate) fn action_rate_limit_refusal(
     state: &AppState,
     rate_key: &str,
     message: &'static str,
@@ -946,6 +951,9 @@ pub(crate) async fn client_vendor(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ClientVendorQuery>,
 ) -> Response {
+    if let Some(refused) = without_on_demand_compiler(&state.config) {
+        return refused;
+    }
     let response = state
         .worker_pool
         .render_client_vendor(&state.config.root, &query.name)
@@ -981,17 +989,35 @@ pub(crate) async fn client_vendor(
     }
 }
 
+/// The answer the on-demand compiler's endpoints give outside `ruvyxa dev`.
+///
+/// A production document never links them (`html_document.rs` ships the
+/// prebuilt bundle or none), but the routes stayed registered and live: any
+/// caller could ask the worker for a fresh browser bundle of any URL, outside
+/// admission, and each answer was stored in the render cache that holds the
+/// SSG, ISR and PPR documents — keyed per request path, so a stream of distinct
+/// URLs under one dynamic route evicted every cached page. What they would
+/// serve is also the separately compiled React the production document refuses
+/// to load. A built site answers these paths from `client/` instead.
+fn without_on_demand_compiler(config: &ServerConfig) -> Option<Response> {
+    (!config.watch).then(|| with_security_headers(StatusCode::NOT_FOUND.into_response()))
+}
+
 pub(crate) async fn client_bundle(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ClientBundleQuery>,
 ) -> Response {
+    if let Some(refused) = without_on_demand_compiler(&state.config) {
+        return refused;
+    }
     let response = match render_client_bundle_pooled(&state, &query.path).await {
         Ok(bundle) => {
-            if state.config.watch {
-                state
-                    .devtools
-                    .record_bundle(&query.path, bundle.document.html.len());
-            }
+            // By route, not by request path: every distinct URL under a
+            // dynamic route used to add an entry that was never evicted, and
+            // each DevTools poll cloned all of them.
+            state
+                .devtools
+                .record_bundle(&bundle.route_path, bundle.document.html.len());
             // Stamped here rather than cached stamped: the version is a hash of
             // the unstamped script, and the route manifest and the Flight
             // endpoint both have to hash the same text this one does.
@@ -1047,6 +1073,28 @@ pub(crate) async fn dynamic_image_endpoint(
     Query(query): Query<DynamicImageQuery>,
     headers: HeaderMap,
 ) -> Response {
+    dynamic_image_response(
+        &state.config.public_dir,
+        &state.config.dynamic_images,
+        &state.dynamic_image_cache,
+        &query,
+        &headers,
+    )
+    .await
+}
+
+/// `/__ruvyxa/image`, answered from whichever host owns the pipeline.
+///
+/// One function for the Axum host and for the loopback service `ruvyxa start`
+/// runs beside the standalone server, so the status a bad request gets, the
+/// cache headers, and the ETag cannot differ between them.
+pub(crate) async fn dynamic_image_response(
+    public_dir: &std::path::Path,
+    config: &crate::DynamicImageConfig,
+    cache: &dynamic_image::DynamicImageCache,
+    query: &DynamicImageQuery,
+    headers: &HeaderMap,
+) -> Response {
     if query.quality.is_some_and(|quality| {
         !(dynamic_image::MIN_QUALITY..=dynamic_image::MAX_QUALITY).contains(&quality)
     }) {
@@ -1059,9 +1107,9 @@ pub(crate) async fn dynamic_image_endpoint(
         );
     }
     let bytes = match dynamic_image::optimize(
-        &state.config.public_dir,
-        &state.config.dynamic_images,
-        &state.dynamic_image_cache,
+        public_dir,
+        config,
+        cache,
         &query.src,
         query.width,
         query.quality,
@@ -1442,6 +1490,15 @@ fn debug_traces_enabled(config: &ServerConfig) -> bool {
 mod tests {
     use super::*;
     use crate::action_security::ActionRateLimiter;
+
+    #[test]
+    fn only_a_watching_host_answers_the_on_demand_compiler() {
+        let production = ServerConfig::production("/site", "127.0.0.1", 3000);
+        let refused = without_on_demand_compiler(&production).expect("production refuses");
+        assert_eq!(refused.status(), StatusCode::NOT_FOUND);
+        let dev = ServerConfig::dev("/site", "127.0.0.1", 3000);
+        assert!(without_on_demand_compiler(&dev).is_none());
+    }
 
     /// The `/__ruvyxa/rsc` gate is one rule with two implementations.
     ///

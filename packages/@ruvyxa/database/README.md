@@ -6,6 +6,9 @@
 
 <h1 align="center">@ruvyxa/database</h1>
 
+> **Experimental.** This package ships without a production guarantee: its API and behaviour may
+> change in a minor release, and it is not part of the release gate the framework itself passes.
+
 <p align="center">
   Typed, server-only database access for Ruvyxa. The package owns a small query contract and<br/>
   delegates all network connections, pooling, migrations, and credentials to an explicit<br/>

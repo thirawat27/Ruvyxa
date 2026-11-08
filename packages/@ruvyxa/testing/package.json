@@ -1,11 +1,14 @@
 {
   "name": "@ruvyxa/testing",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "description": "Framework-native loader, action, and cache test doubles for Ruvyxa applications.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "ruvyxa": {
+    "tier": "experimental"
+  },
   "files": ["dist", "src", "README.md"],
   "keywords": [
     "ruvyxa",

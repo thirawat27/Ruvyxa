@@ -439,6 +439,22 @@ pub(crate) fn resolve_data_cache_handler(
     )))
 }
 
+/// `manifest.json`'s `deploy.buildId`, or `None` when the file, the field, or
+/// a non-empty value is missing. The one reader of that field on this side.
+pub(crate) fn manifest_build_id(out_dir: &Path) -> Option<String> {
+    fs::read_to_string(out_dir.join("manifest.json"))
+        .ok()
+        .and_then(|source| serde_json::from_str::<serde_json::Value>(&source).ok())
+        .and_then(|manifest| {
+            manifest
+                .get("deploy")?
+                .get("buildId")?
+                .as_str()
+                .map(str::to_string)
+        })
+        .filter(|id| !id.is_empty())
+}
+
 /// The prefix every key this server hands the shared store carries.
 ///
 /// `<build id>:`, read from the manifest `ruvyxa build` wrote, because that is
@@ -456,17 +472,7 @@ pub(crate) fn resolve_data_cache_handler(
 /// claims to be, and rebuilding is the fix.
 pub(crate) fn data_cache_key_prefix(out_dir: &Path) -> anyhow::Result<String> {
     let manifest_path = out_dir.join("manifest.json");
-    let build_id = fs::read_to_string(&manifest_path)
-        .ok()
-        .and_then(|source| serde_json::from_str::<serde_json::Value>(&source).ok())
-        .and_then(|manifest| {
-            manifest
-                .get("deploy")?
-                .get("buildId")?
-                .as_str()
-                .map(str::to_string)
-        })
-        .filter(|id| !id.is_empty());
+    let build_id = manifest_build_id(out_dir);
 
     let Some(build_id) = build_id else {
         // Its own code rather than `RUV2200`. That one means "cache.handler
@@ -784,6 +790,41 @@ pub(crate) fn run_adapter_runner(
     runtime: JavaScriptRuntime,
     adapter_name: Option<&str>,
 ) -> anyhow::Result<Vec<AdapterArtifactReport>> {
+    run_adapter_runner_with_env(root, staging_dir, runtime, adapter_name, &[])
+}
+
+/// The variable that tells `adapter-runner.mjs` a named adapter is the local
+/// standalone pass `ruvyxa build` runs for `ruvyxa start`, not the deployment
+/// the project selected. The runner then builds it with default options:
+/// `config.adapterOptions` belongs to the selected adapter (vercel, netlify,
+/// ...), and handing those to `node` would configure the wrong one. Read by
+/// `adapterOptionsFor` in `packages/ruvyxa/runtime/adapter-runner.mjs`.
+pub(crate) const LOCAL_STANDALONE_RUNNER_ENV: &str = "RUVYXA_ADAPTER_RUNNER_LOCAL_STANDALONE";
+
+/// Run `adapter_name` as the local standalone pass: see
+/// [`LOCAL_STANDALONE_RUNNER_ENV`].
+pub(crate) fn run_local_standalone_runner(
+    root: &Path,
+    staging_dir: &Path,
+    runtime: JavaScriptRuntime,
+    adapter_name: &str,
+) -> anyhow::Result<Vec<AdapterArtifactReport>> {
+    run_adapter_runner_with_env(
+        root,
+        staging_dir,
+        runtime,
+        Some(adapter_name),
+        &[(LOCAL_STANDALONE_RUNNER_ENV, "1")],
+    )
+}
+
+fn run_adapter_runner_with_env(
+    root: &Path,
+    staging_dir: &Path,
+    runtime: JavaScriptRuntime,
+    adapter_name: Option<&str>,
+    extra_env: &[(&str, &str)],
+) -> anyhow::Result<Vec<AdapterArtifactReport>> {
     let runner = find_runtime_script(root, "adapter-runner.mjs").ok_or_else(|| {
         anyhow::anyhow!(
             "adapter build hook requires runtime/adapter-runner.mjs; reinstall the ruvyxa package"
@@ -795,7 +836,8 @@ pub(crate) fn run_adapter_runner(
         .arg(runner)
         .arg(root)
         .arg(staging_dir)
-        .envs(adapter_runner_env(root, runtime)?);
+        .envs(adapter_runner_env(root, runtime)?)
+        .envs(extra_env.iter().copied());
     if let Some(adapter_name) = adapter_name {
         command.arg(adapter_name);
     }
@@ -953,7 +995,8 @@ pub(crate) static CLI_RUNTIME_OVERRIDE: std::sync::OnceLock<JavaScriptRuntime> =
 
 pub(crate) fn command_runtime(command: &Command) -> Option<CliRuntime> {
     match command {
-        Command::Dev(args) | Command::Start(args) | Command::Preview(args) => args.runtime,
+        Command::Dev(args) => args.runtime,
+        Command::Start(args) | Command::Preview(args) => args.server.runtime,
         Command::Build(args) => args.runtime,
         Command::Check(args) | Command::Clean(args) | Command::TestParity(args) => args.runtime,
         Command::Routes(args) => args.runtime,

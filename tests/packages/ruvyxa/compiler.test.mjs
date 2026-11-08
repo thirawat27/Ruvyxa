@@ -693,6 +693,66 @@ describe('runtime compiler', () => {
     assert.equal(untouched.source, `${inert}\n`)
   })
 
+  async function globKeys(root, pattern) {
+    const expansion = await expandImportMetaGlob(
+      `export const all = import.meta.glob('${pattern}')\n`,
+      root,
+      root,
+      {},
+    )
+    return [...expansion.source.matchAll(/"([^"]+)":/g)].map((match) => match[1])
+  }
+
+  // The matching half of the shared glob contract; the Rust expander replays the
+  // same table in `replays_the_cross_language_matching_contract`. `**/` used to
+  // consume one character at a time in both, so `./posts/**/index.mdx` matched
+  // `./posts/notindex.mdx`.
+  it('replays the cross-language glob matching contract', async (t) => {
+    const { matching } = JSON.parse(
+      await readFile(path.join(workspaceRoot, 'tests/fixtures/glob-contract.json')),
+    )
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-glob-matching-'))
+    t.after(() => rm(root, { recursive: true, force: true }))
+    for (const file of matching.files) {
+      await mkdir(path.dirname(path.join(root, file)), { recursive: true })
+      await writeFile(path.join(root, file), 'export const value = 1\n')
+    }
+    assert.ok(matching.cases.length > 0, 'the matching table must carry cases')
+    for (const { pattern, expected } of matching.cases) {
+      assert.deepEqual(await globKeys(root, pattern), expected, pattern)
+    }
+  })
+
+  // A symbolic link is neither walked nor matched, by either expander. The Rust
+  // half used to follow one through `Path::is_dir()`.
+  it('replays the cross-language glob symlink contract', async (t) => {
+    const { symlinks } = JSON.parse(
+      await readFile(path.join(workspaceRoot, 'tests/fixtures/glob-contract.json')),
+    )
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-glob-symlinks-'))
+    t.after(() => rm(root, { recursive: true, force: true }))
+    for (const file of [symlinks.real, symlinks.outside]) {
+      await mkdir(path.dirname(path.join(root, file)), { recursive: true })
+      await writeFile(path.join(root, file), 'export const value = 1\n')
+    }
+    try {
+      await symlink(
+        path.join(root, symlinks.fileLink.target),
+        path.join(root, symlinks.fileLink.path),
+        'file',
+      )
+      await symlink(
+        path.join(root, symlinks.directoryLink.target),
+        path.join(root, symlinks.directoryLink.path),
+        'dir',
+      )
+    } catch (error) {
+      t.skip(`this host cannot create a symbolic link here: ${error.message}`)
+      return
+    }
+    assert.deepEqual(await globKeys(root, symlinks.pattern), symlinks.expected)
+  })
+
   it('rejects dynamic and root-escaping import.meta.glob patterns', async (t) => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-glob-invalid-'))
     t.after(() => rm(root, { recursive: true, force: true }))

@@ -181,11 +181,18 @@ impl SourceMapBuilder {
                 let Some(fields) = decode_vlq_segment(segment) else {
                     return false;
                 };
+                let Some(&column_delta) = fields.first() else {
+                    return false;
+                };
+                // Every segment's first field is a column delta, including a
+                // one-field segment that maps the column to no source — so it
+                // is added before such a segment is skipped, or every later
+                // segment on the line lands short of its token.
+                generated_column += column_delta;
                 if fields.len() < 4 {
                     continue;
                 }
 
-                generated_column += fields[0];
                 previous_source += fields[1];
                 previous_original_line += fields[2];
                 previous_original_column += fields[3];
@@ -669,5 +676,26 @@ mod tests {
         assert_eq!(parsed["sources"][0], "src/input.ts");
         assert_eq!(parsed["sourcesContent"][0], "const value = 1");
         assert_eq!(parsed["mappings"].as_str().unwrap().matches(';').count(), 4);
+    }
+
+    /// A one-field segment names a generated column with no source, and its
+    /// delta still counts: the next segment's column is relative to it. The
+    /// importer skipped such segments before adding their delta, so the second
+    /// segment of `E,EAAA` landed at column 2 instead of 4 and every mapping
+    /// after an unmapped run pointed left of its token.
+    #[test]
+    fn a_one_field_segment_still_advances_the_generated_column() {
+        let mut builder = SourceMapBuilder::new("bundle.js", PathBuf::from("/project"));
+        let input =
+            r#"{"version":3,"sources":["input.ts"],"names":[],"mappings":"E,EAAA;AAAA,E,EAAC"}"#;
+
+        assert!(builder.add_source_map(input, 0));
+
+        let positions = builder
+            .mappings
+            .iter()
+            .map(|mapping| (mapping.gen_line, mapping.gen_col, mapping.orig_col))
+            .collect::<Vec<_>>();
+        assert_eq!(positions, vec![(0, 4, 0), (1, 0, 0), (1, 4, 1)]);
     }
 }

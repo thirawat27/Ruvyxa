@@ -397,7 +397,8 @@ export function documentCacheOptionsSource(platformRead: string, platformWrite: 
  * at all. Written once, for the reason `documentCacheOptionsSource` is.
  *
  * The emitted code needs `prerenderRelativePath`, `readFileSync`, `statSync`,
- * `mkdirSync`, `writeFileSync`, and `path` in scope, plus `isrCacheDir` and
+ * `mkdirSync`, `writeFileSync`, `renameSync`, `rmSync`, `path`, and `process`
+ * in scope, plus `isrCacheDir` and
  * `prerenderDir`. When the two directories are one — the standalone server
  * without a temporary cache — the read consults it once.
  *
@@ -442,12 +443,37 @@ const platformReadPrerendered = (pathname, revalidate = 60) => {
   return null;
 };
 
+// Numbers this process's temporary files. The pid alone does not name a writer:
+// replicas in separate containers sharing one volume each see their own pid
+// namespace, and the first worker of each is commonly pid 1, so the name also
+// carries a random part no other writer of the directory can be using.
+let prerenderWriteSequence = 0;
+
 const platformWritePrerendered = (pathname, html, revalidate, forced) => {
   const relative = prerenderRelativePath(pathname);
   if (relative === null) return;
   const htmlPath = path.join(isrCacheDir, relative);
   mkdirSync(path.dirname(htmlPath), { recursive: true });
-  writeFileSync(htmlPath, html, 'utf8');${forcedWrite}
+  // Written beside the page and renamed over it, never written in place: more
+  // than one process can serve this directory, and a reader in another one
+  // must see the old document or the new one, not the first half of the new.
+  // A failure still throws, so the caller's own fail-soft or fail-loud
+  // decision is unchanged; only the temporary file is cleaned up here.
+  prerenderWriteSequence += 1;
+  const temporaryPath =
+    htmlPath + '.' + process.pid + '.' + prerenderWriteSequence + '.' +
+    Math.random().toString(36).slice(2) + '.tmp';
+  try {
+    writeFileSync(temporaryPath, html, 'utf8');
+    renameSync(temporaryPath, htmlPath);
+  } catch (error) {
+    try {
+      rmSync(temporaryPath, { force: true });
+    } catch {
+      // the write already failed; that error is the one worth reporting
+    }
+    throw error;
+  }${forcedWrite}
 };`
 }
 

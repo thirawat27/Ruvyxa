@@ -24,7 +24,9 @@
     "Replayed by tests/packages/ruvyxa/module-syntax.test.mjs, which compiles and",
     "runs each case, and by the `mod syntax_conformance_tests` in",
     "crates/ruvyxa_bundler/src/linker.rs, which links each dependency and checks",
-    "that nothing was left behind. Adding a case is one entry here."
+    "that nothing was left behind, and by `every_module_syntax_entry_yields_its_dependency_edge`",
+    "in crates/ruvyxa_bundler/src/ast.rs, which scans each entry and requires its",
+    "edge to the dependency. Adding a case is one entry here."
   ],
   "cases": [
     {
@@ -131,6 +133,27 @@
       "entry": "import { from } from './dep.js'\nexport const value = String(from)\n",
       "expect": "1",
       "why": "`from` is a keyword only where a specifier follows it, and an ordinary binding name otherwise."
+    },
+    {
+      "name": "import binding `from` beside another name",
+      "dependency": "export const from = \"f\"\nexport const of = \"o\"\n",
+      "entry": "import { from, of } from './dep.js'\nexport const value = from + of\n",
+      "expect": "fo",
+      "why": "The Rust scanner returned on the first `from` and, finding no string after it, lost the edge to the module altogether."
+    },
+    {
+      "name": "import binding ending in `from`",
+      "dependency": "export const _from = \"u\"\nexport const $from = \"d\"\n",
+      "entry": "import { _from, $from } from './dep.js'\nexport const value = _from + $from\n",
+      "expect": "ud",
+      "why": "A byte-wise search matched `from` at the tail of `_from` and gave up on the clause there."
+    },
+    {
+      "name": "re-export of a binding named `from`",
+      "dependency": "export const from = \"r\"\n",
+      "entry": "export { from as value } from './dep.js'\n",
+      "expect": "r",
+      "why": "The first `from` in the clause is the exported name, not the keyword; the specifier follows the second."
     },
     {
       "name": "multi-line export list",

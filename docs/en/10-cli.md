@@ -19,7 +19,7 @@ reconstructing the flags behind those scripts.
 | `npm run dev`                                                                                   | `ruvyxa dev`                          | Route watching and hot reload.                                        |
 | `npm run build`                                                                                 | `ruvyxa build`                        | Production output.                                                    |
 | `npm run check`                                                                                 | `ruvyxa check`                        | Application readiness checks.                                         |
-| `npm run start` / `npm run preview`                                                             | `ruvyxa start` / `preview`            | Serve or locally preview an existing build.                           |
+| `npm run start` / `npm run preview`                                                             | `ruvyxa start` / `preview`            | Run the standalone server a build leaves behind.                      |
 | `npm run routes`                                                                                | `ruvyxa routes`                       | Human-readable route table.                                           |
 | `npm run routes:json`                                                                           | Starter-defined route JSON command    | Machine-readable route output.                                        |
 | `npm run analyze`                                                                               | `ruvyxa analyze`                      | Validate routes, imports, and server/client boundaries.               |
@@ -127,11 +127,13 @@ or another durable atomic implementation; otherwise the auth package fails close
 `adds axum` is for a project whose backend is Rust. It writes a `Cargo.toml` and a `src/main.rs`
 built on the [`ruvyxa-axum`](https://crates.io/crates/ruvyxa-axum) crate, which serves the publish
 directory that `ruvyxa build` writes for the static target: every pre-rendered document at its own
-URL, the hashed client bundles, `public/`, the project's `404.html`, and the `_headers` policy every
-response leaves with. The result is a single executable — no JavaScript runtime on the host, no
-second process, no reverse proxy joining the two — and the crate is the framework's own copy of
-`crates/ruvyxa_axum`, so `src/main.rs` is compiled by the framework's test suite and served against
-a real build in CI.
+URL, the hashed client bundles, `public/`, the project's `404.html`, and the `_headers` policy. Its
+security headers go on every response; its caching headers go only on a successful or `304`
+response, and never over caching headers your own route already set, so a miss is not cached as a
+hit and a per-user API answer is not made shareable. The `_headers` file itself is never served. The
+result is a single executable — no JavaScript runtime on the host, no second process, no reverse
+proxy joining the two — and the crate is the framework's own copy of `crates/ruvyxa_axum`, so
+`src/main.rs` is compiled by the framework's test suite and served against a real build in CI.
 
 The static target holds only routes that are fully materialized at build time. Select it in
 `ruvyxa.config.ts`; the build then refuses a server-rendered, ISR, PPR, or API route for this target
@@ -167,6 +169,30 @@ only for files you intentionally want to regenerate:
 ```bash
 npm run adds -- form --force
 ```
+
+## Serve a build with `start`
+
+`ruvyxa build` always leaves a standalone server at `<outDir>/deploy/<runtime>/`, stamped with the
+build it came from. With the built-in `node`, `bun`, or `deno` adapter that directory is the deploy
+output itself; with another adapter, such as Vercel, the build runs one extra adapter pass to stage
+it. Static-target and `--server-only` builds stage it too.
+
+`ruvyxa start` and `ruvyxa preview` run `<runtime> server/index.mjs` from that directory. `HOST` and
+`PORT` are resolved as before and win over the project's `.env`; `SIGTERM` and `SIGINT` (and
+`SIGHUP`, as `SIGTERM`) are forwarded to the server on Unix, and the command exits with the server's
+exit code (128 plus the signal number on Unix). The server it runs is the one a deployment runs.
+
+- `--workers <n|auto>` runs `n` server processes behind one port (`auto` sizes to the host); see
+  [Deploy, run, and operate](15-deploy-run-and-operate.md). It cannot be combined with
+  `--legacy-host`.
+- `--legacy-host` runs the previous Axum host instead. It is deprecated, removed in the next minor
+  release, and warns on every run.
+
+`ruvyxa build` must run first, and a project that changed needs a fresh `build` before `start`;
+otherwise `start` stops with `RUV1022`. A project that configures realtime or collaboration presence
+must use `--legacy-host` for now (`RUV1024`). Hard-killing `ruvyxa start` (`SIGKILL`, `taskkill /F`)
+leaves the server it spawned running; containers and service managers clean it up, an interactive
+shell may not.
 
 ## API-only builds with `build --server-only`
 

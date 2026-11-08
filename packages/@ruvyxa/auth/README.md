@@ -6,6 +6,9 @@
 
 <h1 align="center">@ruvyxa/auth</h1>
 
+> **Experimental.** This package ships without a production guarantee: its API and behaviour may
+> change in a minor release, and it is not part of the release gate the framework itself passes.
+
 <p align="center">
   Production-shaped authentication for Ruvyxa with explicit state and provider contracts. It<br/>
   supports credentials, OAuth 2.0 with PKCE, magic links, and delegated WebAuthn verification<br/>

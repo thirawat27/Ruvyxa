@@ -41,6 +41,7 @@ mod route_types;
 mod runtime_config;
 mod server_references;
 mod site_discovery;
+mod start;
 mod ui;
 mod worker;
 
@@ -116,9 +117,9 @@ enum Command {
     #[command(about = "Run app-level production readiness checks")]
     Check(ProjectArgs),
     #[command(about = "Serve an existing production build")]
-    Start(ServerArgs),
+    Start(StartArgs),
     #[command(about = "Preview an existing production build locally")]
-    Preview(ServerArgs),
+    Preview(StartArgs),
     #[command(about = "Print the discovered route table")]
     Routes(RoutesArgs),
     #[command(about = "Validate routes, imports, and server/client boundaries")]
@@ -263,6 +264,34 @@ struct ServerArgs {
     /// and config.runtime.
     #[arg(long, value_enum, ignore_case = true)]
     runtime: Option<CliRuntime>,
+}
+
+#[derive(Debug, Parser)]
+struct StartArgs {
+    #[command(flatten)]
+    server: ServerArgs,
+
+    /// Request-serving processes: a positive integer or `auto` (one per CPU).
+    /// Also read from RUVYXA_WORKERS by the standalone server itself. Refused
+    /// with `--legacy-host`, which runs one in-process server and would ignore it.
+    #[arg(long, value_parser = parse_worker_count, conflicts_with = "legacy_host")]
+    workers: Option<String>,
+
+    /// Serve through the previous Axum production host. Deprecated: kept for
+    /// one minor release as a rollback, then removed.
+    #[arg(long)]
+    legacy_host: bool,
+}
+
+fn parse_worker_count(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    let valid = trimmed.eq_ignore_ascii_case("auto")
+        || (!trimmed.starts_with('0') && trimmed.parse::<u32>().is_ok_and(|count| count > 0));
+    if valid {
+        Ok(trimmed.to_ascii_lowercase())
+    } else {
+        Err("expected a positive integer or `auto`".to_string())
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -489,13 +518,8 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Build(args) => build(args).await.context("build failed")?,
         Command::Check(args) => check(args).await.context("check failed")?,
-        Command::Start(args) | Command::Preview(args) => {
-            let config = load_project_config(&args.root)?;
-            ensure_build_output_exists(&args, &config)?;
-            serve(production_server_config(&args, &config)?)
-                .await
-                .context("production server failed")?;
-        }
+        Command::Start(args) => crate::start::start(args, "start").await?,
+        Command::Preview(args) => crate::start::start(args, "preview").await?,
         Command::Routes(args) => print_routes(args).context("route discovery failed")?,
         Command::Analyze(args) => analyze(args).context("analyze failed")?,
         Command::Adds(args) => scaffold_add(args).context("scaffold failed")?,

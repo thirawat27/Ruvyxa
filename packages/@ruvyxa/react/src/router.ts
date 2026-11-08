@@ -211,6 +211,13 @@ const FLIGHT_CACHE_LIMIT = 16
 interface FlightEntry {
   controller: AbortController
   promise: Promise<FlightValue>
+  /**
+   * Whether `promise` fulfilled. Every navigation aborts the previous one's
+   * controller, including one whose payload already arrived, so an aborted
+   * signal alone does not mean the entry is unusable — only an aborted entry
+   * that never fulfilled is.
+   */
+  settled: boolean
 }
 
 /** Internal navigation singleton shared by the routing hooks and `<Link>`. */
@@ -644,8 +651,13 @@ function createRouter(): RouterInstance {
     if (!resolved) return null
     const { key, artifactVersion } = resolved
     const cached = flightCache.get(key)
-    if (cached) {
-      flightCache.delete(key)
+    // An aborted request that never fulfilled is a miss. Its own `.catch`
+    // evicts it, but only microtasks after the abort, and a navigation that
+    // aborted it and came straight back to the same URL gets here first.
+    // Reusing it would settle as a failure and turn the soft navigation into a
+    // full document load.
+    flightCache.delete(key)
+    if (cached && (cached.settled || !cached.controller.signal.aborted)) {
       flightCache.set(key, cached)
       return cached
     }
@@ -674,13 +686,18 @@ function createRouter(): RouterInstance {
         if (new TextEncoder().encode(payload).byteLength > FLIGHT_BYTE_LIMIT) {
           throw new Error('Flight payload is too large')
         }
-        return decodeFlight(payload, artifactVersion, pathname)
+        const value = decodeFlight(payload, artifactVersion, pathname)
+        flight.settled = true
+        return value
       })
       .catch((error: unknown) => {
-        flightCache.delete(key)
+        // Only this request's own entry. An aborted one is replaced under the
+        // same key before this runs, and evicting by key alone would drop the
+        // replacement from the cache.
+        if (flightCache.get(key) === flight) flightCache.delete(key)
         throw error
       })
-    const flight = { controller, promise }
+    const flight: FlightEntry = { controller, promise, settled: false }
     flightCache.set(key, flight)
     return flight
   }

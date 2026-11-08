@@ -233,6 +233,11 @@ where state may live, how information crosses processes, and which code needs to
 | Runtime ↔ browser | Dev server/build output → client          | HTTP, WebSocket HMR, client manifest, hydration assets        | Client code must remain browser-safe; server-only imports and private environment variables are rejected before this boundary. |
 | Build ↔ host      | CLI → adapter artifact                    | `Adapter`, `AdapterOutput`, and declarative `AdapterArtifact` | Adapters describe artifacts; the CLI materializes them inside staging and commits them atomically.                             |
 
+Production has one request host. `ruvyxa build` always stages the standalone server (`createHandler`
+behind `server/index.mjs`) at `<outDir>/deploy/<runtime>/`, and `ruvyxa start` and `preview` spawn
+it; the same code runs in a deployed build. Axum serves `dev` and `start --legacy-host` (deprecated)
+until Phase 2, so a feature still has to work in both for now.
+
 #### Development request lifecycle
 
 ```text
@@ -1995,7 +2000,8 @@ Realtime WebSocket handler:
 `realtime: true` in the config turns the socket on and decides nothing about deployment. No build
 artifact serves the socket — not a serverless function, and not the standalone server the
 self-hosted adapters emit — so `adapter-runner.mjs` reports `RUV2205` for every adapter build, and a
-deployment that depends on native realtime runs `ruvyxa start` as its process.
+deployment that depends on native realtime runs `ruvyxa start --legacy-host` as its process
+(`RUV1024` refuses a plain `start` for such a project).
 
 ---
 
@@ -3858,6 +3864,11 @@ prerender root.
 
 Adapters transform Ruvyxa build output into platform-specific formats. Each adapter implements a
 common interface: receive compiled bundles + route manifest → produce deployable artifact.
+
+Every build also leaves a standalone server at `<outDir>/deploy/<runtime>/` through the built-in
+node/bun/deno adapter (one extra adapter pass when the selected adapter is another, such as Vercel),
+stamped with `.ruvyxa-build-id`. `ruvyxa start` runs that directory, so production has one request
+host; Axum serves `dev` and `--legacy-host` until Phase 2.
 
 ---
 

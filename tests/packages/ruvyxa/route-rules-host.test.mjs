@@ -159,6 +159,74 @@ describe('rewrites() on the deployed host', () => {
     assert.equal(await response.text(), 'upstream')
     assert.deepEqual(seen, ['https://old.example/blog/hello'])
   })
+
+  // A parameter carries the path decoded once, so `%252e%252e` arrives as the
+  // text `%2e%2e` and passes the request's own `..` check. Pasted into a
+  // destination it is a dot-segment to every WHATWG URL parser, which
+  // `new URL()` and `fetch()` collapse — climbing out of the destination's
+  // prefix after the proxy has already been decided against the source path.
+  // The native host canonicalizes the destination (`rewrite_target` in
+  // crates/ruvyxa_dev_server/src/render_pipeline.rs) and answers 400; so must
+  // this one. The substituted text itself is pinned in the shared fixture.
+  const ENCODED_DOT_SEGMENTS = ['%252e%252e', '%252E%252E', '.%252e', '%252e.']
+
+  it('refuses a destination whose substituted value is an encoded dot-segment', async () => {
+    const seen = []
+    const handler = handlerWith({
+      routes: [...ROUTES, page('/admin/users')],
+      rewrites: {
+        beforeFiles: [{ source: '/help/:path*', destination: '/docs/:path*' }],
+        fallback: [{ source: '/kb/:path*', destination: '/docs/:path*' }],
+      },
+      proxy: {
+        matcher: '/admin/:path*',
+        handler(request) {
+          seen.push(new URL(request.url).pathname)
+          return new Response('denied', { status: 401 })
+        },
+      },
+    })
+    assert.equal((await get(handler, '/admin/users')).status, 401)
+    for (const prefix of ['/help', '/kb']) {
+      for (const dots of ENCODED_DOT_SEGMENTS) {
+        const response = await get(handler, `${prefix}/${dots}/admin/users`)
+        const body = await response.text()
+        assert.doesNotMatch(body, /data-path="\/admin\/users"/, `${prefix} ${dots} reached admin`)
+        assert.equal(response.status, 400, `${prefix}/${dots}/admin/users`)
+      }
+    }
+    assert.deepEqual(seen, ['/admin/users'], 'the proxy saw only the direct request')
+  })
+
+  it('refuses a destination whose substituted value is an encoded slash', async () => {
+    const handler = handlerWith({
+      routes: [...ROUTES, page('/admin/users')],
+      rewrites: { beforeFiles: [{ source: '/help/:path*', destination: '/docs/:path*' }] },
+    })
+    const response = await get(handler, '/help/%252e%252e%252fadmin/users')
+    assert.equal(response.status, 400)
+    const slash = await get(handler, '/help/a%252fb')
+    assert.equal(slash.status, 400)
+  })
+
+  it('never fetches an external destination outside its prefix', async () => {
+    const seen = []
+    globalThis.fetch = async (request) => {
+      seen.push(request.url)
+      return new Response('upstream', { status: 200 })
+    }
+    const handler = handlerWith({
+      rewrites: [{ source: '/api/:path*', destination: 'https://backend.internal/public/:path*' }],
+    })
+    for (const dots of ENCODED_DOT_SEGMENTS) {
+      const response = await get(handler, `/api/${dots}/admin/users`)
+      assert.equal(response.status, 400, `/api/${dots}/admin/users`)
+    }
+    assert.deepEqual(seen, [], 'nothing was fetched')
+    const allowed = await get(handler, '/api/users')
+    assert.equal(await allowed.text(), 'upstream')
+    assert.deepEqual(seen, ['https://backend.internal/public/users'])
+  })
 })
 
 describe('proxy on the deployed host', () => {

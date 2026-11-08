@@ -70,6 +70,17 @@ describe('serverless handler client identity', () => {
     assert.equal(clientAddress(headers, trusted), '203.0.113.9')
   })
 
+  it('skips an IPv4-mapped literal shorter than the mapped block', () => {
+    // The native host refuses these at config time (`IpPrefix::parse`). Below
+    // `/96` a mapped literal names no IPv4 range; reading its prefix as an
+    // IPv4 one, as this once did, trusted `10.0.0.0/24` for `::ffff:10.0.0.0/24`.
+    for (const value of ['::ffff:10.0.0.0/95', '::ffff:10.0.0.0/24', '::ffff:10.0.0.0/0']) {
+      assert.deepEqual(parseTrustedProxies([value]), [], value)
+    }
+    const headers = new Headers({ 'x-forwarded-for': '203.0.113.9, 10.0.0.9' })
+    assert.equal(clientAddress(headers, parseTrustedProxies(['::ffff:10.0.0.0/24'])), '10.0.0.9')
+  })
+
   it('reads a declared platform ingress header before any forwarded chain', () => {
     // This step is the deployed host's alone and is why the shared table
     // starts after it: a Worker or an Edge Function has no transport peer to

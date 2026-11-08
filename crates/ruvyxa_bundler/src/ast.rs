@@ -409,8 +409,7 @@ fn import_edge(source: &str, after_keyword: usize, end: usize) -> Option<ImportE
     if word_at(source, index, end) == Some("type") {
         return None;
     }
-    let declaration_start = index;
-    find_from_specifier(source, declaration_start, end).map(|specifier| ImportEdge {
+    clause_from_specifier(source, index, end).map(|specifier| ImportEdge {
         specifier,
         kind: ImportKind::Static,
     })
@@ -419,12 +418,21 @@ fn import_edge(source: &str, after_keyword: usize, end: usize) -> Option<ImportE
 fn export_edge(source: &str, after_keyword: usize, end: usize) -> Option<ImportEdge> {
     let bytes = &source.as_bytes()[..end];
     let index = skip_whitespace_and_comments(bytes, after_keyword);
-    if word_at(source, index, end) == Some("type")
-        || !matches!(bytes.get(index), Some(b'{') | Some(b'*'))
-    {
+    if word_at(source, index, end) == Some("type") {
         return None;
     }
-    find_from_specifier(source, index, end).map(|specifier| ImportEdge {
+    let specifier = match bytes.get(index) {
+        // `export { … }` ends at its brace. Only a `from '…'` directly after it
+        // makes it a re-export; anything else is a local export, and the next
+        // statement — semicolon or not — belongs to nobody's clause.
+        Some(b'{') => {
+            let after = skip_named_bindings(bytes, index)?;
+            from_specifier_at(source, skip_whitespace_and_comments(bytes, after), end)
+        }
+        Some(b'*') => clause_from_specifier(source, index, end),
+        _ => None,
+    }?;
+    Some(ImportEdge {
         specifier,
         kind: ImportKind::ReExport,
     })
@@ -440,24 +448,92 @@ fn call_specifier(source: &str, after_keyword: usize, end: usize) -> Option<Stri
     quoted_value_at(source, index, end)
 }
 
-fn find_from_specifier(source: &str, mut index: usize, end: usize) -> Option<String> {
+/// The specifier closing an import or export clause that begins at `index`.
+///
+/// Walks the clause token by token — binding names, `,`, `*`, and a `{ … }`
+/// list skipped whole — and answers at the first `from` that a string follows.
+/// `from` is a keyword only there: `import { from, of } from 'rxjs'`,
+/// `import from from './a'`, and `export * as from from './b'` all name a
+/// binding `from` first. Words are taken whole, so `_from` and `$from` are never
+/// read as the keyword they end in. Any other token ends the clause with no
+/// edge, which bounds the walk to the clause itself rather than to the next
+/// `;` — a statement without one used to lend its `from '…'` to the next.
+fn clause_from_specifier(source: &str, mut index: usize, end: usize) -> Option<String> {
     let bytes = &source.as_bytes()[..end];
-    while index < bytes.len() {
+    loop {
         index = skip_whitespace_and_comments(bytes, index);
-        if index >= bytes.len() || bytes[index] == b';' {
-            return None;
+        let byte = *bytes.get(index)?;
+        match byte {
+            b'{' => index = skip_named_bindings(bytes, index)?,
+            b',' | b'*' => index += 1,
+            _ if is_clause_word_byte(byte) => {
+                if let Some(specifier) = from_specifier_at(source, index, end) {
+                    return Some(specifier);
+                }
+                while index < bytes.len() && is_clause_word_byte(bytes[index]) {
+                    index += 1;
+                }
+            }
+            _ => return None,
         }
-        if is_quote(bytes[index]) {
-            index = skip_string(bytes, index);
+    }
+}
+
+/// The specifier of a `from '…'` starting exactly at `index`, if one does.
+fn from_specifier_at(source: &str, index: usize, end: usize) -> Option<String> {
+    let bytes = &source.as_bytes()[..end];
+    if word_at(source, index, end) != Some("from")
+        || bytes
+            .get(index + 4)
+            .is_some_and(|byte| is_clause_word_byte(*byte))
+    {
+        return None;
+    }
+    let value = skip_whitespace_and_comments(bytes, index + 4);
+    if !bytes.get(value).is_some_and(|byte| is_quote(*byte)) {
+        return None;
+    }
+    quoted_value_at(source, value, end)
+}
+
+/// The offset just past the `}` closing the `{ … }` binding list at `start`.
+///
+/// Strings are skipped (`{ "a-b" as ab }` is legal) and so are comments; a
+/// list that never closes gives no answer.
+fn skip_named_bindings(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut index = start;
+    while index < bytes.len() {
+        if is_comment_start(bytes, index) {
+            index = skip_comment(bytes, index);
             continue;
         }
-        if word_at(source, index, end) == Some("from") {
-            let value = skip_whitespace_and_comments(bytes, index + 4);
-            return quoted_value_at(source, value, end);
+        match bytes[index] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            quote if is_quote(quote) => {
+                index = skip_string(bytes, index);
+                continue;
+            }
+            _ => {}
         }
         index += 1;
     }
     None
+}
+
+/// A byte that can belong to a binding name in an import or export clause.
+///
+/// Wider than [`is_ident_continue_byte`] on purpose: a non-ASCII name
+/// (`import ตัว from './a'`) and a `\u` escape are binding names too, and
+/// treating their bytes as punctuation would end the clause before its `from`.
+fn is_clause_word_byte(byte: u8) -> bool {
+    is_ident_continue_byte(byte) || byte >= 0x80 || byte == b'\\'
 }
 
 fn quoted_value_at(source: &str, start: usize, end: usize) -> Option<String> {
@@ -1973,13 +2049,13 @@ const computed = process.env[dynamicKey]
         for statement in &parsed.program.body {
             match statement {
                 Statement::ImportDeclaration(declaration) => {
-                    found.push(declaration.source.value.to_string());
+                    found.push(declaration.source.value.display().to_string());
                 }
                 Statement::ExportFromDeclaration(declaration) => {
-                    found.push(declaration.source.value.to_string());
+                    found.push(declaration.source.value.display().to_string());
                 }
                 Statement::ExportAllDeclaration(declaration) => {
-                    found.push(declaration.source.value.to_string());
+                    found.push(declaration.source.value.display().to_string());
                 }
                 _ => {}
             }
@@ -2216,4 +2292,155 @@ const computed = process.env[dynamicKey]
             "const identity = <T,>(value: T): T => value\nimport real from \"./real.js\"\n",
         ),
     ];
+
+    fn specifiers(source: &str) -> Vec<(String, ImportKind)> {
+        parse_module(source)
+            .imports
+            .into_iter()
+            .map(|edge| (edge.specifier, edge.kind))
+            .collect()
+    }
+
+    /// Every entry in the module-syntax table, scanned for its edge.
+    ///
+    /// The linker's replay of `tests/fixtures/module-syntax-conformance.json`
+    /// links each *dependency*; nothing asked this scanner what the *entry*
+    /// imports, so `import { from } from './dep.js'` — a row in that table —
+    /// produced no edge here while the JavaScript graph found it. The module
+    /// graph is built from this answer, so a lost edge is a dependency that is
+    /// never compiled.
+    #[test]
+    fn every_module_syntax_entry_yields_its_dependency_edge() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/module-syntax-conformance.json");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        let fixture: serde_json::Value =
+            serde_json::from_str(&source).expect("the syntax fixture parses");
+        let cases = fixture["cases"].as_array().expect("cases");
+        assert!(!cases.is_empty(), "the fixture must carry cases");
+
+        for case in cases {
+            let name = case["name"].as_str().unwrap_or_default();
+            let entry = case["entry"].as_str().expect("entry");
+            let wanted = if entry.contains("./dep.tsx") {
+                "./dep.tsx"
+            } else if entry.contains("./dep.ts") {
+                "./dep.ts"
+            } else {
+                "./dep.js"
+            };
+            let found = specifiers(entry);
+            assert!(
+                found.iter().any(|(specifier, _)| specifier == wanted),
+                "{name}: the entry's edge to {wanted} was lost: {found:?}\n{entry}"
+            );
+        }
+    }
+
+    /// `from` is a contextual keyword, and an ordinary identifier everywhere
+    /// else. The clause scan used to return on the first `from` it saw — a
+    /// binding named `from`, the tail of `_from` — and give up when no string
+    /// followed it.
+    #[test]
+    fn a_binding_named_from_does_not_end_the_clause() {
+        for (source, specifier, kind) in [
+            (
+                "import { from, of } from 'rxjs'\n",
+                "rxjs",
+                ImportKind::Static,
+            ),
+            (
+                "import { from } from './dep.js'\n",
+                "./dep.js",
+                ImportKind::Static,
+            ),
+            (
+                "import { _from } from './dep.js'\n",
+                "./dep.js",
+                ImportKind::Static,
+            ),
+            (
+                "import { $from as x } from './dep.js'\n",
+                "./dep.js",
+                ImportKind::Static,
+            ),
+            (
+                "import from from './dep.js'\n",
+                "./dep.js",
+                ImportKind::Static,
+            ),
+            (
+                "import from, { of } from './dep.js'\n",
+                "./dep.js",
+                ImportKind::Static,
+            ),
+            (
+                "import ตัว, { หน่วย } from './dep.js'\n",
+                "./dep.js",
+                ImportKind::Static,
+            ),
+            (
+                "import json from './data.json' with { type: 'json' }\n",
+                "./data.json",
+                ImportKind::Static,
+            ),
+            (
+                "import * as from from './dep.js'\n",
+                "./dep.js",
+                ImportKind::Static,
+            ),
+            (
+                "export { x as from } from './y'\n",
+                "./y",
+                ImportKind::ReExport,
+            ),
+            (
+                "export { from as value } from './y'\n",
+                "./y",
+                ImportKind::ReExport,
+            ),
+            ("export * as from from './y'\n", "./y", ImportKind::ReExport),
+            (
+                "import { a } /* from 'nope' */ from './real.js'\n",
+                "./real.js",
+                ImportKind::Static,
+            ),
+            (
+                "import { \"a-b\" as ab } from './real.js'\n",
+                "./real.js",
+                ImportKind::Static,
+            ),
+            (
+                "export {\n  a,\n  from,\n}\nfrom './y'\n",
+                "./y",
+                ImportKind::ReExport,
+            ),
+        ] {
+            assert_eq!(
+                specifiers(source),
+                vec![(specifier.to_string(), kind)],
+                "{source}"
+            );
+        }
+    }
+
+    /// A local `export { … }` ends at its closing brace. Without a semicolon
+    /// the scan used to run on into the next statements and adopt whatever
+    /// `from '…'` it met there as a re-export of this one.
+    #[test]
+    fn a_local_export_clause_ends_at_its_brace() {
+        assert_eq!(
+            specifiers("const a = 1\nexport { a }\nconst text = from\nimport b from './b.js'\n"),
+            vec![("./b.js".to_string(), ImportKind::Static)]
+        );
+        assert_eq!(
+            specifiers("const a = 1\nexport { a }\nfoo(from '/x')\n"),
+            Vec::<(String, ImportKind)>::new()
+        );
+        assert_eq!(
+            specifiers("export { a }\nexport { b } from './b.js'\n"),
+            vec![("./b.js".to_string(), ImportKind::ReExport)]
+        );
+    }
 }

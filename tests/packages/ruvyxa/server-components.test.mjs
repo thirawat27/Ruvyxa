@@ -154,10 +154,34 @@ describe('the server graph', () => {
   })
 })
 
+/**
+ * The `I` (import) rows of a Flight payload that name the module `id`.
+ *
+ * React 19.3 deduplicates the strings inside import metadata: one of sixteen
+ * characters or more is written once as its own row (`c:"ruv:m_…"`) and every
+ * import row points at it by reference (`d:I["$c",[],"default"]`). The id is
+ * still written inline once that per-request budget runs out, and was always
+ * inline before 19.3, so both spellings name the module and both are accepted.
+ * Ruvyxa never reads these rows itself — `react-server-dom-webpack`'s own
+ * client resolves them — which is why only the test has to know the spelling.
+ */
+function importRowsFor(payload, id) {
+  const lines = payload.split('\n')
+  const names = new Set([JSON.stringify(id)])
+  for (const line of lines) {
+    const outlined = /^([0-9a-f]+):(".*")$/.exec(line)
+    if (outlined && JSON.parse(outlined[2]) === id) names.add(JSON.stringify(`$${outlined[1]}`))
+  }
+  return lines.filter((line) => {
+    const row = /^[0-9a-f]+:I\[("(?:[^"\\]|\\.)*")/.exec(line)
+    return row !== null && names.has(row[1])
+  })
+}
+
 describe('the Flight payload', () => {
   it('serialises the client component as a reference and the server output as data', () => {
     const id = clientModuleId('app/counter.tsx')
-    assert.match(rendered.payload, new RegExp(`I\\["${id}"`))
+    assert.ok(importRowsFor(rendered.payload, id).length > 0, rendered.payload)
     assert.match(rendered.payload, /only-on-the-server/)
     // `$L<n>` is how the tree points at a reference row; without it the client
     // component was inlined rather than referenced.
@@ -166,8 +190,7 @@ describe('the Flight payload', () => {
 
   it('names one reference per module, not per imported export', () => {
     const id = clientModuleId('app/counter.tsx')
-    const rows = rendered.payload.split('\n').filter((line) => line.includes(`I["${id}"`))
-    assert.equal(rows.length, 2, rendered.payload)
+    assert.equal(importRowsFor(rendered.payload, id).length, 2, rendered.payload)
   })
 })
 

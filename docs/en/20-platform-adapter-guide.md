@@ -252,7 +252,9 @@ one credential for that: the prerender bypass token, which the adapter writes in
 `<route>.prerender-config.json` and into the function that sends it back.
 
 Set `RUVYXA_PREVIEW_SECRET` in the build environment. The adapter hashes it into the token, so the
-value itself never reaches the deployed output.
+value itself never reaches the deployed output. Draft mode reads the same variable at request time
+to sign and verify its cookie, so a project that uses `draftMode()` sets it for the runtime
+environment too — see [Turning draft mode on](05-data-actions-api.md#turning-draft-mode-on).
 
 Without it the token is derived from the build id, which keeps `ruvyxa build` reproducible but makes
 the token a function of the build's own public surface — its asset names, its document paths, and

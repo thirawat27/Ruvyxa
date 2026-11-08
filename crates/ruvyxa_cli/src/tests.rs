@@ -4810,3 +4810,466 @@ fn the_shared_cache_key_prefix_comes_from_the_build_id() {
         "the same `<build id>:` a deployed build's registry writes"
     );
 }
+
+#[test]
+fn manifest_build_id_reads_deploy_build_id_and_ignores_an_empty_one() {
+    let temp = tempfile::tempdir().unwrap();
+    assert_eq!(crate::runtime_config::manifest_build_id(temp.path()), None);
+    std::fs::write(
+        temp.path().join("manifest.json"),
+        r#"{"deploy":{"buildId":""}}"#,
+    )
+    .unwrap();
+    assert_eq!(crate::runtime_config::manifest_build_id(temp.path()), None);
+    std::fs::write(
+        temp.path().join("manifest.json"),
+        r#"{"deploy":{"buildId":"abc123"}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        crate::runtime_config::manifest_build_id(temp.path()).as_deref(),
+        Some("abc123")
+    );
+}
+
+#[test]
+fn the_local_standalone_stage_runs_only_when_the_selected_adapter_is_not_the_runtime() {
+    use crate::start::local_standalone_adapter;
+    use ruvyxa_dev_server::JavaScriptRuntime;
+    assert_eq!(
+        local_standalone_adapter(JavaScriptRuntime::Node, None),
+        Some("node")
+    );
+    assert_eq!(
+        local_standalone_adapter(JavaScriptRuntime::Node, Some("vercel")),
+        Some("node")
+    );
+    assert_eq!(
+        local_standalone_adapter(JavaScriptRuntime::Node, Some("node")),
+        None
+    );
+    assert_eq!(
+        local_standalone_adapter(JavaScriptRuntime::Bun, Some("node")),
+        Some("bun")
+    );
+    assert_eq!(
+        local_standalone_adapter(JavaScriptRuntime::Deno, Some("deno")),
+        None
+    );
+    // The official package name is the same adapter as its short name: running
+    // it again would build node twice into one directory.
+    assert_eq!(
+        local_standalone_adapter(JavaScriptRuntime::Node, Some("@ruvyxa/adapter-node")),
+        None
+    );
+    assert_eq!(
+        local_standalone_adapter(JavaScriptRuntime::Bun, Some("@ruvyxa/adapter-bun")),
+        None
+    );
+    assert_eq!(
+        local_standalone_adapter(JavaScriptRuntime::Node, Some("@ruvyxa/adapter-vercel")),
+        Some("node")
+    );
+    // Only the official scope is folded: a community package is another adapter.
+    assert_eq!(
+        local_standalone_adapter(JavaScriptRuntime::Node, Some("@acme/adapter-node")),
+        Some("node")
+    );
+}
+
+/// The extra pass exists only so `ruvyxa start` has a server. When the project
+/// asked for another deployment, that deployment already succeeded and a
+/// failure here must not fail the build; when the selected adapter's own
+/// output is the standalone server, failing to stamp it is the build failing.
+#[test]
+fn a_failed_local_standalone_stage_fails_only_the_build_whose_adapter_it_is() {
+    use crate::start::settle_local_standalone_stage;
+    use ruvyxa_dev_server::JavaScriptRuntime;
+
+    let warning = settle_local_standalone_stage(
+        JavaScriptRuntime::Node,
+        Some("node"),
+        Err(anyhow::anyhow!("adapter build hook failed: boom")),
+    )
+    .expect("another adapter's build must not fail")
+    .expect("the failure is reported as a warning");
+    assert!(warning.contains("RUV1022"), "{warning}");
+    assert!(warning.contains("ruvyxa start"), "{warning}");
+    assert!(warning.contains("boom"), "{warning}");
+
+    let error = settle_local_standalone_stage(
+        JavaScriptRuntime::Node,
+        None,
+        Err(anyhow::anyhow!("failed to write the stamp")),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("stamp"), "{error}");
+
+    assert!(
+        settle_local_standalone_stage(JavaScriptRuntime::Node, Some("node"), Ok(()))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        settle_local_standalone_stage(JavaScriptRuntime::Node, None, Ok(()))
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// The stage end to end over an output that cannot be staged (no manifest, so
+/// no build id): a vercel build still succeeds, and the stamp an earlier build
+/// left is gone rather than vouching for this build's server.
+#[test]
+fn the_local_standalone_stage_never_fails_another_adapters_build_or_keeps_an_old_stamp() {
+    use ruvyxa_dev_server::JavaScriptRuntime;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let config = ProjectConfig::default();
+    let out_dir = root.join(config.out_dir());
+    let stamp = crate::start::standalone_dir(&out_dir, JavaScriptRuntime::Node)
+        .join(crate::start::STANDALONE_BUILD_ID_FILE);
+    let parse = |adapter: &str| {
+        let Command::Build(args) = Cli::try_parse_from([
+            "Ruvyxa",
+            "build",
+            "--root",
+            root.to_str().unwrap(),
+            "--adapter",
+            adapter,
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected build");
+        };
+        args
+    };
+
+    fs::create_dir_all(stamp.parent().unwrap()).unwrap();
+    fs::write(&stamp, "an-earlier-build").unwrap();
+    crate::build::run_local_standalone_stage(&parse("vercel"), &config, &out_dir, &None, None)
+        .expect("a failed local pass must not fail a vercel build");
+    assert!(!stamp.exists(), "an old stamp survived a failed stage");
+
+    // The node adapter's own output is the standalone server: failing to stamp
+    // it fails the build.
+    fs::write(&stamp, "an-earlier-build").unwrap();
+    assert!(
+        crate::build::run_local_standalone_stage(&parse("node"), &config, &out_dir, &None, None)
+            .is_err()
+    );
+    assert!(!stamp.exists());
+}
+
+/// An object-form adapter the runner named nothing for: the stage cannot tell
+/// whether that adapter's output is the standalone server, so it neither runs a
+/// second pass over it nor vouches for the server that is there — even one that
+/// would otherwise stamp cleanly. `ruvyxa start` then reports RUV1022.
+#[test]
+fn an_unresolved_adapter_leaves_the_standalone_server_unstamped() {
+    use crate::start::{StandaloneState, standalone_dir, standalone_state};
+    use ruvyxa_dev_server::JavaScriptRuntime;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let config = ProjectConfig {
+        adapter: Some(serde_json::json!({ "options": {} })),
+        ..ProjectConfig::default()
+    };
+    let out_dir = root.join(config.out_dir());
+    let node = standalone_dir(&out_dir, JavaScriptRuntime::Node);
+    fs::create_dir_all(node.join("server")).unwrap();
+    fs::write(node.join("server").join("index.mjs"), "").unwrap();
+    fs::write(
+        out_dir.join("manifest.json"),
+        r#"{"deploy":{"buildId":"this-build"}}"#,
+    )
+    .unwrap();
+    let stamp = node.join(crate::start::STANDALONE_BUILD_ID_FILE);
+    fs::write(&stamp, "this-build").unwrap();
+    let Command::Build(args) =
+        Cli::try_parse_from(["Ruvyxa", "build", "--root", root.to_str().unwrap()])
+            .unwrap()
+            .command
+    else {
+        panic!("expected build");
+    };
+
+    crate::build::run_local_standalone_stage(&args, &config, &out_dir, &None, None)
+        .expect("an unresolved adapter is not a failed build");
+    assert!(
+        !stamp.exists(),
+        "the unresolved branch vouched for a server"
+    );
+    assert!(matches!(
+        standalone_state(&out_dir, JavaScriptRuntime::Node),
+        StandaloneState::Stale
+    ));
+}
+
+#[test]
+fn a_standalone_server_is_current_only_with_a_matching_stamp() {
+    use crate::start::{StandaloneState, stamp_standalone, standalone_dir, standalone_state};
+    use ruvyxa_dev_server::JavaScriptRuntime;
+    let temp = tempfile::tempdir().unwrap();
+    let out = temp.path();
+    let runtime = JavaScriptRuntime::Node;
+    assert!(matches!(
+        standalone_state(out, runtime),
+        StandaloneState::Missing
+    ));
+
+    let server = standalone_dir(out, runtime).join("server");
+    std::fs::create_dir_all(&server).unwrap();
+    std::fs::write(server.join("index.mjs"), "").unwrap();
+    std::fs::write(out.join("manifest.json"), r#"{"deploy":{"buildId":"one"}}"#).unwrap();
+    assert!(matches!(
+        standalone_state(out, runtime),
+        StandaloneState::Stale
+    ));
+
+    stamp_standalone(out, runtime).unwrap();
+    assert!(matches!(
+        standalone_state(out, runtime),
+        StandaloneState::Current
+    ));
+
+    std::fs::write(out.join("manifest.json"), r#"{"deploy":{"buildId":"two"}}"#).unwrap();
+    assert!(matches!(
+        standalone_state(out, runtime),
+        StandaloneState::Stale
+    ));
+}
+
+#[test]
+fn the_selected_adapter_is_resolved_for_an_object_form_config() {
+    use crate::build::{AdapterSelection, select_adapter};
+    use serde_json::json;
+    let named = |s: AdapterSelection| match s {
+        AdapterSelection::Named(name) => Some(name),
+        _ => None,
+    };
+    // A flag wins, then a string config, then detection.
+    assert_eq!(
+        named(select_adapter(
+            Some("vercel"),
+            Some(&json!("netlify")),
+            Some("x"),
+            None
+        )),
+        Some("vercel".to_string())
+    );
+    assert_eq!(
+        named(select_adapter(
+            None,
+            Some(&json!("netlify")),
+            Some("x"),
+            None
+        )),
+        Some("netlify".to_string())
+    );
+    assert_eq!(
+        named(select_adapter(None, None, Some("vercel"), None)),
+        Some("vercel".to_string())
+    );
+    assert!(matches!(
+        select_adapter(None, None, None, None),
+        AdapterSelection::NoAdapter
+    ));
+    // An object-form config has no name of its own: the resolved one is used,
+    // and when none resolves the selection is unknown, never "no adapter".
+    let object = json!({ "name": "node", "options": {} });
+    assert_eq!(
+        named(select_adapter(None, Some(&object), None, Some("node"))),
+        Some("node".to_string())
+    );
+    assert!(matches!(
+        select_adapter(None, Some(&object), None, None),
+        AdapterSelection::Unresolved
+    ));
+}
+
+#[test]
+fn start_parses_workers_and_legacy_host() {
+    let cli = Cli::try_parse_from(normalized_cli_args(os_args([
+        "Ruvyxa",
+        "start",
+        "--workers",
+        "auto",
+        "--port",
+        "4000",
+    ])))
+    .unwrap();
+    let Command::Start(args) = cli.command else {
+        panic!("expected start");
+    };
+    assert_eq!(args.workers.as_deref(), Some("auto"));
+    assert!(!args.legacy_host);
+    assert_eq!(args.server.port, Some(4000));
+
+    let cli = Cli::try_parse_from(normalized_cli_args(os_args([
+        "Ruvyxa",
+        "start",
+        "--legacy-host",
+    ])))
+    .unwrap();
+    let Command::Start(args) = cli.command else {
+        panic!("expected start");
+    };
+    assert!(args.legacy_host);
+    assert_eq!(args.workers, None);
+}
+
+/// The legacy host is one in-process server: a worker count would be ignored
+/// without a word, so the pair is refused where it is typed.
+#[test]
+fn start_refuses_workers_with_the_legacy_host() {
+    let error = Cli::try_parse_from(normalized_cli_args(os_args([
+        "Ruvyxa",
+        "start",
+        "--workers",
+        "2",
+        "--legacy-host",
+    ])))
+    .unwrap_err();
+    assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+}
+
+#[test]
+fn start_refuses_an_invalid_worker_count_at_parse_time() {
+    for value in ["0", "-2", "many"] {
+        assert!(
+            Cli::try_parse_from(normalized_cli_args(os_args([
+                "Ruvyxa",
+                "start",
+                "--workers",
+                value
+            ])))
+            .is_err(),
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn the_launch_plan_runs_the_standalone_entry_with_the_bind_address_and_services() {
+    use ruvyxa_dev_server::JavaScriptRuntime;
+    let standalone = std::path::Path::new("/app/.ruvyxa/deploy/node");
+    let mut project_env = std::collections::BTreeMap::new();
+    project_env.insert("SECRET".to_string(), "value".to_string());
+    // A project `.env` naming its own bind address must not move the server
+    // off the one `start` resolved and reported.
+    project_env.insert("PORT".to_string(), "9999".to_string());
+    project_env.insert("HOST".to_string(), "1.2.3.4".to_string());
+    let plan = crate::start::launch_plan(
+        JavaScriptRuntime::Node,
+        standalone,
+        "127.0.0.1",
+        4100,
+        Some("2"),
+        Some(("http://127.0.0.1:5555", "token")),
+        project_env,
+    );
+    assert_eq!(plan.args, vec!["server/index.mjs".to_string()]);
+    assert_eq!(plan.cwd, standalone);
+    assert_eq!(plan.env["HOST"], "127.0.0.1");
+    assert_eq!(plan.env["PORT"], "4100");
+    assert_eq!(plan.env["RUVYXA_WORKERS"], "2");
+    assert_eq!(plan.env["RUVYXA_IMAGE_SERVICE"], "http://127.0.0.1:5555");
+    assert_eq!(plan.env["RUVYXA_IMAGE_SERVICE_TOKEN"], "token");
+    assert_eq!(plan.env["SECRET"], "value");
+}
+
+#[test]
+fn the_deno_launch_plan_grants_the_permissions_the_smoke_lane_proves() {
+    use ruvyxa_dev_server::JavaScriptRuntime;
+    let plan = crate::start::launch_plan(
+        JavaScriptRuntime::Deno,
+        std::path::Path::new("/app/.ruvyxa/deploy/deno"),
+        "0.0.0.0",
+        3000,
+        None,
+        None,
+        std::collections::BTreeMap::new(),
+    );
+    assert_eq!(plan.args, ["run", "-A", "--no-prompt", "server/index.mjs"]);
+    assert!(!plan.env.contains_key("RUVYXA_WORKERS"));
+    assert!(!plan.env.contains_key("RUVYXA_IMAGE_SERVICE"));
+}
+
+#[test]
+fn start_diagnostics_carry_their_codes() {
+    use ruvyxa_dev_server::JavaScriptRuntime;
+    let out = std::path::Path::new("/app/.ruvyxa");
+    let rendered =
+        crate::start::standalone_not_current(out, JavaScriptRuntime::Node, false).to_string();
+    assert!(rendered.contains("RUV1022"), "{rendered}");
+    assert!(rendered.contains("ruvyxa build"), "{rendered}");
+    let rendered = crate::start::runtime_missing(JavaScriptRuntime::Bun).to_string();
+    assert!(
+        rendered.contains("RUV1023") && rendered.contains("bun"),
+        "{rendered}"
+    );
+    let rendered = crate::start::sockets_need_legacy_host(true, false)
+        .expect("realtime needs the legacy host")
+        .to_string();
+    assert!(
+        rendered.contains("RUV1024") && rendered.contains("--legacy-host"),
+        "{rendered}"
+    );
+}
+
+/// `collab` is its own Axum-only socket, beside `realtime`: a project
+/// configuring only presence lost `/__ruvyxa/collab` under `start` without a
+/// word until RUV1024 covered it too.
+#[test]
+fn collab_alone_also_refuses_a_plain_start() {
+    use crate::start::sockets_need_legacy_host;
+    assert!(sockets_need_legacy_host(false, false).is_none());
+    let collab = sockets_need_legacy_host(false, true)
+        .expect("collab needs the legacy host")
+        .to_string();
+    assert!(collab.contains("RUV1024"), "{collab}");
+    assert!(collab.contains("/__ruvyxa/collab"), "{collab}");
+    assert!(!collab.contains("/__ruvyxa/realtime"), "{collab}");
+    let realtime = sockets_need_legacy_host(true, false).unwrap().to_string();
+    assert!(realtime.contains("/__ruvyxa/realtime"), "{realtime}");
+    assert!(!realtime.contains("/__ruvyxa/collab"), "{realtime}");
+    let both = sockets_need_legacy_host(true, true).unwrap().to_string();
+    assert!(
+        both.contains("/__ruvyxa/realtime") && both.contains("/__ruvyxa/collab"),
+        "{both}"
+    );
+}
+
+#[test]
+fn the_standalone_diagnostic_says_which_of_its_causes_it_found() {
+    use ruvyxa_dev_server::JavaScriptRuntime;
+    let temp = tempfile::tempdir().unwrap();
+    let out = temp.path();
+    let node = crate::start::standalone_dir(out, JavaScriptRuntime::Node);
+    fs::create_dir_all(node.join("server")).unwrap();
+    fs::write(node.join("server").join("index.mjs"), "").unwrap();
+
+    // Staged, never stamped.
+    let rendered =
+        crate::start::standalone_not_current(out, JavaScriptRuntime::Node, false).to_string();
+    assert!(rendered.contains("RUV1022"), "{rendered}");
+    assert!(
+        rendered.contains("no `.ruvyxa-build-id` stamp"),
+        "{rendered}"
+    );
+
+    // Stamped by another build.
+    fs::write(node.join(crate::start::STANDALONE_BUILD_ID_FILE), "old").unwrap();
+    let rendered =
+        crate::start::standalone_not_current(out, JavaScriptRuntime::Node, false).to_string();
+    assert!(rendered.contains("different build"), "{rendered}");
+
+    // Missing for this runtime, staged for another: the fix is `--runtime`.
+    let rendered =
+        crate::start::standalone_not_current(out, JavaScriptRuntime::Bun, true).to_string();
+    assert!(rendered.contains("RUV1022"), "{rendered}");
+    assert!(rendered.contains("`node` instead"), "{rendered}");
+    assert!(rendered.contains("--runtime node"), "{rendered}");
+}

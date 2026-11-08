@@ -5,6 +5,10 @@
 > **Checkpoint:** choose one integration, implement its smallest flow, and test the failure path
 > too.
 
+`@ruvyxa/auth`, `@ruvyxa/database`, `@ruvyxa/realtime`, and `@ruvyxa/testing` are experimental: they
+carry no production guarantee, and their API can change between releases. Native realtime also needs
+`ruvyxa start --legacy-host`, because only the previous host serves it (`RUV1024`).
+
 ## Authentication
 
 `@ruvyxa/auth` exports `createAuth`, provider helpers `google` and `github`, the development-only

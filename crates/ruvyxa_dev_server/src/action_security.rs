@@ -16,7 +16,8 @@ use crate::{ActionQuery, ServerConfig};
 const ACTION_NONCE_TTL: Duration = Duration::from_secs(600);
 const ACTION_NONCE_MAX_ENTRIES: usize = 10_000;
 
-/// Live nonces one client address may hold, a tenth of the whole pool.
+/// Live nonces one client may hold, a tenth of the whole pool. A client is an
+/// IPv4 address or an IPv6 /64 — [`action_nonce_subject`] says why.
 ///
 /// The rate limiter in front of this guard is keyed per client *and per path
 /// and action*, so a client that spreads its requests over two actions gets two
@@ -117,6 +118,8 @@ impl ActionReplayGuard {
         {
             return Err(ActionReplayRejection::InvalidNonce);
         }
+        // Counted per /64 for IPv6, not per address: see `action_nonce_subject`.
+        let client = action_nonce_subject(client);
         let now = Instant::now();
         while self.order.front().is_some_and(|entry| entry.expires <= now) {
             if let Some(expired) = self.order.pop_front() {
@@ -594,6 +597,85 @@ pub(crate) fn action_rate_limit_key(
     format!("{client}:{}:{}", query.path, query.name)
 }
 
+/// The identity the replay guard's per-client quota counts under.
+///
+/// The whole address for IPv4, and the /64 for IPv6. One IPv6 subscriber is
+/// routinely handed a whole /64, so keyed by the full address ten of its
+/// addresses each took a full share and saturated the pool — refusing every
+/// client's versioned actions with 503 for a TTL. An IPv4-mapped address is
+/// unmapped first, so a dual-stack listener's `::ffff:203.0.113.7` peer is the
+/// IPv4 client it names rather than a member of `::ffff:0:0/64`.
+///
+/// Mirrors `actionNonceSubject` in `packages/ruvyxa/runtime/serverless-handler.mjs`;
+/// both replay `nonce.clientSubject` in `tests/fixtures/action-contract.json`.
+pub(crate) fn action_nonce_subject(client: IpAddr) -> IpAddr {
+    match client_ip::unmap_v4(client) {
+        IpAddr::V6(address) => IpAddr::V6(std::net::Ipv6Addr::from(
+            u128::from(address) & !(u128::MAX >> 64),
+        )),
+        address => address,
+    }
+}
+
+/// What a form post refused by the action rate limiter is answered with.
+pub(crate) const PAGE_FORM_RATE_LIMIT_MESSAGE: &str = "Form action rate limit exceeded";
+
+/// Refuse a no-JavaScript form post to a server-components page that is not
+/// provably same-origin.
+///
+/// Such a form posts to the page's own URL and the render runs the server
+/// function its hidden fields name, so it is the third door to the functions
+/// `/__ruvyxa/action` and `/__ruvyxa/rsc` guard — and it was the one left
+/// open: a third-party page auto-submitting a urlencoded form at it ran the
+/// action with the visitor's cookies. The same two `ServerConfig` fields, read
+/// the same way as [`validate_action_request`], including the fail-closed
+/// answer when neither `Origin` nor `Sec-Fetch-Site: same-origin` is present; a
+/// browser sends `Origin` on every form `POST`.
+///
+/// Mirrors `pageFormActionRejection` in `serverless-handler.mjs`; both replay
+/// `pageFormPost` in `tests/fixtures/action-contract.json`.
+pub(crate) fn page_form_action_rejection(
+    headers: &HeaderMap,
+    config: &ServerConfig,
+    peer: SocketAddr,
+) -> Option<Response> {
+    if config.same_origin_actions && action_origin_is_cross_site(headers, config, peer.ip()) {
+        return Some(
+            (
+                StatusCode::FORBIDDEN,
+                "Cross-origin form action request blocked",
+            )
+                .into_response(),
+        );
+    }
+    if config.fetch_metadata_actions && action_fetch_site_is_cross_site(headers) {
+        return Some(
+            (
+                StatusCode::FORBIDDEN,
+                "Cross-site form action request blocked",
+            )
+                .into_response(),
+        );
+    }
+    None
+}
+
+/// Rate-limit key for a no-JavaScript form post to a page.
+///
+/// Per client and canonical route path. The `form:` prefix keeps these buckets
+/// apart from the two endpoints that share the limiter, and the budget is per
+/// route rather than per function because the reference sits in a body only
+/// the worker parses. Same shape as the deployed host's key.
+pub(crate) fn page_form_rate_limit_key(
+    peer: SocketAddr,
+    headers: &HeaderMap,
+    request_path: &str,
+    config: &ServerConfig,
+) -> String {
+    let client = action_client_ip(peer, headers, config);
+    format!("form:{client}:{request_path}")
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
@@ -851,6 +933,130 @@ mod tests {
                 .consume(&headers, "a_0123456789abcdef", client(8))
                 .is_ok()
         );
+    }
+
+    /// The per-client quota's identity, replayed from the same table as
+    /// `actionNonceSubject` in `serverless-handler.mjs`.
+    #[test]
+    fn the_nonce_quota_subject_matches_the_shared_conformance_table() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/action-contract.json"))
+                .unwrap();
+        let clause = &fixture["nonce"]["clientSubject"];
+        assert_eq!(clause["ipv6PrefixLength"].as_u64(), Some(64));
+        for case in clause["cases"].as_array().unwrap() {
+            let address: IpAddr = case["address"].as_str().unwrap().parse().unwrap();
+            let subject: IpAddr = case["subject"].as_str().unwrap().parse().unwrap();
+            assert_eq!(
+                action_nonce_subject(address),
+                subject,
+                "nonce quota subject disagrees with the shared fixture: {address}"
+            );
+        }
+    }
+
+    /// One IPv6 subscriber holds a whole /64. Keyed by the full address, ten of
+    /// its addresses each took a full share and saturated the pool, refusing
+    /// every client's versioned actions with 503 for a TTL.
+    #[test]
+    fn every_address_in_one_ipv6_slash_64_shares_one_quota() {
+        let mut guard = ActionReplayGuard::default();
+        let in_prefix =
+            |host: u16| IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0xdb8, 1, 2, 0, 0, 0, host));
+        for index in 0..ACTION_NONCE_MAX_PER_CLIENT {
+            let headers = nonce_headers(&format!("n{index:016}"));
+            let host = u16::try_from(index % 10).unwrap() + 1;
+            assert!(
+                guard
+                    .consume(&headers, "a_0123456789abcdef", in_prefix(host))
+                    .is_ok()
+            );
+        }
+
+        let headers = nonce_headers("fedcba9876543210");
+        assert_eq!(
+            guard.consume(&headers, "a_0123456789abcdef", in_prefix(0xffff)),
+            Err(ActionReplayRejection::ClientSaturated)
+        );
+
+        // The neighbouring /64 is somebody else.
+        let neighbour = IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0xdb8, 1, 3, 0, 0, 0, 1));
+        assert!(
+            guard
+                .consume(&headers, "a_0123456789abcdef", neighbour)
+                .is_ok()
+        );
+    }
+
+    /// A no-JavaScript form post to a server-components page is held to the
+    /// action endpoint's origin pair. Replays `pageFormPost`, as
+    /// `serverless-handler.test.mjs` does through `createHandler`.
+    #[test]
+    fn page_form_posts_match_the_shared_conformance_table() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/action-contract.json"))
+                .unwrap();
+        let contract = &fixture["pageFormPost"];
+        let host = contract["host"].as_str().unwrap();
+        // Not a trusted proxy, so no forwarded scheme is asserted — the
+        // deployed host has no peer and asserts none either.
+        let peer: SocketAddr = "203.0.113.7:5000".parse().unwrap();
+
+        for case in contract["cases"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let mut config = ServerConfig::dev("D:/app", "127.0.0.1", 3000);
+            let policy = &case["policy"];
+            config.same_origin_actions = policy["sameOrigin"].as_bool().unwrap_or(true);
+            config.fetch_metadata_actions = policy["fetchMeta"].as_bool().unwrap_or(true);
+
+            let mut headers = HeaderMap::new();
+            headers.insert(header::HOST, HeaderValue::from_str(host).unwrap());
+            for (field, value) in case["headers"].as_object().unwrap() {
+                headers.insert(
+                    HeaderName::from_bytes(field.as_bytes()).unwrap(),
+                    HeaderValue::from_str(value.as_str().unwrap()).unwrap(),
+                );
+            }
+
+            let refusal = page_form_action_rejection(&headers, &config, peer);
+            if case["admitted"].as_bool() == Some(true) {
+                assert!(refusal.is_none(), "{name}: must be admitted");
+                continue;
+            }
+            let refusal = refusal.unwrap_or_else(|| panic!("{name}: must be refused"));
+            assert_eq!(
+                refusal.status().as_u16(),
+                u16::try_from(case["status"].as_u64().unwrap()).unwrap(),
+                "{name}"
+            );
+            let body = body_text(refusal);
+            assert_eq!(body, case["message"].as_str().unwrap(), "{name}");
+        }
+
+        // The limiter key, in the fixture's shape.
+        let config = ServerConfig::dev("D:/app", "127.0.0.1", 3000);
+        assert_eq!(
+            contract["rateLimit"]["key"],
+            "form:{client}:{canonical path}"
+        );
+        assert_eq!(
+            page_form_rate_limit_key(peer, &HeaderMap::new(), "/todos", &config),
+            "form:203.0.113.7:/todos"
+        );
+        assert_eq!(
+            PAGE_FORM_RATE_LIMIT_MESSAGE,
+            contract["rateLimit"]["message"].as_str().unwrap()
+        );
+    }
+
+    /// The body of a refusal, which is always a short static string.
+    fn body_text(response: Response) -> String {
+        let bytes = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(axum::body::to_bytes(response.into_body(), 1024))
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
     }
 
     /// Every rejection carries its own status, and nothing else in the crate

@@ -1351,6 +1351,38 @@ export default loadRouteModule
     }
   })
 
+  // `ruvyxa build` runs a second, local pass of the runtime's own adapter so
+  // `ruvyxa start` has a server whatever the deployment adapter was. Those
+  // options belong to the deployment adapter (vercel, netlify, ...); handed to
+  // the local pass, they configured — or failed — the wrong adapter.
+  // `run_local_standalone_runner` in `crates/ruvyxa_cli/src/runtime_config.rs`.
+  it('builds the local standalone pass with default options', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-options-'))
+    const outputDir = path.join(root, '.ruvyxa-staging')
+    try {
+      await mkdir(path.join(outputDir, 'assets'), { recursive: true })
+      await mkdir(path.join(outputDir, 'client'), { recursive: true })
+      await mkdir(path.join(outputDir, 'prerender'), { recursive: true })
+      await writeFile(path.join(outputDir, 'prerender', 'index.html'), '<main>home</main>')
+      await installFakeReact(root)
+      await mkdir(path.join(root, 'app'), { recursive: true })
+      await writeFile(path.join(outputDir, 'manifest.json'), JSON.stringify({ routes: [] }))
+      // Options this adapter's own validator refuses: a run that passed them on
+      // would fail with RUV2001 instead of building.
+      await writeFile(
+        path.join(root, 'ruvyxa.config.mjs'),
+        `export default { adapterOptions: { serviceName: 'Not A Valid Name!' } }`,
+      )
+
+      await runRunner(root, outputDir, 'render', { RUVYXA_ADAPTER_RUNNER_LOCAL_STANDALONE: '1' })
+
+      const blueprint = await readFile(path.join(outputDir, 'deploy/render/render.yaml'), 'utf8')
+      assert.doesNotMatch(blueprint, /Not A Valid Name/)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('refuses adapterOptions beside an already-constructed config.adapter', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-options-'))
     const outputDir = path.join(root, '.ruvyxa-staging')

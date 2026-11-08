@@ -212,6 +212,30 @@
       "client": "203.0.113.9"
     },
     {
+      "name": "an IPv4-mapped trusted address is the IPv4 address it maps",
+      "headers": { "x-forwarded-for": "203.0.113.9, 10.0.0.9" },
+      "trustedProxyIps": ["::ffff:10.0.0.9"],
+      "client": "203.0.113.9"
+    },
+    {
+      "name": "an IPv4-mapped trusted range is the IPv4 range it maps",
+      "headers": { "x-forwarded-for": "203.0.113.9, 10.0.0.9, 10.255.0.1" },
+      "trustedProxyIps": ["::ffff:10.0.0.0/104"],
+      "client": "203.0.113.9"
+    },
+    {
+      "name": "an IPv4-mapped range keeps only its own IPv4 addresses",
+      "headers": { "x-forwarded-for": "203.0.113.9, 11.0.0.9, 10.0.0.9" },
+      "trustedProxyIps": ["::ffff:10.0.0.0/104"],
+      "client": "11.0.0.9"
+    },
+    {
+      "name": "the whole IPv4-mapped block trusts every IPv4 hop",
+      "headers": { "x-forwarded-for": "203.0.113.9, 10.0.0.9" },
+      "trustedProxyIps": ["::ffff:0:0/96"],
+      "client": null
+    },
+    {
       "name": "an empty first x-forwarded-for line still suppresses x-real-ip",
       "headerLines": [
         ["x-forwarded-for", ""],

@@ -744,20 +744,29 @@ fn form_decode(text: &str) -> String {
     while index < bytes.len() {
         match bytes[index] {
             b'+' => output.push(b' '),
-            b'%' if index + 2 < bytes.len() => {
-                match u8::from_str_radix(&text[index + 1..index + 3], 16) {
-                    Ok(byte) => {
-                        output.push(byte);
-                        index += 2;
-                    }
-                    Err(_) => output.push(b'%'),
+            // Two hex digits read as bytes. Slicing `text` here split a
+            // multi-byte character and panicked, and `from_str_radix` took a
+            // leading `+` as a sign; a `%` without two hex digits after it is
+            // literal, as `URLSearchParams` keeps it.
+            b'%' => match (
+                hex_value(bytes.get(index + 1)),
+                hex_value(bytes.get(index + 2)),
+            ) {
+                (Some(high), Some(low)) => {
+                    output.push(high << 4 | low);
+                    index += 2;
                 }
-            }
+                _ => output.push(b'%'),
+            },
             byte => output.push(byte),
         }
         index += 1;
     }
     String::from_utf8_lossy(&output).into_owned()
+}
+
+fn hex_value(byte: Option<&u8>) -> Option<u8> {
+    char::from(*byte?).to_digit(16).map(|digit| digit as u8)
 }
 
 /// The WHATWG urlencoded serializer: alphanumerics and `*-._` verbatim, space
@@ -959,6 +968,22 @@ mod tests {
                 request.path
             );
         }
+    }
+
+    /// `%` reads two hex *bytes*, never a `str` slice: a slice across a
+    /// multi-byte character panicked the host, and `u8::from_str_radix`
+    /// accepted a leading `+` that `URLSearchParams` keeps literal.
+    #[test]
+    fn a_percent_not_followed_by_two_hex_digits_is_literal() {
+        let pair = |key: &str, value: &str| vec![(key.to_string(), value.to_string())];
+        assert_eq!(parse_query("q=%aé"), pair("q", "%aé"));
+        assert_eq!(parse_query("q=%é"), pair("q", "%é"));
+        assert_eq!(parse_query("q=é%"), pair("q", "é%"));
+        assert_eq!(parse_query("q=%+1"), pair("q", "% 1"));
+        assert_eq!(parse_query("q=%-1"), pair("q", "%-1"));
+        assert_eq!(parse_query("q=%4"), pair("q", "%4"));
+        assert_eq!(parse_query("q=%zz%41"), pair("q", "%zzA"));
+        assert_eq!(parse_query("%c3%A9=a+b%20c"), pair("é", "a b c"));
     }
 
     #[test]

@@ -29,10 +29,16 @@ server-rendered, ISR, PPR, or API route for this target with a per-route error, 
 crate opens needs a renderer. Projects that need those routes run `ruvyxa start` or a deploy
 adapter.
 
-`_headers` is applied as Netlify and Cloudflare Pages apply it, a pre-rendered route is served at
+`_headers` is matched as Netlify and Cloudflare Pages match it, a pre-rendered route is served at
 its own URL without a redirect, a miss is the project's `404.html` with a 404 status, and content
 types come from the same table every other Ruvyxa host uses. `GET` and `HEAD` only; conditional
-and range requests are honoured; files stream.
+and range requests are honoured; files stream. `_headers` and `_redirects` themselves are not
+served.
+
+The security headers in `_headers` are set on every response, errors included. Caching headers
+(`Cache-Control`, `Expires`, the `CDN-Cache-Control` family) are set only on a 2xx or 304
+response — a 404 for a bundle that has not shipped must not be cached as `immutable` — and never
+replace caching headers your own route set, so a `Cache-Control: private` answer stays private.
 
 ## License
 

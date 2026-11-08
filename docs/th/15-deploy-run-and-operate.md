@@ -53,6 +53,41 @@ manifest/output และเรียก health route ที่ application ข�
   ที่ย้ายเข้าที่หลัง build สำเร็จ แต่ไม่ implement remote release orchestration หรือ database
   rollback
 
+## รันหลาย worker
+
+`ruvyxa start --workers <n|auto>` และตัวแปร environment `RUVYXA_WORKERS` (ถูกอ่านด้วยเมื่อคุณรัน
+`node server/index.mjs` โดยตรง) เริ่ม server หลาย process หลัง port เดียว วิธีเริ่มขึ้นกับ runtime:
+
+- **Node** ใช้ `cluster`
+- **Bun** ต้องใช้ Linux หากต้องการมากกว่าหนึ่ง worker (แชร์ port ด้วย `reusePort`)
+- **Deno** รันหนึ่ง process ต่อหนึ่ง instance; ขยายด้วยการเริ่ม instance เพิ่ม
+
+ค่าที่ไม่ใช่จำนวนเต็มบวกหรือ `auto` หรือที่ runtime หรือ OS ไม่รองรับ จะทำให้ server หยุดตั้งแต่
+เริ่มด้วย `RUV1025`
+
+worker ไม่ใช้ memory ร่วมกัน ISR store ใช้ร่วมกันบนดิสก์และการเขียนเป็น atomic แต่ in-memory cache,
+rate limiter และ `revalidateTag` จะไปถึงเฉพาะ worker ที่รับ request ชี้
+[`cache.handler`](07-configuration.md) ไปยัง store ที่ทุก worker ใช้ร่วมกันสำหรับ state
+ที่ต้องตรงกัน worker ที่ crash จะถูกเริ่มใหม่; หาก crash เกินห้าครั้งใน 60 วินาที server จะจบด้วย
+exit code ที่ไม่ใช่ศูนย์ `SIGTERM` หรือ `SIGINT` ซ้ำภายในหนึ่งวินาทีนับเป็นครั้งเดียว (service
+manager ส่ง signal ให้ทั้ง control group) และ signal ที่สองหลังจากนั้นจะบังคับให้จบ
+
+worker แต่ละตัวคือ server ของตัวเอง ตัวเลขระดับ process จึงเป็นของแต่ละ worker ด้วย:
+
+- `GET /__ruvyxa/metrics` บอกค่าของ worker ตัวเดียวที่ตอบการ scrape นั้น ไม่ใช่ของทั้ง server
+  ให้รวมค่าจากหลายการ scrape หรือรันหนึ่ง worker ต่อ instance เมื่อการ scrape
+  ครั้งเดียวต้องเป็นยอดรวม
+- admission limit (`RUVYXA_MAX_CONCURRENCY`, `RUVYXA_MAX_QUEUE`) ใช้กับแต่ละ worker ดังนั้นทั้ง
+  server จะรับงานได้เท่านั้นต่อ worker
+- `auto` นับจำนวน processor ที่เครื่องรายงาน และไม่อ่าน CPU quota ของ container ใน container
+  ที่ถูกจำกัด CPU น้อยกว่าเครื่อง host ให้ระบุตัวเลขเอง
+- บน Unix `ruvyxa start` รัน server ใน process group ของตัวเองเพื่อให้ส่งต่อการหยุดเพียงครั้งเดียว
+  job control ของ shell จึงไปถึงเฉพาะตัวเปิด: `Ctrl-Z` จะพัก `ruvyxa start` ขณะที่ server
+  ยังให้บริการต่อ ให้หยุดด้วย `Ctrl-C` แทน
+
+on-demand image (`image.onDemand`) ใช้ได้ภายใต้ `ruvyxa start` ผ่าน loopback image service ส่วน
+standalone server ที่เริ่มโดยตรงจะตอบ `/__ruvyxa/image` ด้วย 404
+
 ## build ที่ deploy แล้วให้บริการอะไรบ้าง
 
 build artifact รัน request pipeline เดียวกับ `ruvyxa start` ไม่ใช่ชุดที่ถูกลดทอน:
@@ -64,14 +99,14 @@ build artifact รัน request pipeline เดียวกับ `ruvyxa start
 | `headers()`, `redirects()`, `rewrites()`, `proxy.handler`           | ได้             | ได้                   |
 | `@ruvyxa/auth` (mount ผ่าน `route.ts`)                              | ได้             | ได้                   |
 | on-demand image (`/__ruvyxa/image`)                                 | ได้             | ขึ้นกับ adapter       |
-| native realtime และ presence                                        | ได้             | ไม่ได้                |
+| native realtime และ presence                                        | `--legacy-host` | ไม่ได้                |
 | `security.apiLimit`, `security.headers`, `security.trustedProxyIps` | ได้             | ได้                   |
 
 server action และ `proxy.handler` ถูก compile เข้า function artifact จาก `ruvyxa.config`
 โปรเจกต์ที่ใช้ทั้งสองอย่างจึง deploy ได้โดยไม่ต้องตั้งค่าเพิ่ม ส่วน realtime และ presence ต้องการ
 socket upgrade ซึ่ง build artifact ทำไม่ได้; `ruvyxa build` จะพิมพ์ `RUV2205` พร้อมระบุ endpoint
 ที่จะหายไป และ `ruvyxa check` รายงานเรื่องเดียวกันในแถว capability parity ให้ serve
-โปรเจกต์เหล่านั้นด้วย `ruvyxa start`
+โปรเจกต์เหล่านั้นด้วย `ruvyxa start --legacy-host` (`RUV1024` จะอธิบายเมื่อคุณลืมใส่)
 
 การเลือก adapter ที่ให้บริการสิ่งที่โปรเจกต์ใช้ไม่ได้ จะทำให้ build ล้มเหลว แทนที่จะ deploy
 เว็บที่ตอบ 404: static adapter ที่มี server action หรือ `proxy.handler` จะรายงาน `RUV2204`
@@ -184,7 +219,9 @@ query parameter หรือใช้ catch-all segment
 พิสูจน์ไม่ได้ว่ามาจากเว็บของคุณเอง จึงถูกปฏิเสธ เบราว์เซอร์ทุกตัวส่งอย่างใดอย่างหนึ่งเสมอตอน POST
 ข้ามเอกสาร แต่ `curl` ไม่ส่งสักอย่าง เวลาเรียก action ด้วยมือให้เพิ่ม
 `-H "Origin: https://your-host"` หรือถ้าตั้งใจให้ client ที่ไม่ใช่เบราว์เซอร์เรียกได้ ให้ตั้ง
-`security.sameOrigin: false`
+`security.sameOrigin: false` การตรวจเดียวกันนี้และ rate limit ของ action ใช้กับฟอร์มที่หน้าซึ่งไม่มี
+JavaScript POST กลับไปที่ URL ของตัวเองเพื่อรัน server function ด้วย คำขอที่ส่งมาข้ามไซต์จะได้ `403`
+ก่อนหน้านั้นจะถูก render
 
 **สั่ง `ruvyxa build` ซ้ำบน output เดิมขณะที่ตัวแรกยังทำงานอยู่จะล้มเหลว** build จะจับ lock
 บนโฟลเดอร์ output ของมัน build สองตัวที่เขียนโฟลเดอร์เดียวกันจะได้ผลลัพธ์ที่ปนกันของทั้งคู่

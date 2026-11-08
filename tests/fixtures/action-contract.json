@@ -21,6 +21,88 @@
       "status": 429,
       "message": "Action replay protection is saturated for this client",
       "why": "The rate limiter in front of the guard is keyed per client and per path and action, so one client spreading requests over two actions earns two fresh buckets while the nonce pool stays one — enough for a single address to reach global saturation and refuse every other client's actions for a TTL. Each address may hold at most perClientMaxEntries live nonces; the address over its share is refused with 429 while the pool still serves everyone else. Saturating the pool now takes ten distinct addresses instead of one."
+    },
+    "clientSubject": {
+      "ipv6PrefixLength": 64,
+      "why": "The per-client quota was keyed by the full client address. One IPv6 subscriber is routinely handed a whole /64 — 2^64 addresses — so ten addresses from one /64 each took their thousand-nonce share and saturated the pool, refusing every client's versioned actions with 503 for a TTL. The quota is now keyed by the client's /64 for IPv6, and by the whole address for IPv4. An IPv4-mapped IPv6 address is unmapped first, so a dual-stack listener's `::ffff:203.0.113.7` peer is the IPv4 client it names rather than a member of `::ffff:0:0/64`. `subject` is written in the JavaScript host's uncompressed spelling, which the Rust host parses; both compare addresses, not text.",
+      "cases": [
+        { "address": "203.0.113.7", "subject": "203.0.113.7" },
+        { "address": "::ffff:203.0.113.7", "subject": "203.0.113.7" },
+        { "address": "2001:db8:1:2::1", "subject": "2001:db8:1:2:0:0:0:0" },
+        { "address": "2001:db8:1:2:ffff:ffff:ffff:ffff", "subject": "2001:db8:1:2:0:0:0:0" },
+        { "address": "2001:db8:1:3::1", "subject": "2001:db8:1:3:0:0:0:0" },
+        { "address": "2001:db8:1:2:8000::", "subject": "2001:db8:1:2:0:0:0:0" },
+        { "address": "::1", "subject": "0:0:0:0:0:0:0:0" }
+      ]
     }
+  },
+  "pageFormPost": {
+    "why": "A `<form action={fn}>` on a server-components page that has no JavaScript posts to the page's own URL, with the server function's reference in hidden fields, and the page render runs that function. `/__ruvyxa/action` and `/__ruvyxa/rsc` refused a cross-site request with 403 and the page URL did not: a third-party page could auto-submit a urlencoded form at `https://victim/todos` carrying `$ACTION_ID_…` and the visitor's cookies, and the action ran. A posted form on a server-components route is now held to the same `security.sameOrigin` / `security.fetchMeta` pair as the action endpoint — fail-closed when neither `Origin` nor `Sec-Fetch-Site: same-origin` is present, exactly as there — and refused before the body reaches a render. It is rate limited by `security.actionRateLimit` too, keyed per client and canonical route path: the reference sits in a multipart body only the worker parses, so the budget is per route rather than per function. `host` is the `Host` header every case is sent with.",
+    "host": "app.test",
+    "rateLimit": {
+      "key": "form:{client}:{canonical path}",
+      "status": 429,
+      "message": "Form action rate limit exceeded"
+    },
+    "cases": [
+      {
+        "name": "a same-origin Origin runs the action",
+        "headers": { "origin": "http://app.test" },
+        "admitted": true
+      },
+      {
+        "name": "no Origin with Sec-Fetch-Site same-origin runs the action",
+        "headers": { "sec-fetch-site": "same-origin" },
+        "admitted": true
+      },
+      {
+        "name": "a cross-site Origin is refused",
+        "headers": { "origin": "https://evil.example" },
+        "status": 403,
+        "message": "Cross-origin form action request blocked"
+      },
+      {
+        "name": "the reported attack: cross-site Origin and Sec-Fetch-Site",
+        "headers": { "origin": "https://evil.example", "sec-fetch-site": "cross-site" },
+        "status": 403,
+        "message": "Cross-origin form action request blocked"
+      },
+      {
+        "name": "a matching Origin that Sec-Fetch-Site reports as cross-site is refused",
+        "headers": { "origin": "http://app.test", "sec-fetch-site": "cross-site" },
+        "status": 403,
+        "message": "Cross-site form action request blocked"
+      },
+      {
+        "name": "neither Origin nor Sec-Fetch-Site fails closed",
+        "headers": {},
+        "status": 403,
+        "message": "Cross-origin form action request blocked"
+      },
+      {
+        "name": "no Origin with Sec-Fetch-Site same-site fails closed",
+        "headers": { "sec-fetch-site": "same-site" },
+        "status": 403,
+        "message": "Cross-origin form action request blocked"
+      },
+      {
+        "name": "sameOrigin: false leaves only the fetch-metadata check",
+        "policy": { "sameOrigin": false },
+        "headers": { "origin": "https://evil.example" },
+        "admitted": true
+      },
+      {
+        "name": "fetchMeta: false leaves only the origin check",
+        "policy": { "fetchMeta": false },
+        "headers": { "origin": "http://app.test", "sec-fetch-site": "cross-site" },
+        "admitted": true
+      },
+      {
+        "name": "both checks off admits the reported attack",
+        "policy": { "sameOrigin": false, "fetchMeta": false },
+        "headers": { "origin": "https://evil.example", "sec-fetch-site": "cross-site" },
+        "admitted": true
+      }
+    ]
   }
 }

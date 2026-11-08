@@ -279,11 +279,19 @@ fn collect_matches(pattern: &Path, watch_root: &Path) -> Result<Vec<PathBuf>> {
         for entry in fs::read_dir(directory)? {
             let entry = entry?;
             let path = entry.path();
-            if path.is_dir() {
+            // The entry's own type, which does not follow a symbolic link:
+            // a link is neither walked nor matched. `Path::is_dir()` follows
+            // one, so a linked directory — possibly outside the project — was
+            // walked here while `collectFiles` in `runtime/glob.mjs`, whose
+            // `Dirent.isDirectory()`/`isFile()` are both false for a link,
+            // skipped it. The `symlinks` section of
+            // `tests/fixtures/glob-contract.json` holds both graphs to this.
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
                 if !is_ignored_directory(&path) {
                     pending.push(path);
                 }
-            } else if glob_matches(&pattern, &slash(&path)) {
+            } else if file_type.is_file() && glob_matches(&pattern, &slash(&path)) {
                 matches.push(path);
             }
         }
@@ -318,9 +326,17 @@ fn glob_matches(pattern: &str, value: &str) -> bool {
     fn matches(pattern: &[u8], value: &[u8]) -> bool {
         match pattern.first() {
             None => value.is_empty(),
+            // `**/` is zero or more *whole* segments: either nothing, or one
+            // segment through its `/` and then `**/` again. Consuming a single
+            // byte instead let `./posts/**/index.mdx` swallow the `not` of
+            // `notindex.mdx`. `globMatches` in `runtime/glob.mjs` takes the same
+            // step; `tests/fixtures/glob-contract.json` holds both.
             Some(b'*') if pattern.get(1) == Some(&b'*') && pattern.get(2) == Some(&b'/') => {
                 matches(&pattern[3..], value)
-                    || (!value.is_empty() && matches(pattern, &value[1..]))
+                    || value
+                        .iter()
+                        .position(|byte| *byte == b'/')
+                        .is_some_and(|slash| matches(pattern, &value[slash + 1..]))
             }
             Some(b'*') if pattern.get(1) == Some(&b'*') => {
                 let rest = &pattern[2..];
@@ -445,6 +461,58 @@ mod tests {
             relative_specifier(&root.join("features/blog"), &root.join("shared/post.ts")),
             "../../shared/post.ts"
         );
+    }
+
+    /// The fixture's top-level `cases`, which nothing replayed: the first one
+    /// claimed `./posts/**/*.ts` matches only the nested file, though `**/`
+    /// matches zero directories and both expanders have always matched
+    /// `posts/one.ts` too. A table no test reads is a comment that looks like a
+    /// gate.
+    #[test]
+    fn replays_the_contract_cases() {
+        let contract: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/glob-contract.json"))
+                .unwrap();
+        let root = temp_directory("contract-cases");
+        fs::create_dir_all(root.join("posts/nested")).unwrap();
+        fs::create_dir_all(root.join("posts/node_modules")).unwrap();
+        fs::write(root.join("posts/one.ts"), "export const value = 1;").unwrap();
+        fs::write(root.join("posts/nested/two.ts"), "export const value = 2;").unwrap();
+        fs::write(root.join("posts/node_modules/hidden.ts"), "throw 1;").unwrap();
+
+        for case in contract["cases"].as_array().unwrap() {
+            let pattern = case["pattern"].as_str().unwrap();
+            let options = if case["eager"].as_bool().unwrap() {
+                ", { eager: true }"
+            } else {
+                ""
+            };
+            let expansion = expand_import_meta_glob(
+                &format!("export const all = import.meta.glob('{pattern}'{options});"),
+                &root,
+                &root,
+                &ResolveGraphCache::new(),
+                |specifier| specifier.strip_prefix("@/").map(|rest| root.join(rest)),
+            )
+            .unwrap();
+            let mut actual = expansion
+                .matches
+                .iter()
+                .map(|file| {
+                    let relative = file.strip_prefix(&root).unwrap_or(file);
+                    format!("./{}", relative.to_string_lossy().replace('\\', "/"))
+                })
+                .collect::<Vec<_>>();
+            actual.sort();
+            let expected = case["expected"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap().to_string())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "{}", case["name"]);
+        }
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// The ordering and lowering halves of the cross-language glob contract.
@@ -682,6 +750,145 @@ mod tests {
         fs::create_dir_all(&directory).unwrap();
         let pattern = directory.join("*.ts");
         assert_eq!(glob_watch_root(&pattern, &root), directory);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn glob_contract() -> serde_json::Value {
+        serde_json::from_str(include_str!("../../../tests/fixtures/glob-contract.json")).unwrap()
+    }
+
+    /// Assert that expanding `pattern` under `root` yields exactly `expected`,
+    /// in that order, and none of `candidates` beyond it.
+    fn assert_glob_keys(root: &Path, pattern: &str, expected: &[String], candidates: &[String]) {
+        let expansion = expand_import_meta_glob(
+            &format!("export const all = import.meta.glob('{pattern}');"),
+            root,
+            root,
+            &ResolveGraphCache::new(),
+            |_| None,
+        )
+        .unwrap();
+        let positions = expected
+            .iter()
+            .map(|key| {
+                expansion
+                    .source
+                    .find(&format!("\"{key}\":"))
+                    .unwrap_or_else(|| panic!("{pattern}: missing {key} in {}", expansion.source))
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "{pattern}: keys out of order: {}",
+            expansion.source
+        );
+        for candidate in candidates {
+            if expected.contains(candidate) {
+                continue;
+            }
+            assert!(
+                !expansion.source.contains(&format!("\"{candidate}\":")),
+                "{pattern} must not match {candidate}: {}",
+                expansion.source
+            );
+        }
+        assert_eq!(
+            expansion.matches.len(),
+            expected.len(),
+            "{pattern}: {:?}",
+            expansion.matches
+        );
+    }
+
+    fn strings(value: &serde_json::Value) -> Vec<String> {
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// The matching half of the cross-language glob contract; the JavaScript
+    /// half replays the same table in `tests/packages/ruvyxa/compiler.test.mjs`.
+    #[test]
+    fn replays_the_cross_language_matching_contract() {
+        let contract = glob_contract();
+        let matching = &contract["matching"];
+        let root = temp_directory("matching-contract");
+        let files = strings(&matching["files"]);
+        for file in &files {
+            let path = root.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "export const value = 1;").unwrap();
+        }
+        let candidates = files
+            .iter()
+            .map(|file| format!("./{file}"))
+            .collect::<Vec<_>>();
+        let cases = matching["cases"].as_array().unwrap();
+        assert!(!cases.is_empty(), "the matching table must carry cases");
+        for case in cases {
+            let pattern = case["pattern"].as_str().unwrap();
+            assert_glob_keys(&root, pattern, &strings(&case["expected"]), &candidates);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn globstar_slash_spans_whole_segments_only() {
+        assert!(glob_matches("/p/**/index.mdx", "/p/index.mdx"));
+        assert!(glob_matches("/p/**/index.mdx", "/p/a/b/index.mdx"));
+        assert!(!glob_matches("/p/**/index.mdx", "/p/notindex.mdx"));
+        assert!(!glob_matches("/p/**/index.mdx", "/p/a/notindex.mdx"));
+        assert!(!glob_matches("/p/**/b/*.mdx", "/p/ab/x.mdx"));
+    }
+
+    #[cfg(unix)]
+    fn make_link(target: &Path, link: &Path, _directory: bool) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn make_link(target: &Path, link: &Path, directory: bool) -> std::io::Result<()> {
+        if directory {
+            std::os::windows::fs::symlink_dir(target, link)
+        } else {
+            std::os::windows::fs::symlink_file(target, link)
+        }
+    }
+
+    /// The symlink half of the glob contract: a link is neither walked nor
+    /// matched, as `Dirent.isDirectory()`/`isFile()` decide in `glob.mjs`.
+    ///
+    /// Skips, loudly, where the host refuses to create links (Windows without
+    /// Developer Mode or the privilege), since that refusal says nothing about
+    /// the expander.
+    #[test]
+    fn replays_the_cross_language_symlink_contract() {
+        let contract = glob_contract();
+        let symlinks = &contract["symlinks"];
+        let root = temp_directory("symlink-contract");
+        for key in ["real", "outside"] {
+            let path = root.join(symlinks[key].as_str().unwrap());
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "export const value = 1;").unwrap();
+        }
+        for (key, directory) in [("fileLink", false), ("directoryLink", true)] {
+            let link = root.join(symlinks[key]["path"].as_str().unwrap());
+            let target = root.join(symlinks[key]["target"].as_str().unwrap());
+            if let Err(error) = make_link(&target, &link, directory) {
+                eprintln!("skipping: this host cannot create a symbolic link here: {error}");
+                let _ = fs::remove_dir_all(&root);
+                return;
+            }
+        }
+        let pattern = symlinks["pattern"].as_str().unwrap();
+        let candidates = vec![
+            "./linked/alias.ts".to_string(),
+            "./linked/through/deep.ts".to_string(),
+        ];
+        assert_glob_keys(&root, pattern, &strings(&symlinks["expected"]), &candidates);
         fs::remove_dir_all(root).unwrap();
     }
 }

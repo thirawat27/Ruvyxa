@@ -65,6 +65,19 @@ impl IpPrefix {
         if prefix_len > host_prefix_len(address) {
             return None;
         }
+        // `contains` compares an unmapped peer against an unmapped network, so
+        // an IPv4-mapped entry has to be stored as the IPv4 range it maps or
+        // the IPv6 prefix length lands on an IPv4 mask. Shorter than the
+        // mapped block itself, a mapped literal names no IPv4 range at all and
+        // is refused like any other entry that cannot be read.
+        let (address, prefix_len) = match address {
+            IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+                Some(v4) if prefix_len >= 96 => (IpAddr::V4(v4), prefix_len - 96),
+                Some(_) => return None,
+                None => (address, prefix_len),
+            },
+            IpAddr::V4(_) => (address, prefix_len),
+        };
         Some(Self {
             network: mask_address(address, prefix_len),
             prefix_len,
@@ -422,6 +435,50 @@ mod tests {
         let error = TrustedProxies::parse_all(["10.0.0.0/8", "10.0.0.0/33"])
             .expect_err("an invalid entry must be reported");
         assert!(error.contains("10.0.0.0/33"), "{error}");
+    }
+
+    /// An IPv4-mapped entry is the IPv4 range it maps.
+    ///
+    /// `contains` unmaps the network to compare it against an unmapped peer,
+    /// and used to keep the IPv6 prefix length beside it: `::ffff:10.0.0.9`
+    /// shifted an IPv4 mask by `32 - 128`, which panics in a debug build, and
+    /// `::ffff:0:0/96` matched `0.0.0.0` alone in a release one.
+    #[test]
+    fn ipv4_mapped_entries_are_their_ipv4_ranges() {
+        for (mapped, plain) in [
+            ("::ffff:10.0.0.9", "10.0.0.9"),
+            ("::ffff:10.0.0.9/128", "10.0.0.9/32"),
+            ("::ffff:10.0.0.0/104", "10.0.0.0/8"),
+            ("::ffff:0:0/96", "0.0.0.0/0"),
+        ] {
+            assert_eq!(IpPrefix::parse(mapped), IpPrefix::parse(plain), "{mapped}");
+        }
+        let block = IpPrefix::parse("::ffff:0:0/96").unwrap();
+        assert!(block.contains(ip("203.0.113.8")));
+        assert!(block.contains(ip("::ffff:203.0.113.8")));
+        assert!(!block.contains(ip("2001:db8::2")));
+        assert!(
+            IpPrefix::parse("::ffff:10.0.0.9")
+                .unwrap()
+                .contains(ip("10.0.0.9"))
+        );
+    }
+
+    /// A mapped literal with a prefix shorter than the mapped block names no
+    /// IPv4 range, so it is refused like any other entry that cannot be read.
+    #[test]
+    fn an_ipv4_mapped_literal_shorter_than_the_mapped_block_is_refused() {
+        for value in [
+            "::ffff:10.0.0.0/95",
+            "::ffff:10.0.0.0/64",
+            "::ffff:10.0.0.0/0",
+        ] {
+            assert!(IpPrefix::parse(value).is_none(), "{value} must not parse");
+        }
+        assert!(
+            IpPrefix::parse("::/64").is_some(),
+            "plain IPv6 ranges still parse"
+        );
     }
 
     #[test]

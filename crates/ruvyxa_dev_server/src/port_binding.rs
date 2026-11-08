@@ -324,14 +324,22 @@ fn unix_port_owner(port: u16) -> Option<String> {
         return None;
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    lsof_listen_owner(&String::from_utf8_lossy(&output.stdout), port)
+}
+
+/// Finds the process listening on `port` in `lsof -nP -iTCP -sTCP:LISTEN`
+/// output.
+///
+/// A row ends `TCP *:3000 (LISTEN)`: the state is the last column and the
+/// address the one before it, so the address is the last column holding a
+/// `:` — taking the last column outright compared `(LISTEN)` against the port
+/// and never matched. A `contains` test would match the wrong row, because
+/// `:300` is a substring of `:3000`; anchor on the address column's end.
+fn lsof_listen_owner(stdout: &str, port: u16) -> Option<String> {
     let suffix = format!(":{port}");
     stdout.lines().skip(1).find_map(|line| {
         let columns = line.split_whitespace().collect::<Vec<_>>();
-        // `lsof` puts the listening address last (`*:3000`, `127.0.0.1:3000`).
-        // A `contains` test would match the wrong row, because `:300` is a
-        // substring of `:3000`; anchor on the address column's end instead.
-        let address = columns.last()?;
+        let address = columns.iter().rev().find(|column| column.contains(':'))?;
         if !address.ends_with(&suffix) {
             return None;
         }
@@ -348,5 +356,28 @@ fn port_lookup_hint(port: u16) -> String {
         )
     } else {
         format!("On macOS/Linux, inspect it with `lsof -nP -iTCP:{port} -sTCP:LISTEN`.")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lsof_listen_owner;
+
+    const LSOF: &str = "COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+node    41213 dev    22u  IPv6 0xabc      0t0  TCP *:3000 (LISTEN)
+ruby    41300 dev    9u   IPv4 0xdef      0t0  TCP 127.0.0.1:300 (LISTEN)
+";
+
+    #[test]
+    fn lsof_rows_name_the_listener_despite_the_trailing_state_column() {
+        assert_eq!(
+            lsof_listen_owner(LSOF, 3000).as_deref(),
+            Some("PID 41213 (node)")
+        );
+        assert_eq!(
+            lsof_listen_owner(LSOF, 300).as_deref(),
+            Some("PID 41300 (ruby)")
+        );
+        assert_eq!(lsof_listen_owner(LSOF, 30), None);
     }
 }

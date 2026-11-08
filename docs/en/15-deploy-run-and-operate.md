@@ -55,6 +55,41 @@ health/readiness endpoint.
   that is moved into place only after a build completes, but it does not implement remote release
   orchestration or database rollback.
 
+## Run several workers
+
+`ruvyxa start --workers <n|auto>` and the `RUVYXA_WORKERS` environment variable (also read when you
+run `node server/index.mjs` directly) start several server processes behind one port. How they are
+started depends on the runtime:
+
+- **Node** uses `cluster`.
+- **Bun** needs Linux for more than one worker (it shares the port with `reusePort`).
+- **Deno** runs one process per instance; scale by starting more instances.
+
+A value that is not a positive integer or `auto`, or that the runtime or OS cannot honour, stops the
+server at startup with `RUV1025`.
+
+Workers share nothing in memory. The ISR store is shared on disk and its writes are atomic, but
+in-memory caches, rate limiters, and `revalidateTag` reach only the worker that received the
+request. Point [`cache.handler`](07-configuration.md) at a store every worker shares for state that
+must agree. A worker that crashes is restarted; more than five crashes in 60 seconds exits the
+server non-zero. A duplicate `SIGTERM` or `SIGINT` within one second counts as one (a service
+manager signals the whole control group), and a second signal after that forces exit.
+
+Each worker is its own server, so the per-process numbers are per worker too:
+
+- `GET /__ruvyxa/metrics` describes the one worker that answered the scrape, not the whole server.
+  Aggregate across scrapes, or run one worker per instance when a single scrape must be the total.
+- The admission limits (`RUVYXA_MAX_CONCURRENCY`, `RUVYXA_MAX_QUEUE`) apply to each worker, so the
+  server as a whole admits that many per worker.
+- `auto` counts the processors the machine reports and does not read a container's CPU quota. In a
+  container limited to fewer CPUs than its host has, set an explicit number.
+- On Unix `ruvyxa start` runs the server in its own process group so that termination is forwarded
+  once. Shell job control therefore reaches only the launcher: `Ctrl-Z` suspends `ruvyxa start`
+  while the server keeps serving. Stop it with `Ctrl-C` instead.
+
+On-demand images (`image.onDemand`) work under `ruvyxa start` through a loopback image service. A
+standalone server started directly answers `/__ruvyxa/image` with 404.
+
 ## What a deployed build serves
 
 A build artifact runs the same request pipeline as `ruvyxa start`, not a reduced one:
@@ -66,14 +101,14 @@ A build artifact runs the same request pipeline as `ruvyxa start`, not a reduced
 | `headers()`, `redirects()`, `rewrites()`, `proxy.handler`           | yes             | yes               |
 | `@ruvyxa/auth` (mounted through `route.ts`)                         | yes             | yes               |
 | On-demand images (`/__ruvyxa/image`)                                | yes             | adapter-dependent |
-| Native realtime and presence                                        | yes             | no                |
+| Native realtime and presence                                        | `--legacy-host` | no                |
 | `security.apiLimit`, `security.headers`, `security.trustedProxyIps` | yes             | yes               |
 
 Server actions and `proxy.handler` are compiled into the function artifact from `ruvyxa.config`, so
 a project using either needs no extra configuration to deploy. Realtime and presence need a socket
 upgrade that no build artifact can perform; `ruvyxa build` prints `RUV2205` naming the endpoint that
 will be missing, and `ruvyxa check` reports the same under its capability parity rows. Serve those
-projects with `ruvyxa start`.
+projects with `ruvyxa start --legacy-host` (`RUV1024` explains this when you forget).
 
 Selecting an adapter that cannot serve something the project uses fails the build rather than
 deploying a site that answers 404: a static adapter with a server action or a `proxy.handler`
@@ -191,7 +226,9 @@ defence, and it fails closed: a request with no `Origin` and no `sec-fetch-site:
 be shown to have come from your own site, so it is refused. Every browser sends one of the two on a
 cross-document POST; `curl` sends neither. Add `-H "Origin: https://your-host"` when calling an
 action by hand, or set `security.sameOrigin: false` if you are deliberately serving actions to
-non-browser clients.
+non-browser clients. The same check, and the action rate limit, apply to a form that a page without
+JavaScript posts to its own URL to run a server function: a cross-site submission is answered `403`
+before the page renders.
 
 **A second `ruvyxa build` on the same output fails while the first is still running.** The build
 takes a lock on its output directory. Two builds writing one directory produce a mixture of both,

@@ -4,6 +4,10 @@
 > ที่ไม่มี **เริ่มจาก:** นโยบาย route ใน [Request pipeline](08-request-pipeline.md) **Checkpoint:**
 > เลือก integration หนึ่งอย่าง สร้าง flow ที่เล็กที่สุด และทดสอบ failure path ด้วย
 
+`@ruvyxa/auth`, `@ruvyxa/database`, `@ruvyxa/realtime` และ `@ruvyxa/testing` เป็นระดับ experimental:
+ไม่มีการรับประกันสำหรับ production และ API อาจเปลี่ยนระหว่าง release นอกจากนี้ native realtime
+ต้องใช้ `ruvyxa start --legacy-host` เพราะมีเพียง host เดิมที่ให้บริการ (`RUV1024`)
+
 ## Authentication
 
 `@ruvyxa/auth` export `createAuth`, provider helper `google` และ `github`, memory store สำหรับ

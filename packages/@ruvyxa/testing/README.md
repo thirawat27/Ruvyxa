@@ -6,6 +6,9 @@
 
 <h1 align="center">@ruvyxa/testing</h1>
 
+> **Experimental.** This package ships without a production guarantee: its API and behaviour may
+> change in a minor release, and it is not part of the release gate the framework itself passes.
+
 <p align="center">
   Small framework-shaped test doubles for Ruvyxa loaders, actions, and caches. They run in Node,<br/>
   Vitest, or Jest without starting a Ruvyxa server.

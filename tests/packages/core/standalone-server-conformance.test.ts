@@ -11,6 +11,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs'
+import { createServer as createHttpServer } from 'node:http'
 import { connect as netConnect, createServer } from 'node:net'
 import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
@@ -74,7 +75,15 @@ function stageDeployment(
     apiLimit,
     hangingRoute = false,
     trustedProxyIps,
-  }: { apiLimit?: number; hangingRoute?: boolean; trustedProxyIps?: string[] } = {},
+    image,
+    abortProbe = false,
+  }: {
+    apiLimit?: number
+    hangingRoute?: boolean
+    trustedProxyIps?: string[]
+    image?: Record<string, unknown>
+    abortProbe?: boolean
+  } = {},
 ): string {
   const root = mkdtempSync(path.join(tmpdir(), `ruvyxa-standalone-${runtime}-`))
   const server = path.join(root, 'server')
@@ -90,12 +99,12 @@ function stageDeployment(
   if (!securityHeaders) security.headers = false
   if (trustedProxyIps) security.trustedProxyIps = trustedProxyIps
   if (apiLimit !== undefined) security.apiLimit = apiLimit
+  const runtimePolicy: Record<string, unknown> = {}
+  if (Object.keys(security).length > 0) runtimePolicy.security = security
+  if (image) runtimePolicy.image = image
   writeFileSync(
     path.join(server, 'index.mjs'),
-    standaloneServerSource({
-      runtime,
-      runtimePolicy: Object.keys(security).length > 0 ? { security } : {},
-    }),
+    standaloneServerSource({ runtime, runtimePolicy }),
     'utf8',
   )
   writeFileSync(
@@ -115,6 +124,11 @@ function stageDeployment(
           { id: 'events', path: '/events', kind: 'api', file: 'events.ts' },
           // A compressible payload whose route asked not to be re-encoded.
           { id: 'plain', path: '/plain', kind: 'api', file: 'plain.ts' },
+          // A handler that never answers and records whether it was told to
+          // stop: the only way to see `request.signal` from outside the process.
+          ...(abortProbe
+            ? [{ id: 'listen', path: '/listen', kind: 'api', file: 'listen.ts' }]
+            : []),
         ],
       }) +
       '\n',
@@ -123,7 +137,18 @@ function stageDeployment(
   writeFileSync(
     path.join(server, 'route-modules.mjs'),
     [
+      'import { writeFileSync } from "node:fs"',
       'export async function loadRouteModule(routeId) {',
+      '  if (routeId === "listen") {',
+      '    return {',
+      '      GET: ({ request }) =>',
+      '        new Promise(() => {',
+      '          request.signal.addEventListener("abort", () => {',
+      '            writeFileSync("aborted.marker", "aborted")',
+      '          })',
+      '        }),',
+      '    }',
+      '  }',
       '  if (routeId === "whoami") {',
       '    return {',
       '      GET: ({ request }) =>',
@@ -250,6 +275,7 @@ async function startProcessServer(
   stop: () => void
   drain: () => void
   output: () => string
+  exited: Promise<number | null>
   port: number
 }> {
   const port = await freePort()
@@ -296,6 +322,9 @@ async function startProcessServer(
   child.stderr.on('data', (chunk: string) => {
     output += chunk
   })
+  const exited = new Promise<number | null>((resolve) => {
+    child.on('exit', (code) => resolve(code))
+  })
 
   const deadline = Date.now() + 20_000
   while (!output.includes('listening on')) {
@@ -318,6 +347,7 @@ async function startProcessServer(
     // Everything the process has written so far, which for a server is the
     // whole of its structured output.
     output: () => output,
+    exited,
     port,
   }
 }
@@ -946,6 +976,81 @@ describe('generated standalone server render deadline', () => {
 })
 
 /**
+ * A handler is told when its work is no longer wanted, and a slot it still
+ * holds is not handed to the next request.
+ *
+ * Node's transport rebuilt the `Request` from `node:http` and gave it no
+ * `signal`, so a route that waited on `request.signal` ran on after its client
+ * left, where Bun and Deno hand over their own `Request` and the dev worker adds
+ * one. The render deadline answered 503 but let the handler run on, and freed
+ * the slot it was still occupying, so `RUVYXA_MAX_CONCURRENCY` stopped bounding
+ * anything once handlers were slow.
+ */
+describe('generated standalone server abandoned work (node)', () => {
+  const waitForMarker = async (file: string) => {
+    for (let attempt = 0; attempt < 40 && !existsSync(file); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    return existsSync(file)
+  }
+
+  it('aborts request.signal when the client disconnects', async () => {
+    const server = stageDeployment('node', true, { abortProbe: true })
+    const started = await startProcessServer(process.execPath, [], server, {
+      RUVYXA_RENDER_TIMEOUT: '0',
+    })
+    try {
+      const leaving = new AbortController()
+      const pending = started.client('/listen', { signal: leaving.signal }).catch(() => null)
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      leaving.abort()
+      await pending
+      assert.ok(
+        await waitForMarker(path.join(server, 'aborted.marker')),
+        'the handler was never told its client had gone',
+      )
+    } finally {
+      started.stop()
+    }
+  })
+
+  it('aborts timed-out work and keeps its slot until the work settles', async () => {
+    const server = stageDeployment('node', true, { abortProbe: true, hangingRoute: true })
+    const started = await startProcessServer(process.execPath, [], server, {
+      RUVYXA_RENDER_TIMEOUT: '700',
+      RUVYXA_MAX_CONCURRENCY: '1',
+    })
+    try {
+      const timedOut = await started.client('/listen', { signal: AbortSignal.timeout(6_000) })
+      assert.equal(timedOut.status, 503)
+      assert.ok(
+        await waitForMarker(path.join(server, 'aborted.marker')),
+        'the deadline answered for the handler but never stopped it',
+      )
+
+      // A handler that never settles holds its slot for at most one more
+      // deadline, so a server is never wedged by work that ignores its signal.
+      // Wait that out, then time out the page render, which ignores its signal
+      // too. Its slot is still taken after the 503, so the next render waits in
+      // the queue for it (one more deadline) before running out its own: about
+      // two deadlines in all, where a slot freed with the 503 gives one.
+      await new Promise((resolve) => setTimeout(resolve, 900))
+      const hung = await started.client('/', { signal: AbortSignal.timeout(6_000) })
+      assert.equal(hung.status, 503)
+      const startedAt = Date.now()
+      const next = await started.client('/', { signal: AbortSignal.timeout(6_000) })
+      assert.equal(next.status, 503)
+      assert.ok(
+        Date.now() - startedAt >= 1_100,
+        `a slot still held by abandoned work was handed to the next render after ${Date.now() - startedAt}ms`,
+      )
+    } finally {
+      started.stop()
+    }
+  })
+})
+
+/**
  * The health probe an orchestrator points at this process.
  *
  * Answered before routing and before admission, which is the part worth a test:
@@ -1059,6 +1164,42 @@ describe('generated standalone server health endpoint', () => {
         assert.ok(Date.now() < deadline, `the drain never finished:\n${started.output()}`)
         await new Promise((resolve) => setTimeout(resolve, 100))
       }
+    } finally {
+      started.stop()
+    }
+  })
+
+  /**
+   * One stop, delivered twice, is still one stop.
+   *
+   * systemd's default `KillMode=control-group` signals every process in the
+   * unit, so the server gets SIGTERM directly and again from `ruvyxa start`,
+   * which forwards the one it received. Read as "a second signal means now",
+   * that pair cut every drain short. A repeat inside the duplicate window is
+   * the same event; only one after it forces. Runs everywhere — see
+   * `startProcessServer` for how the signal is raised on Windows.
+   */
+  it('treats a second signal close behind the first as the same stop', async () => {
+    const server = stageDeployment('node')
+    const started = await startProcessServer(
+      process.execPath,
+      [],
+      server,
+      { RUVYXA_SHUTDOWN_GRACE: '10000', RUVYXA_DRAIN_DELAY: '1500' },
+      { drainable: true },
+    )
+    try {
+      started.drain()
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      started.drain()
+      const code = await Promise.race([
+        started.exited,
+        new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 12_000)),
+      ])
+      assert.equal(code, 0, `the drain did not finish cleanly:\n${started.output()}`)
+      assert.match(started.output(), /duplicate signal ignored/)
+      assert.match(started.output(), /shutdown complete/)
+      assert.doesNotMatch(started.output(), /shutdown forced/)
     } finally {
       started.stop()
     }
@@ -1819,6 +1960,226 @@ describe('generated standalone server forwarded identity', () => {
         source.includes('peerMayStateClientIdentity('),
         `the ${runtime} transport no longer weighs the peer before the handler sees a forwarded header`,
       )
+    }
+  })
+})
+
+/**
+ * The supervisor `RUVYXA_WORKERS` turns on, run as a host runs it.
+ *
+ * Node only: it is the transport whose workers share one socket on every
+ * platform, so it is the one whose supervisor can be exercised on any CI lane.
+ */
+describe('generated standalone server cluster supervisor (node)', () => {
+  /** Run the staged program and collect everything it writes until it exits. */
+  function runServer(server: string, env: Record<string, string>) {
+    const child = spawn(process.execPath, [path.join(server, 'index.mjs')], {
+      cwd: server,
+      env: { ...process.env, HOST: '127.0.0.1', ...env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let output = ''
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => {
+      output += chunk
+    })
+    child.stderr.on('data', (chunk: string) => {
+      output += chunk
+    })
+    const exited = new Promise<number | null>((resolve) => {
+      child.on('exit', (code) => resolve(code))
+    })
+    return { child, exited, output: () => output }
+  }
+
+  /**
+   * Workers that can never serve must end the supervisor, not keep it busy.
+   *
+   * A port something else already holds is a fault no respawn can fix: every
+   * worker fails to listen, and a supervisor that only ever respawns would sit
+   * there looking alive. It has to give up, non-zero, where an orchestrator can
+   * see it.
+   */
+  it('exits non-zero on a worker crash loop', { timeout: 90_000 }, async () => {
+    const server = stageDeployment('node')
+    const occupant = createServer()
+    await new Promise<void>((resolve) => occupant.listen(0, '127.0.0.1', resolve))
+    const address = occupant.address()
+    const busyPort = typeof address === 'object' && address ? address.port : 0
+    const run = runServer(server, {
+      PORT: String(busyPort),
+      RUVYXA_WORKERS: '2',
+      RUVYXA_DRAIN_DELAY: '0',
+      RUVYXA_SHUTDOWN_GRACE: '2000',
+    })
+    try {
+      const code = await Promise.race([
+        run.exited,
+        new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 75_000)),
+      ])
+      assert.equal(code, 1, `the supervisor did not give up:\n${run.output()}`)
+      assert.match(run.output(), /supervising workers/)
+      assert.match(run.output(), /worker crash loop, exiting/)
+    } finally {
+      run.child.kill()
+      occupant.close()
+      rmSync(path.dirname(server), { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * A shutdown signal drains every worker and the supervisor leaves with 0.
+   *
+   * Skipped on Windows: a signal cannot be delivered to a process there, and
+   * raising one inside the supervisor through stdin, as the single-process drain
+   * test does, would race its workers for the same inherited stdin.
+   */
+  it(
+    'drains every worker on SIGTERM and exits cleanly',
+    {
+      timeout: 60_000,
+      skip:
+        process.platform === 'win32' ? 'Windows cannot deliver SIGTERM to a process' : undefined,
+    },
+    async () => {
+      const server = stageDeployment('node')
+      const port = await freePort()
+      const run = runServer(server, {
+        PORT: String(port),
+        RUVYXA_WORKERS: '2',
+        RUVYXA_DRAIN_DELAY: '0',
+        RUVYXA_SHUTDOWN_GRACE: '5000',
+      })
+      try {
+        const deadline = Date.now() + 20_000
+        while ((run.output().match(/listening on/g) ?? []).length < 2) {
+          assert.ok(Date.now() < deadline, `two workers never listened:\n${run.output()}`)
+          await new Promise((resolve) => setTimeout(resolve, 50))
+        }
+        assert.equal((await fetch(`http://127.0.0.1:${port}/__ruvyxa/health`)).status, 200)
+
+        run.child.kill('SIGTERM')
+        const code = await run.exited
+        assert.equal(code, 0, `the supervisor did not exit cleanly:\n${run.output()}`)
+        assert.match(run.output(), /stopping workers/)
+        assert.equal((run.output().match(/shutdown complete/g) ?? []).length, 2, run.output())
+      } finally {
+        run.child.kill()
+        rmSync(path.dirname(server), { recursive: true, force: true })
+      }
+    },
+  )
+
+  /**
+   * The supervisor reads a duplicated stop the way a single process does: the
+   * second SIGTERM from a cgroup-wide delivery must not SIGKILL draining workers.
+   */
+  it(
+    'ignores a second SIGTERM close behind the first',
+    {
+      timeout: 60_000,
+      skip:
+        process.platform === 'win32' ? 'Windows cannot deliver SIGTERM to a process' : undefined,
+    },
+    async () => {
+      const server = stageDeployment('node')
+      const port = await freePort()
+      const run = runServer(server, {
+        PORT: String(port),
+        RUVYXA_WORKERS: '2',
+        RUVYXA_DRAIN_DELAY: '1000',
+        RUVYXA_SHUTDOWN_GRACE: '5000',
+      })
+      try {
+        const deadline = Date.now() + 20_000
+        while ((run.output().match(/listening on/g) ?? []).length < 2) {
+          assert.ok(Date.now() < deadline, `two workers never listened:\n${run.output()}`)
+          await new Promise((resolve) => setTimeout(resolve, 50))
+        }
+        run.child.kill('SIGTERM')
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        run.child.kill('SIGTERM')
+        const code = await run.exited
+        assert.equal(code, 0, `the supervisor did not exit cleanly:\n${run.output()}`)
+        assert.match(run.output(), /duplicate signal ignored/)
+        assert.doesNotMatch(run.output(), /shutdown forced/)
+        assert.equal((run.output().match(/shutdown complete/g) ?? []).length, 2, run.output())
+      } finally {
+        run.child.kill()
+        rmSync(path.dirname(server), { recursive: true, force: true })
+      }
+    },
+  )
+})
+
+/**
+ * `/__ruvyxa/image` on the standalone server, which forwards to the loopback
+ * image service `ruvyxa start` names, and to nothing otherwise.
+ */
+describe('generated standalone server image service (node)', () => {
+  it('answers 404 when on-demand images are off, whatever the environment names', async () => {
+    const server = stageDeployment('node')
+    const started = await startProcessServer(process.execPath, [], server, {
+      RUVYXA_IMAGE_SERVICE: 'http://127.0.0.1:9',
+      RUVYXA_IMAGE_SERVICE_TOKEN: 'secret',
+    })
+    try {
+      const response = await started.client('/__ruvyxa/image?src=/logo.png&w=64&q=75')
+      assert.equal(response.status, 404)
+    } finally {
+      started.stop()
+    }
+  })
+
+  it('forwards the request with its token and relays the answer', async () => {
+    const seen: { url?: string; token?: string } = {}
+    const service = createHttpServer((request, response) => {
+      seen.url = request.url
+      seen.token = String(request.headers['x-ruvyxa-image-token'])
+      response.writeHead(200, { 'content-type': 'image/webp', etag: '"img1"' })
+      response.end('webp-bytes')
+    })
+    await new Promise<void>((resolve) => service.listen(0, '127.0.0.1', resolve))
+    const address = service.address()
+    const servicePort = typeof address === 'object' && address ? address.port : 0
+
+    const server = stageDeployment('node', true, { image: { onDemand: true } })
+    const started = await startProcessServer(process.execPath, [], server, {
+      RUVYXA_IMAGE_SERVICE: `http://127.0.0.1:${servicePort}`,
+      RUVYXA_IMAGE_SERVICE_TOKEN: 'secret',
+    })
+    try {
+      const response = await started.client('/__ruvyxa/image?src=/logo.png&w=64&q=75')
+      assert.equal(response.status, 200)
+      assert.equal(await response.text(), 'webp-bytes')
+      assert.equal(response.headers.get('content-type'), 'image/webp')
+      assert.equal(response.headers.get('etag'), '"img1"')
+      assert.equal(seen.token, 'secret')
+      const forwarded = new URL(seen.url ?? '', 'http://service')
+      assert.equal(forwarded.pathname, '/__ruvyxa/image')
+      assert.equal(forwarded.searchParams.get('src'), '/logo.png')
+      assert.equal(forwarded.searchParams.get('w'), '64')
+      assert.equal(forwarded.searchParams.get('q'), '75')
+    } finally {
+      started.stop()
+      service.close()
+    }
+  })
+
+  it('answers 502 when the image service cannot be reached', async () => {
+    const deadPort = await freePort()
+    const server = stageDeployment('node', true, { image: { onDemand: true } })
+    const started = await startProcessServer(process.execPath, [], server, {
+      RUVYXA_IMAGE_SERVICE: `http://127.0.0.1:${deadPort}`,
+      RUVYXA_IMAGE_SERVICE_TOKEN: 'secret',
+    })
+    try {
+      const response = await started.client('/__ruvyxa/image?src=/logo.png&w=64&q=75')
+      assert.equal(response.status, 502)
+      assert.equal(await response.text(), 'Image service unavailable')
+    } finally {
+      started.stop()
     }
   })
 })

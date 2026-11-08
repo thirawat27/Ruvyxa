@@ -209,8 +209,38 @@ export default function Dashboard() {
   ตัดเพียงช่องว่างหัวท้ายและเครื่องหมายคำพูดหนึ่งชั้น ส่วนการ percent-decode เป็นหน้าที่ของคุณ
   เพราะไม่ใช่ทุก cookie ที่เข้ารหัสไว้ และการ decode ค่าที่ไม่ได้เข้ารหัสจะ throw
 - `headers()` คืน `Headers` มาตรฐานแบบอ่านอย่างเดียว `get`, `has` และการวนลูปทำงานเหมือนบน `Request`
-- `draftMode()` บอกว่ามี cookie `__ruvyxa_draft` อยู่หรือไม่ ให้ตั้งค่าจาก API route หลังตรวจ secret
-  ที่ CMS ของคุณใช้ร่วมกับแอปแล้ว
+- `draftMode().isEnabled` เป็น true ก็ต่อเมื่อ cookie `__ruvyxa_draft` มีค่าที่ server
+  นี้ลงลายเซ็นไว้ เท่านั้น cookie ที่แค่มีชื่อตรงจะถูกเพิกเฉย เพราะผู้เข้าชมส่ง cookie อะไรมาก็ได้
+
+### เปิด draft mode
+
+ตั้ง `RUVYXA_PREVIEW_SECRET` เป็นสตริงสุ่มยาวอย่างน้อย 32 ตัวอักษรใน environment ของ server (ใช้
+`.env` ได้ตอนรัน `ruvyxa dev`) เป็นตัวแปรเดียวกับที่ adapter ของ Vercel ใช้สร้าง prerender bypass
+token และทุก instance ของ deployment ต้องเห็นค่าเดียวกัน จากนั้นเพิ่ม API route ที่ตรวจ secret ที่
+CMS ของคุณใช้ร่วมกับแอป แล้วตอบกลับด้วย cookie ที่ `draftMode().enableCookie()` คืนมา:
+
+```ts
+// app/api/draft/route.ts
+import { draftMode } from 'ruvyxa/server'
+
+export const GET = ({ request }: { request: Request }) => {
+  const url = new URL(request.url)
+  if (url.searchParams.get('secret') !== process.env.CMS_PREVIEW_SECRET) {
+    return new Response('Invalid token', { status: 401 })
+  }
+  return new Response(null, {
+    status: 307,
+    headers: { location: '/', 'set-cookie': draftMode().enableCookie() },
+  })
+}
+```
+
+- `enableCookie()` คืนค่า `Set-Cookie` ที่ตัว cookie เป็น HMAC-SHA256 ของ `RUVYXA_PREVIEW_SECRET`
+  พร้อม `HttpOnly`, `Secure` และ `SameSite=Lax` จะ throw ถ้าไม่ได้ตั้งตัวแปรหรือสั้นกว่า 32 ตัวอักษร
+  และถ้าไม่มีตัวแปรนี้ `isEnabled` จะเป็น false เสมอ
+- `disableCookie()` คืนค่า `Set-Cookie` ที่ทำให้ cookie หมดอายุ ไม่ต้องใช้ secret
+- ทั้งสองคืนค่าเฮดเดอร์แทนการตั้งให้เอง ให้แนบเข้ากับ response ที่คุณสร้าง
+- เปลี่ยน `RUVYXA_PREVIEW_SECRET` เมื่อไรก็จะออกจาก draft mode พร้อมกันทุก browser
 
 ### การเรียกเหล่านี้เปลี่ยนวิธี cache หน้า
 

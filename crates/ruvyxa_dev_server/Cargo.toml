@@ -1,6 +1,6 @@
 [package]
 name = "ruvyxa_dev_server"
-version = "1.1.5"
+version = "1.1.6"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -13,12 +13,12 @@ base64.workspace = true
 # Already compiled as part of tower-http's compression features; declaring them
 # directly adds no crate to the build and lets the render cache keep the encoded
 # copy of a page instead of re-encoding identical bytes on every cache hit.
-brotli = "8.0.4"
-flate2 = "1.1.9"
+brotli = "9.1.1"
+flate2 = "1.1.11"
 # Already in the tree via tower-http. Lets a large public asset reach the socket
 # as a stream instead of being read into memory in full before the first byte
 # is written.
-tokio-util = { version = "0.7.19", features = ["io"] }
+tokio-util = { version = "0.7.20", features = ["io"] }
 blake3.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true

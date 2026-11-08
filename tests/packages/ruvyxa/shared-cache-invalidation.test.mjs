@@ -135,10 +135,17 @@ describe('a server function invoked by a native form submission', () => {
     })
   }
 
+  // `Origin` included, as a browser sends it on every form POST: the page URL
+  // is held to the action endpoint's origin policy, which fails closed without
+  // it (`pageFormPost` in tests/fixtures/action-contract.json).
   function submission() {
     return new Request('https://app.example/', {
       method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        host: 'app.example',
+        origin: 'https://app.example',
+      },
       body: '$ACTION_ID_x=1',
     })
   }

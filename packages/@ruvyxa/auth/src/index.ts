@@ -320,7 +320,11 @@ async function startMagicLink(
   const provider = findProvider(settings.providers, 'magic-link')
   if (!provider || provider.type !== 'magic-link') throw notConfigured('magic-link')
   const email = typeof input.email === 'string' ? input.email.trim().toLowerCase() : ''
-  if (!/^\S+@\S+\.\S+$/.test(email) || email.length > 254) {
+  // Length first, and a pattern whose classes exclude `@`: `\S+@\S+\.\S+`
+  // backtracks cubically on `@.@.@.…`, and it ran before this bound and before
+  // the rate limit, so one unauthenticated 8 KB body blocked the event loop for
+  // tens of seconds. 254 is the longest address SMTP carries (RFC 5321).
+  if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     throw new AuthError('RUV3101', 'A valid email address is required', 400)
   }
   await consumeRateLimit(request, `magic:${email}`, settings, IDENTITY_MAIL_BUDGET)

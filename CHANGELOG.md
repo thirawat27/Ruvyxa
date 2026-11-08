@@ -1,6 +1,30 @@
 # Changelog
 
-## Unreleased
+## v1.1.6 (2026-11-08)
+
+### `ruvyxa start` runs the standalone server; production has one request host
+
+**Behaviour change.** `ruvyxa build` always leaves a standalone server at
+`<outDir>/deploy/<runtime>/` (a second adapter pass when the selected adapter is not node, bun, or
+deno), stamped with `.ruvyxa-build-id`; static-target and `--server-only` builds stage it too.
+`ruvyxa start` and `preview` spawn `<runtime> server/index.mjs` from there, so the code that serves
+`start` is the code a deployment runs. `HOST` and `PORT` resolve as before, signals are forwarded,
+and the command exits with the server's code.
+
+- `--workers <n|auto>` and `RUVYXA_WORKERS` (also read by `node server/index.mjs`): Node clusters,
+  Bun needs Linux for more than one worker, Deno runs one process per instance. A crash loop (more
+  than five crashes in 60 s) exits non-zero. Worker state is per process; use `cache.handler` for
+  state that must be shared. **Throughput:** set `--workers` where the previous host's multi-process
+  worker pool was relied on.
+- `--legacy-host` runs the previous Axum host. It is deprecated, warns on every run, and is removed
+  in the next minor release. Realtime configuration requires it.
+- `image.onDemand` works under `start` through a loopback image service.
+- New codes: `RUV1022` (standalone server missing, stale, or staged for another runtime), `RUV1023`
+  (runtime not found), `RUV1024` (realtime or `collab` needs `--legacy-host`), `RUV1025`
+  (`RUVYXA_WORKERS` invalid or unsupported here).
+- Known limitation: hard-killing `ruvyxa start` leaves the server it spawned running.
+- `@ruvyxa/auth`, `@ruvyxa/database`, `@ruvyxa/realtime`, and `@ruvyxa/testing` are the experimental
+  tier: no production guarantee, gated by `scripts/check-package-tiers.mjs` in `release:validate`.
 
 ### `ruvyxa-axum`: a Ruvyxa site and a Rust API in one binary
 
@@ -19,6 +43,77 @@ scaffold. A new `axum` lane in `scripts/smoke-runtime-adapter.mjs` builds `examp
 for the static target and serves it through that program in CI, holding it to the same five checks
 as the static lane. Scaffold files may now be written at the project root (`ScaffoldFile::at_root`);
 the three application scaffolds still write under `appDir`, and a test holds that.
+
+### Draft mode needs a cookie the server signed
+
+**Security fix, behaviour change.** `draftMode().isEnabled` was true whenever a cookie named
+`__ruvyxa_draft` was present, whatever its value, so `curl -H 'Cookie: __ruvyxa_draft=1'` showed
+unpublished content to anyone on every host. The cookie must now carry an HMAC-SHA256 of
+`RUVYXA_PREVIEW_SECRET` (at least 32 characters — the variable the Vercel adapter already reads),
+compared in constant time by `packages/ruvyxa/runtime/request-context.mjs`; with no usable secret,
+draft mode stays off. `draftMode().enableCookie()` returns the signed `Set-Cookie` value
+(`HttpOnly`, `Secure`, `SameSite=Lax`) and throws without a secret; `draftMode().disableCookie()`
+expires it. **Upgrade:** set `RUVYXA_PREVIEW_SECRET` in the server's environment and replace a
+hand-written `Set-Cookie: __ruvyxa_draft=...` with `draftMode().enableCookie()`; existing draft
+cookies stop working.
+
+### A no-JavaScript form post is held to the action origin policy
+
+**Security fix, behaviour change.** A `<form action={fn}>` on a server-components page without
+JavaScript posts to the page's own URL, and the render runs the server function its hidden fields
+name. `/__ruvyxa/action` and `/__ruvyxa/rsc` refused a cross-site request with 403 and the page URL
+did not, so a third-party page could auto-submit a form there with the visitor's cookies and the
+action ran. Both hosts now apply `security.sameOrigin` / `security.fetchMeta` to such a post before
+it renders — fail-closed when neither `Origin` nor `Sec-Fetch-Site: same-origin` is present, as the
+action endpoint is — and charge it to `security.actionRateLimit`, keyed per client and route
+(`429 Form action rate limit exceeded`). The cases are `pageFormPost` in
+`tests/fixtures/action-contract.json`, replayed by `action_security.rs` and
+`serverless-handler.test.mjs`. **Upgrade:** a script that posts such a form by hand must send a
+same-origin `Origin`.
+
+### The action replay quota counts an IPv6 /64 as one client
+
+**Security fix.** The replay guard's per-client quota was keyed by the full client address, so ten
+addresses from one IPv6 /64 — one subscriber's allocation — saturated the 10,000-entry pool and
+answered `503` to every client's versioned actions for ten minutes. Both hosts now count an IPv6
+client by its /64 and an IPv4 client (including an IPv4-mapped one) by its address, held by
+`nonce.clientSubject` in `tests/fixtures/action-contract.json`.
+
+### The standalone server stops work nobody is waiting for
+
+The Node transport rebuilt each `Request` from `node:http` without a `signal`, so a route waiting on
+`request.signal` ran on after its client disconnected — on Node alone, since Bun and Deno pass their
+own `Request`. The render deadline answered `503` but neither aborted the handler nor kept its slot:
+the slot went to the next request while the timed-out work still ran, so `RUVYXA_MAX_CONCURRENCY`
+stopped bounding anything once handlers were slow. The handler's signal now fires on disconnect and
+on the deadline, the slot is held until the abandoned work settles (at most one more deadline, so a
+handler that ignores its signal cannot wedge the server), and a body that is never sent — a `HEAD`
+answered by a `GET`, a late response, a `404` replaced by a static file — is cancelled rather than
+dropped, which is how a stream's source learns to stop. `ruvyxa start` also ties the server's life
+to its own on Linux (`PR_SET_PDEATHSIG`) and Windows (a kill-on-close job object): a supervisor
+ended by `SIGKILL`, an out-of-memory kill, or `Stop-Process` no longer leaves the server holding the
+port.
+
+### A render in flight during an edit no longer caches the page as it was
+
+`ruvyxa dev` drops a route's cached documents when its file is saved, but a render already sent to
+the worker had read the old file, and its result was stored after the drop — so the pre-edit page
+was served until the five-minute TTL ran out, and requests arriving after the save could join that
+render and get the same stale page. The render cache now carries an invalidation generation: a
+render stores its result only if no invalidation ran since it began, and a request after an
+invalidation starts its own render rather than waiting on an older one. Client bundles follow the
+same rule.
+
+### React 19.3
+
+`ruvyxa`, `@ruvyxa/react`, and `@ruvyxa/realtime` now declare `react`, `react-dom`, and
+`react-server-dom-webpack` peers of `^19.3.1`, and the templates start on 19.3. The three ranges
+stay equal because `react-server-dom-webpack` reaches into React's internals and a mismatched pair
+fails inside React. One wire change reaches the Flight payload: 19.3 writes a long string in import
+metadata once, as its own row, and points each `I` row at it (`d:I["$c",[],"default"]` after
+`c:"ruv:m_…"`) where 19.2 wrote the module id inline. Ruvyxa never reads those rows —
+`react-server-dom-webpack`'s own client resolves them — so only a test asserting the old spelling
+changed. **Upgrade:** move `react`, `react-dom`, and `react-server-dom-webpack` to 19.3 together.
 
 ## v1.1.5 (2026-09-06)
 

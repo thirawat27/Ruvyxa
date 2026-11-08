@@ -19,7 +19,7 @@ starter ทุกตัวเตรียมไว้และ copy-paste ได
 | `npm run dev`                                                                                   | `ruvyxa dev`                            | route watching และ hot reload                              |
 | `npm run build`                                                                                 | `ruvyxa build`                          | สร้าง production output                                    |
 | `npm run check`                                                                                 | `ruvyxa check`                          | ตรวจความพร้อมของ application                               |
-| `npm run start` / `npm run preview`                                                             | `ruvyxa start` / `preview`              | serve หรือ preview local ของ build ที่มีอยู่               |
+| `npm run start` / `npm run preview`                                                             | `ruvyxa start` / `preview`              | รัน standalone server ที่ build ทิ้งไว้ให้                 |
 | `npm run routes`                                                                                | `ruvyxa routes`                         | route table แบบอ่านง่าย                                    |
 | `npm run routes:json`                                                                           | route JSON command ที่ starter กำหนด    | route output สำหรับเครื่องอ่าน                             |
 | `npm run analyze`                                                                               | `ruvyxa analyze`                        | validate route, import และ server/client boundary          |
@@ -127,10 +127,13 @@ user database หรือระบบ hash password ก่อน production bui
 `adds axum` มีไว้สำหรับ project ที่ backend เป็น Rust มันเขียน `Cargo.toml` และ `src/main.rs`
 ที่สร้างบน crate [`ruvyxa-axum`](https://crates.io/crates/ruvyxa-axum) ซึ่ง serve publish directory
 ที่ `ruvyxa build` เขียนให้ static target: document ที่ pre-render แล้วทุกหน้าที่ URL ของมันเอง,
-client bundle ที่มี hash, `public/`, `404.html` ของ project และ policy จาก `_headers` ที่ทุก
-response ต้องมี ผลคือ executable เดียว ไม่มี JavaScript runtime บนเครื่อง ไม่มี process ที่สอง ไม่มี
-reverse proxy มาเชื่อมสองฝั่ง และ crate นี้คือ `crates/ruvyxa_axum` ของ framework เอง ดังนั้น
-`src/main.rs` ถูก compile โดย test suite ของ framework และถูก serve กับ build จริงใน CI
+client bundle ที่มี hash, `public/`, `404.html` ของ project และ policy จาก `_headers` โดย security
+header ติดไปกับทุก response ส่วน caching header ติดเฉพาะ response ที่สำเร็จหรือ `304` และไม่ทับ
+caching header ที่ route ของคุณตั้งไว้เอง เพื่อไม่ให้ miss ถูก cache เหมือน hit และไม่ให้คำตอบ API
+เฉพาะผู้ใช้กลายเป็นของที่แชร์ได้ ตัวไฟล์ `_headers` เองไม่ถูก serve ออกไป ผลคือ executable เดียว
+ไม่มี JavaScript runtime บนเครื่อง ไม่มี process ที่สอง ไม่มี reverse proxy มาเชื่อมสองฝั่ง และ
+crate นี้คือ `crates/ruvyxa_axum` ของ framework เอง ดังนั้น `src/main.rs` ถูก compile โดย test suite
+ของ framework และถูก serve กับ build จริงใน CI
 
 static target เก็บเฉพาะ route ที่ materialize ครบตอน build เท่านั้น เลือกมันใน `ruvyxa.config.ts`
 แล้ว build จะปฏิเสธ route แบบ server-rendered, ISR, PPR หรือ API สำหรับ target นี้ด้วย error
@@ -165,6 +168,28 @@ scaffold ชุดนั้น ตรวจ path ที่รายงาน เ
 ```bash
 npm run adds -- form --force
 ```
+
+## Serve build ด้วย `start`
+
+`ruvyxa build` ทิ้ง standalone server ไว้ที่ `<outDir>/deploy/<runtime>/` เสมอ พร้อมตราที่ระบุว่ามา
+จาก build ไหน หากใช้ adapter `node`, `bun` หรือ `deno` ที่มาในตัว ไดเรกทอรีนั้นคือ deploy output เอง
+ส่วน adapter อื่น เช่น Vercel build จะรัน adapter เพิ่มอีกหนึ่งรอบเพื่อจัดเตรียมมัน build แบบ static
+target และ `--server-only` ก็จัดเตรียมไว้ให้เช่นกัน
+
+`ruvyxa start` และ `ruvyxa preview` รัน `<runtime> server/index.mjs` จากไดเรกทอรีนั้น `HOST` และ
+`PORT` ถูก resolve เหมือนเดิมและมีผลเหนือ `.env` ของโปรเจกต์ `SIGTERM` และ `SIGINT` (กับ `SIGHUP`
+ซึ่งส่งต่อเป็น `SIGTERM`) ถูกส่งต่อให้ server บน Unix และคำสั่งจบด้วย exit code ของ server (บน Unix
+คือ 128 บวกหมายเลข signal) server ที่รันคือตัวเดียวกับที่การ deploy ใช้
+
+- `--workers <n|auto>` รัน server `n` process หลัง port เดียว (`auto` ปรับตามเครื่อง) ดู
+  [Deploy, run และ operate](15-deploy-run-and-operate.md) ใช้ร่วมกับ `--legacy-host` ไม่ได้
+- `--legacy-host` รัน host เดิมแบบ Axum แทน flag นี้ deprecated จะถูกลบใน minor release ถัดไป
+  และเตือนทุกครั้งที่รัน
+
+ต้องรัน `ruvyxa build` ก่อน และเมื่อโปรเจกต์เปลี่ยนต้อง `build` ใหม่ก่อน `start` มิฉะนั้น `start`
+จะหยุดด้วย `RUV1022` โปรเจกต์ที่ตั้งค่า realtime หรือ collaboration presence ต้องใช้ `--legacy-host`
+ไปก่อน (`RUV1024`) การ kill `ruvyxa start` แบบรุนแรง (`SIGKILL`, `taskkill /F`) จะทิ้ง server ที่
+spawn ไว้ให้ทำงานต่อ container และ service manager จะเก็บกวาดให้ แต่ shell แบบ interactive อาจไม่ทำ
 
 ## Build เฉพาะ API ด้วย `build --server-only`
 

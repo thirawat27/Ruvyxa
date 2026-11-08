@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::SystemTime;
 
 use crate::image_codec::{Pixels, WebpSettings, encode_webp, scaled_height};
@@ -11,6 +11,22 @@ const MAX_SOURCE_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_SOURCE_PIXELS: u64 = 50_000_000;
 const MAX_CACHE_ENTRIES: usize = 128;
 const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Transforms allowed to hold a source and its decoded pixels at once.
+///
+/// A source is up to `MAX_SOURCE_BYTES` compressed and `MAX_SOURCE_PIXELS`
+/// decoded, about 200 MB of RGBA before the resize buffer, and the cache holds
+/// only `MAX_CACHE_ENTRIES` answers. Without a bound, a few hundred requests for
+/// one large public image at distinct widths each missed the cache and each
+/// started a decode on tokio's blocking pool (up to 512 threads), so the host
+/// ran out of memory. Page renders are admission-bounded; this path sat outside
+/// that, and does heavier work than a render. One transform per core keeps the
+/// CPU busy without letting memory scale with the request rate: a request that
+/// cannot get a permit waits before it has read a single byte.
+static TRANSFORM_PERMITS: LazyLock<tokio::sync::Semaphore> = LazyLock::new(|| {
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    tokio::sync::Semaphore::new(cores)
+});
 
 /// The bounds a caller of `/__ruvyxa/image` is held to.
 ///
@@ -252,6 +268,13 @@ pub(crate) async fn optimize(
         return Ok(bytes);
     }
 
+    // Held across the read, the decode, and the encode: those are the stages
+    // whose memory the permit bounds. A cache hit above never waits for one.
+    let _permit = TRANSFORM_PERMITS
+        .acquire()
+        .await
+        .map_err(|_| DynamicImageError::Worker)?;
+
     // Reading and hashing both move onto the blocking pool. The hash ran on the
     // async worker thread before, pinning it for the length of a 20 MiB digest.
     let read_path = file.clone();
@@ -418,6 +441,44 @@ mod tests {
                 Err(DynamicImageError::InvalidRequest(_))
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn a_transform_waits_for_a_permit_before_it_reads_the_source() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("wide.png"),
+            crate::image_decode::fixtures::png(
+                64,
+                32,
+                png::ColorType::Rgba,
+                png::BitDepth::Eight,
+                &[1, 2, 3, 255],
+            ),
+        )
+        .unwrap();
+        let config = DynamicImageConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let cache = DynamicImageCache::default();
+        let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        let held = TRANSFORM_PERMITS
+            .acquire_many(u32::try_from(cores).unwrap())
+            .await
+            .unwrap();
+        let blocked = tokio::time::timeout(
+            std::time::Duration::from_millis(150),
+            optimize(temp.path(), &config, &cache, "/wide.png", 32, None),
+        )
+        .await;
+        assert!(blocked.is_err(), "a transform ran with every permit taken");
+        drop(held);
+        assert!(
+            optimize(temp.path(), &config, &cache, "/wide.png", 32, None)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]

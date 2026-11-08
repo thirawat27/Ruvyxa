@@ -1839,3 +1839,274 @@ export function read(pathname) {
     assert.equal(response.stale, entry.wire.stale, `${entry.name}: stale`)
   }
 })
+
+/**
+ * A worker driven frame by frame: `send` resolves with the request's terminal
+ * frame, `write` sends a raw line (a cancel), and `framesFor` lists every
+ * frame an id has received so far.
+ */
+function startFramedWorker(t, cleanupDirs = [], env = {}) {
+  const worker = spawn(process.execPath, [workerScript], {
+    cwd: repoRoot,
+    env: { ...process.env, ...env },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  worker.stderr.resume()
+  const lines = createInterface({ input: worker.stdout })
+  const frames = []
+  const pending = new Map()
+  lines.on('line', (line) => {
+    const frame = JSON.parse(line)
+    frames.push(frame)
+    if (frame.frame === 'api-start' || frame.frame === 'api-chunk') return
+    pending.get(frame.id)?.(frame)
+    pending.delete(frame.id)
+  })
+  const write = (message) => worker.stdin.write(`${JSON.stringify(message)}\n`)
+  const send = (id, payload) =>
+    new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`worker request ${id} timed out`)), 15_000)
+      pending.set(id, (frame) => {
+        clearTimeout(timer)
+        resolve(frame)
+      })
+      write({ id, ...payload })
+    })
+  const framesFor = (id) => frames.filter((frame) => frame.id === id)
+
+  t.after(async () => {
+    lines.close()
+    worker.stdin.end()
+    await Promise.race([
+      new Promise((resolve) => worker.once('exit', resolve)),
+      new Promise((resolve) => setTimeout(resolve, 2_000)),
+    ])
+    if (worker.exitCode === null) worker.kill()
+    for (const dir of cleanupDirs) {
+      await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+    }
+  })
+
+  return { send, write, framesFor }
+}
+
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** Write one API route under a fresh project and return a request builder for it. */
+async function apiRouteProject(prefix, source) {
+  const projectRoot = await mkdtemp(path.join(fixtureWorkspace, prefix))
+  const appDir = path.join(projectRoot, 'app/api/route-under-test')
+  const routeFile = path.join(appDir, 'route.ts')
+  await mkdir(appDir, { recursive: true })
+  await writeFile(routeFile, source)
+  const apiRequest = (query, extra = {}) => ({
+    type: 'api',
+    projectRoot,
+    routeFile,
+    method: 'GET',
+    requestPath: `/api/route-under-test${query}`,
+    headers: {},
+    params: {},
+    streamResponse: true,
+    ...extra,
+  })
+  return { projectRoot, apiRequest }
+}
+
+// A GET whose body is a push stream: `start()` arms an interval and `cancel()`
+// is the only thing that clears it. `live` counts the streams still producing.
+const PUSH_STREAM_ROUTE = `const state = ((globalThis as any).__pushStreamProbe ??= { live: 0, aborted: 0 })
+function pushStream() {
+  let timer: any
+  return new ReadableStream({
+    start(controller) {
+      state.live += 1
+      timer = setInterval(() => controller.enqueue(new Uint8Array([116])), 10)
+    },
+    cancel() {
+      clearInterval(timer)
+      state.live -= 1
+    },
+  })
+}
+export function GET({ request }: any) {
+  const mode = new URL(request.url).searchParams.get('mode')
+  if (mode === 'probe') return Response.json(state)
+  if (mode === 'ignore') return new Promise(() => {})
+  if (mode === 'hold' || mode === 'late') {
+    return new Promise((resolve) => {
+      request.signal.addEventListener('abort', () => {
+        state.aborted += 1
+        if (mode === 'hold') resolve(Response.json({ aborted: true }))
+        else setTimeout(() => resolve(new Response(pushStream())), 400)
+      })
+    })
+  }
+  return new Response(pushStream(), { headers: { 'content-type': 'text/event-stream' } })
+}
+`
+
+test('a HEAD answered by GET cancels the body it drops', async (t) => {
+  // HEAD keeps the GET's headers and discards its content. Discarding it by
+  // never reading it left the source running: a push stream's interval is
+  // cleared only by `cancel()`, so every HEAD leaked one for the worker's life.
+  const { projectRoot, apiRequest } = await apiRouteProject('head-cancel-', PUSH_STREAM_ROUTE)
+  const { send } = startFramedWorker(t, [projectRoot])
+
+  for (const [id, streamResponse] of [
+    ['head-buffered', false],
+    ['head-streamed', true],
+  ]) {
+    const head = await send(id, apiRequest('', { method: 'HEAD', streamResponse }))
+    assert.equal(head.ok, true, head.message)
+    assert.equal(head.body, '')
+    assert.equal(head.headers['content-type'], 'text/event-stream')
+  }
+
+  const probe = await send('probe', apiRequest('?mode=probe', { streamResponse: false }))
+  assert.equal(probe.ok, true, probe.message)
+  assert.equal(JSON.parse(probe.body).live, 0, 'a HEAD must cancel the GET body it drops')
+})
+
+test('a timed-out request is aborted and holds its slot until its work settles', async (t) => {
+  // The timeout answered the host and released the slot while the dispatch kept
+  // running: the handler's signal was never aborted, so it could not stop, and
+  // a streaming Response it produced afterwards was never cancelled.
+  const { projectRoot, apiRequest } = await apiRouteProject('timeout-abort-', PUSH_STREAM_ROUTE)
+  const { send } = startFramedWorker(t, [projectRoot], { RUVYXA_WORKER_TIMEOUT_MS: '1500' })
+  let sequence = 0
+  const probe = async () => {
+    const frame = await send(
+      `probe-${sequence++}`,
+      apiRequest('?mode=probe', { streamResponse: false }),
+    )
+    assert.equal(frame.ok, true, frame.message)
+    return JSON.parse(frame.body)
+  }
+  const activeRequests = async () =>
+    (await send(`ping-${sequence++}`, { type: 'ping' })).activeRequests
+  const waitForIdle = async (what) => {
+    const deadline = Date.now() + 6_000
+    while ((await activeRequests()) !== 0) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
+      await delay(50)
+    }
+  }
+
+  // Compiled once up front, so the timeout below measures the handler.
+  assert.deepEqual(await probe(), { live: 0, aborted: 0 })
+
+  const late = await send('late', apiRequest('?mode=late'))
+  assert.equal(late.ok, false)
+  assert.match(late.message, /timed out/)
+  assert.equal(await activeRequests(), 1, 'the abandoned dispatch still owns its slot')
+  await waitForIdle('the abandoned dispatch to settle')
+  assert.deepEqual(
+    await probe(),
+    { live: 0, aborted: 1 },
+    'the handler must observe the abort, and its late stream must be cancelled',
+  )
+
+  // A handler that ignores the signal and never settles may not hold the slot
+  // forever: it is reclaimed one further timeout window after the abort.
+  const ignored = await send('ignore', apiRequest('?mode=ignore'))
+  assert.equal(ignored.ok, false)
+  assert.match(ignored.message, /timed out/)
+  assert.equal(await activeRequests(), 1)
+  await waitForIdle('the slot of a handler that never settles')
+})
+
+test('a request cancelled while queued gives its queue place back', async (t) => {
+  const { projectRoot, apiRequest } = await apiRouteProject('queued-cancel-', PUSH_STREAM_ROUTE)
+  const { send, write, framesFor } = startFramedWorker(t, [projectRoot], {
+    RUVYXA_WORKER_MAX_CONCURRENCY: '1',
+    RUVYXA_WORKER_MAX_QUEUE: '1',
+  })
+  const probeRequest = () => apiRequest('?mode=probe', { streamResponse: false })
+  assert.equal((await send('warm', probeRequest())).ok, true)
+
+  const active = send('active', apiRequest('?mode=hold', { streamResponse: false }))
+  // Never answered: the request is withdrawn before it runs.
+  send('queued', probeRequest()).catch(() => {})
+  const parked = await send('parked', { type: 'ping' })
+  assert.equal(parked.activeRequests, 1)
+  assert.equal(parked.queuedRequests, 1)
+
+  write({ type: 'cancel', id: 'queued' })
+  const withdrawn = await send('withdrawn', { type: 'ping' })
+  assert.equal(withdrawn.queuedRequests, 0, 'a cancelled waiter must leave the queue')
+  assert.equal(withdrawn.rejectedRequests, 0)
+
+  // The place is free again, so this one queues instead of being turned away.
+  const next = send('next', probeRequest())
+  await send('next-parked', { type: 'ping' })
+  write({ type: 'cancel', id: 'active' })
+  assert.equal((await active).ok, true)
+  const answered = await next
+  assert.equal(answered.ok, true, answered.message)
+
+  await delay(100)
+  assert.equal(framesFor('queued').length, 0, 'a withdrawn request is owed no frame')
+})
+
+test('never coalesces a form post or a non-GET render', async (t) => {
+  // A form post runs its action inside the render. Two identical posts are two
+  // submissions, and sharing one render ran the action once and handed both
+  // callers the same answer.
+  const pageFor = async (prefix) => {
+    const appDir = await mkdtemp(path.join(fixtureWorkspace, prefix))
+    const pageFile = path.join(appDir, 'page.tsx')
+    const key = JSON.stringify(prefix)
+    await writeFile(
+      pageFile,
+      `export default function Page() {
+  const state = ((globalThis as any).__renderCounts ??= {})
+  state[${key}] = (state[${key}] ?? 0) + 1
+  return <main data-count={String(state[${key}])}>rendered</main>
+}
+`,
+    )
+    return { appDir, pageFile }
+  }
+  const posted = await pageFor('form-post-coalescing-')
+  const fetched = await pageFor('get-coalescing-')
+  const { send } = startFramedWorker(t, [posted.appDir, fetched.appDir])
+  const ssr = (page, extra) => ({
+    type: 'ssr',
+    projectRoot: fixtureWorkspace,
+    appDir: page.appDir,
+    pageFile: page.pageFile,
+    requestPath: '/submit',
+    routePath: '/submit',
+    params: {},
+    headerPairs: [['content-type', 'application/x-www-form-urlencoded']],
+    ...extra,
+  })
+  const countOf = (frame) => {
+    assert.equal(frame.ok, true, frame.message)
+    return Number(/data-count="(\d+)"/.exec(frame.html)?.[1])
+  }
+
+  const form = {
+    method: 'POST',
+    formBody: 'name=same',
+    formContentType: 'application/x-www-form-urlencoded',
+  }
+  const posts = await Promise.all([
+    send('post-1', ssr(posted, form)),
+    send('post-2', ssr(posted, form)),
+  ])
+  assert.deepEqual(
+    posts.map(countOf).sort((a, b) => a - b),
+    [1, 2],
+    'each form post must render on its own',
+  )
+
+  // Identical GETs still share one render: the fix narrows coalescing, it does
+  // not remove it.
+  const gets = await Promise.all([
+    send('get-1', ssr(fetched, { method: 'GET' })),
+    send('get-2', ssr(fetched, { method: 'GET' })),
+  ])
+  assert.deepEqual(gets.map(countOf), [1, 1])
+})

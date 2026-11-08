@@ -1,6 +1,6 @@
 [package]
 name = "ruvyxa_cli"
-version = "1.1.5"
+version = "1.1.6"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -40,7 +40,7 @@ walkdir.workspace = true
 # `src/host_resources.rs`). Both crates are already in the dependency graph
 # through transitive deps, so neither adds to the shipped binary's build.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 # Every unix, not only Darwin.
 #
@@ -55,7 +55,7 @@ windows-sys = { version = "0.61.2", features = ["Win32_System_ProcessStatus", "W
 # lockfile already pull `libc` in, tokio and socket2 among them, so it is
 # compiled on every unix target with or without this line.
 [target.'cfg(unix)'.dependencies]
-libc = "0.2.189"
+libc = "0.2.191"
 
 [dev-dependencies]
 # `tests/ci_workflows.rs` asserts properties of `.github/workflows/*.yml`, and

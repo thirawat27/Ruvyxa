@@ -58,17 +58,42 @@ export interface ScriptProps extends Omit<
   onError?: (error: unknown) => void
 }
 
+/** One caller waiting to hear how a script turned out. */
+interface ScriptWaiter {
+  onLoad: () => void
+  onError: (error: unknown) => void
+}
+
 /**
- * Scripts this document has already injected, keyed by `id` or `src`.
+ * What the document knows about one injected script.
+ *
+ * Injected and loaded are two different facts. Recording only the first let a
+ * second `<Script>` for a script still downloading report `onLoad` on the spot,
+ * before the global it was waiting for existed.
+ */
+interface ScriptRecord {
+  loaded: boolean
+  waiters: Set<ScriptWaiter>
+}
+
+/**
+ * Scripts this document has injected, keyed by `id` or `src`.
  *
  * Deliberately per-document rather than per-component: the point is to survive
  * the unmount and remount that a client-side navigation performs.
  */
-const injected = new Set<string>()
+const scripts = new Map<string, ScriptRecord>()
 
 /** Reset the dedupe registry. Exported for tests, which share one document. */
 export function resetInjectedScripts(): void {
-  injected.clear()
+  scripts.clear()
+}
+
+/** Tell every waiter how the script turned out, each exactly once. */
+function settleWaiters(record: ScriptRecord, notify: (waiter: ScriptWaiter) => void): void {
+  const waiters = [...record.waiters]
+  record.waiters.clear()
+  for (const waiter of waiters) notify(waiter)
 }
 
 function scriptKey(props: Pick<ScriptProps, 'id' | 'src'>): string | null {
@@ -94,6 +119,31 @@ function whenIdle(task: () => void): () => void {
   return () => clearTimeout(timer)
 }
 
+/**
+ * Run `task` when the browser is idle after the window's `load` event.
+ *
+ * The returned cleanup cancels whichever stage is pending. It used to remove
+ * only the `load` listener, so a component unmounting after `load` but before
+ * the idle callback still injected its script and had its `onLoad` called.
+ * Exported for tests, which have no browser to unmount a component in.
+ */
+export function whenLoadedAndIdle(
+  win: Pick<Window, 'addEventListener' | 'removeEventListener'>,
+  doc: Pick<Document, 'readyState'>,
+  task: () => void,
+): () => void {
+  if (doc.readyState === 'complete') return whenIdle(task)
+  let cancelIdle: (() => void) | null = null
+  const onWindowLoad = () => {
+    cancelIdle = whenIdle(task)
+  }
+  win.addEventListener('load', onWindowLoad, { once: true })
+  return () => {
+    win.removeEventListener('load', onWindowLoad)
+    cancelIdle?.()
+  }
+}
+
 /** Everything {@link injectScript} needs, resolved from the component's props. */
 interface InjectOptions {
   /** Dedupe identity: the `id`, or the `src` when there is no `id`. */
@@ -107,7 +157,13 @@ interface InjectOptions {
 }
 
 /**
- * Append one script element, at most once per document per key.
+ * Append one script element, at most once per document per key, and report
+ * how it turned out.
+ *
+ * A caller for a key already loaded hears `onLoad` immediately; one for a key
+ * still loading waits for the same element's `load` or `error`. Returns the
+ * unsubscribe a component calls on unmount, so an unmounted caller hears
+ * nothing.
  *
  * Separated from the component so the dedupe and attribute rules can be
  * exercised directly against a stub document — the same approach the router
@@ -116,13 +172,33 @@ interface InjectOptions {
 export function injectScript(
   doc: Pick<Document, 'createElement' | 'body'>,
   options: InjectOptions,
-): void {
+): () => void {
   const { key, src, id, inlineCode, attributes, onLoad, onError } = options
   // Re-checked at injection time: `lazyOnload` defers past the point where
   // another render could have claimed the same key.
-  if (injected.has(key)) return
-  injected.add(key)
+  const existing = scripts.get(key)
+  if (existing?.loaded) {
+    onLoad()
+    return () => {}
+  }
+  const waiter: ScriptWaiter = { onLoad, onError }
+  if (existing) {
+    existing.waiters.add(waiter)
+    return () => existing.waiters.delete(waiter)
+  }
+  const record: ScriptRecord = { loaded: false, waiters: new Set([waiter]) }
+  scripts.set(key, record)
+  appendScriptElement(doc, record, { key, src, id, inlineCode, attributes })
+  return () => record.waiters.delete(waiter)
+}
 
+/** Build, wire, and append the element for a key nobody has injected yet. */
+function appendScriptElement(
+  doc: Pick<Document, 'createElement' | 'body'>,
+  record: ScriptRecord,
+  options: Omit<InjectOptions, 'onLoad' | 'onError'>,
+): void {
+  const { key, src, id, inlineCode, attributes } = options
   const element = doc.createElement('script')
   for (const [attribute, value] of Object.entries(attributes)) {
     if (value === undefined || value === null || typeof value === 'function') continue
@@ -141,12 +217,15 @@ export function injectScript(
   }
   if (src) {
     element.src = src
-    element.addEventListener('load', () => onLoad())
+    element.addEventListener('load', () => {
+      record.loaded = true
+      settleWaiters(record, (waiter) => waiter.onLoad())
+    })
     element.addEventListener('error', (event) => {
       // A failed third-party script must not leave its key claimed, or a later
       // render can never retry it.
-      injected.delete(key)
-      onError(event)
+      if (scripts.get(key) === record) scripts.delete(key)
+      settleWaiters(record, (waiter) => waiter.onError(event))
     })
   } else if (inlineCode !== null) {
     element.textContent = inlineCode
@@ -155,7 +234,10 @@ export function injectScript(
   doc.body.append(element)
   // An inline script has executed by the time `append` returns; there is no
   // load event to wait for.
-  if (!src) onLoad()
+  if (!src) {
+    record.loaded = true
+    settleWaiters(record, (waiter) => waiter.onLoad())
+  }
 }
 
 /**
@@ -194,17 +276,9 @@ export function Script({
       )
       return
     }
-    if (injected.has(key)) {
-      // Already loaded by an earlier render. Report success so a caller waiting
-      // on `onLoad` is not left hanging on a navigation back to this route.
-      handlers.current.onLoad?.()
-      return
-    }
-
-    let cancelIdle: (() => void) | null = null
-
-    const inject = () =>
-      injectScript(document, {
+    let unsubscribe: (() => void) | null = null
+    const inject = () => {
+      unsubscribe = injectScript(document, {
         key,
         src,
         id,
@@ -213,23 +287,21 @@ export function Script({
         onLoad: () => handlers.current.onLoad?.(),
         onError: (error) => handlers.current.onError?.(error),
       })
+    }
 
-    if (strategy === 'lazyOnload') {
-      if (document.readyState === 'complete') {
-        cancelIdle = whenIdle(inject)
-      } else {
-        const onWindowLoad = () => {
-          cancelIdle = whenIdle(inject)
-        }
-        window.addEventListener('load', onWindowLoad, { once: true })
-        return () => window.removeEventListener('load', onWindowLoad)
-      }
+    // A key another render already injected needs no scheduling: there is
+    // nothing to append, only an outcome to hear — at once if it has loaded,
+    // on its `load` or `error` if it is still downloading.
+    let cancelSchedule: (() => void) | null = null
+    if (strategy === 'lazyOnload' && !scripts.has(key)) {
+      cancelSchedule = whenLoadedAndIdle(window, document, inject)
     } else {
       inject()
     }
 
     return () => {
-      cancelIdle?.()
+      cancelSchedule?.()
+      unsubscribe?.()
       // The element is deliberately left in the document. Removing a script tag
       // does not undo what it did — the globals, listeners, and timers it
       // installed outlive it — so tearing it down on unmount would only mean a

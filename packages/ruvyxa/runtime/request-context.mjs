@@ -32,6 +32,38 @@
 export const DRAFT_MODE_COOKIE = '__ruvyxa_draft'
 
 /**
+ * The environment variable whose value keys the draft cookie.
+ *
+ * The same variable `@ruvyxa/adapter-vercel` hashes into its prerender bypass
+ * token, so a project configures one preview secret rather than two. Read on
+ * every request rather than at load: a Workers deployment populates
+ * `process.env` from its bindings, and a test or a long-lived process may set
+ * it after this module was imported.
+ */
+const PREVIEW_SECRET_VARIABLE = 'RUVYXA_PREVIEW_SECRET'
+
+/**
+ * Shortest secret accepted as an HMAC key.
+ *
+ * The signed value travels to every browser that previews, so a short secret
+ * could be brute-forced offline from one cookie. Thirty-two characters is the
+ * floor `RUVYXA_AUTH_SECRET` already sets in this repository.
+ */
+const MIN_PREVIEW_SECRET_LENGTH = 32
+
+/** What the secret signs. Fixed, so every instance of a deployment agrees. */
+const DRAFT_MODE_MESSAGE = 'ruvyxa-draft-mode'
+
+/**
+ * `node:crypto`, or `null` where the runtime has none.
+ *
+ * Loaded the way `node:async_hooks` is below. Without it there is no HMAC to
+ * verify against, so draft mode stays off — failing closed, because the
+ * alternative is accepting a cookie anyone can write.
+ */
+const nodeCrypto = await import('node:crypto').catch(() => null)
+
+/**
  * `AsyncLocalStorage`, or a stand-in for runtimes without `node:async_hooks`.
  *
  * Some deployment targets — Cloudflare Workers without `nodejs_compat`, Deno
@@ -127,6 +159,27 @@ globalThis.__RUVYXA_REQUEST_CONTEXT__ = {
   wasRead() {
     return storage.getStore()?.used === true
   },
+  /**
+   * The signed value `draftMode().enableCookie()` writes.
+   *
+   * On the host because `@ruvyxa/core/server` is bundled for edge and browser
+   * targets and cannot import `node:crypto`; it asks for the value instead.
+   * Throws rather than returning something unsigned: a cookie this module would
+   * refuse on the next request is worse than an error now.
+   */
+  draftModeToken() {
+    const token = expectedDraftToken()
+    if (!token) {
+      throw new Error(
+        `draftMode().enableCookie() needs ${PREVIEW_SECRET_VARIABLE}: set it to a secret of at ` +
+          `least ${MIN_PREVIEW_SECRET_LENGTH} characters in the server's environment (or .env for ` +
+          '`ruvyxa dev`). Draft mode is enabled by a cookie signed with that secret, so without ' +
+          'one there is no value a visitor could not forge.' +
+          (nodeCrypto ? '' : ' This runtime also provides no node:crypto to sign with.'),
+      )
+    }
+    return token
+  },
 }
 
 /**
@@ -215,14 +268,59 @@ export function usedRequestContext(context) {
   return Boolean(context?.used)
 }
 
+/**
+ * Does the request carry a draft cookie this server signed?
+ *
+ * Presence alone used to be enough, and a cookie is written by the client: any
+ * visitor who sent `__ruvyxa_draft=1` saw unpublished content. The value has to
+ * be the HMAC of `RUVYXA_PREVIEW_SECRET` now, compared in constant time so the
+ * comparison does not leak how much of a guess was right.
+ */
 function hasDraftCookie(pairs) {
+  let expected = null
   for (const [name, value] of pairs) {
     if (name.toLowerCase() !== 'cookie') continue
     for (const part of String(value).split(';')) {
       const separator = part.indexOf('=')
       if (separator <= 0) continue
-      if (part.slice(0, separator).trim() === DRAFT_MODE_COOKIE) return true
+      if (part.slice(0, separator).trim() !== DRAFT_MODE_COOKIE) continue
+      // Derived only once a draft cookie is seen, so the common request pays
+      // nothing for the HMAC.
+      expected ??= expectedDraftToken() ?? ''
+      if (expected === '') return false
+      if (sameToken(part.slice(separator + 1).trim(), expected)) return true
     }
   }
   return false
+}
+
+/** Memo of the last secret's token: one HMAC per secret, not per request. */
+let draftTokenMemo = { secret: null, token: null }
+
+/** The draft cookie value for the configured secret, or `null` if there is none. */
+function expectedDraftToken() {
+  const secret = globalThis.process?.env?.[PREVIEW_SECRET_VARIABLE]
+  if (!nodeCrypto || typeof secret !== 'string' || secret.length < MIN_PREVIEW_SECRET_LENGTH) {
+    return null
+  }
+  if (draftTokenMemo.secret !== secret) {
+    const token = nodeCrypto
+      .createHmac('sha256', secret)
+      .update(DRAFT_MODE_MESSAGE)
+      .digest('base64url')
+    draftTokenMemo = { secret, token }
+  }
+  return draftTokenMemo.token
+}
+
+const encoder = new TextEncoder()
+
+function sameToken(received, expected) {
+  // `TextEncoder` rather than `Buffer`: not every runtime that provides
+  // `node:crypto` also puts `Buffer` on the global scope.
+  const left = encoder.encode(received)
+  const right = encoder.encode(expected)
+  // The expected length is public (a SHA-256 digest in base64url), so checking
+  // it first leaks nothing; `timingSafeEqual` throws on unequal lengths.
+  return left.length === right.length && nodeCrypto.timingSafeEqual(left, right)
 }

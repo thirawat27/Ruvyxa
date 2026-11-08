@@ -358,19 +358,22 @@ fn write_discovery_stage(
 /// adapter and reports `RUV2203` for one that is missing, and it does so
 /// without reading the build output, which does not exist yet at this point.
 ///
-/// Nothing is done with the inspection: this is a precondition, and the
-/// adapter stage inspects again for the values it needs after the output is
-/// committed.
+/// This is a precondition, and the adapter stage inspects again for the values
+/// it needs after the output is committed. Only the adapter's name is kept.
+///
 /// Only a *named* adapter is checked. An auto-detected one comes from the
 /// hosting platform's own environment and is always one of the built-in names,
 /// so it cannot be a typo — and detection has not run this early anyway.
+///
+/// Returns the name the inspection resolved, which is how the local standalone
+/// stage names an object-form `adapter: node({...})` without a second runner.
 fn ensure_selected_adapter_resolves(
     args: &BuildArgs,
     config: &ProjectConfig,
     out_dir: &Path,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<String>> {
     if args.adapter.is_none() && config.adapter.is_none() {
-        return Ok(());
+        return Ok(None);
     }
     // The same pair `run_adapter_stage` passes: a `--adapter` name, or `None`
     // when the choice lives in `ruvyxa.config.ts` and the runner reads it
@@ -382,7 +385,115 @@ fn ensure_selected_adapter_resolves(
         config.javascript_runtime(),
         args.adapter.as_deref(),
     )
-    .map(|_| ())
+    .map(|inspection| inspection.map(|inspection| inspection.name))
+}
+
+/// Leave a standalone server for the configured runtime in every build.
+///
+/// `ruvyxa start` runs it, so it has to exist whichever adapter the build was
+/// for — and it is produced by the same built-in adapter a self-hosted
+/// deployment uses, not by a second generator. When the build's own adapter is
+/// already that one, its output is the standalone server and only the stamp is
+/// written. The artifact report of this pass is not recorded in `build.json`:
+/// it is a local convenience, not a deployment the project asked for.
+///
+/// For a build whose adapter is anything else (vercel, netlify, ...) this adds
+/// one extra adapter pass, so those builds take correspondingly longer. That
+/// pass runs with default adapter options, and a failure in it is a warning,
+/// not a failed build: see [`crate::start::settle_local_standalone_stage`].
+///
+/// `resolved` is the adapter name `ensure_selected_adapter_resolves` inspected
+/// before the build. An object-form `adapter: node({...})` carries no name in
+/// the config value, and this is what names it, so a second pass by name
+/// cannot overwrite the project's configured output with default options.
+pub(crate) fn run_local_standalone_stage(
+    args: &BuildArgs,
+    config: &ProjectConfig,
+    out_dir: &Path,
+    detected_adapter: &Option<(String, String)>,
+    resolved: Option<&str>,
+) -> anyhow::Result<()> {
+    let runtime = config.javascript_runtime();
+    // A stamp left by an earlier build must not vouch for this one's server
+    // when this stage ends without stamping.
+    let clear_stamp = || -> anyhow::Result<()> {
+        let stamp = crate::start::standalone_dir(out_dir, runtime)
+            .join(crate::start::STANDALONE_BUILD_ID_FILE);
+        match std::fs::remove_file(&stamp) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                Err(error).with_context(|| format!("failed to remove {}", stamp.display()))
+            }
+            _ => Ok(()),
+        }
+    };
+    let detected = detected_adapter.as_ref().map(|(name, _)| name.as_str());
+    let selected = match select_adapter(
+        args.adapter.as_deref(),
+        config.adapter.as_ref(),
+        detected,
+        resolved,
+    ) {
+        // Cannot tell whether the configured adapter already is the runtime's,
+        // so neither run a second one over it nor vouch for whatever server is
+        // there: `ruvyxa start` reports RUV1022 for an unstamped one.
+        AdapterSelection::Unresolved => {
+            if let Err(error) = clear_stamp() {
+                warn!("{error:#}");
+            }
+            return Ok(());
+        }
+        AdapterSelection::Named(name) => Some(name),
+        AdapterSelection::NoAdapter => None,
+    };
+    let local_adapter = crate::start::local_standalone_adapter(runtime, selected.as_deref());
+    let outcome = clear_stamp()
+        .and_then(|()| {
+            local_adapter.map_or(Ok(()), |adapter| {
+                run_local_standalone_runner(&args.root, out_dir, runtime, adapter)
+                    .map(|_| ())
+                    .with_context(|| {
+                        format!("failed to stage the local {adapter} standalone server")
+                    })
+            })
+        })
+        .and_then(|()| crate::start::stamp_standalone(out_dir, runtime));
+    if let Some(warning) =
+        crate::start::settle_local_standalone_stage(runtime, local_adapter, outcome)?
+    {
+        warn!("{warning}");
+    }
+    Ok(())
+}
+
+/// Which adapter a build selected.
+pub(crate) enum AdapterSelection {
+    Named(String),
+    NoAdapter,
+    /// Configured in object form and the runner named none.
+    Unresolved,
+}
+
+/// The adapter a build uses: `--adapter`, then a string config, then
+/// detection; an object-form config is named by what the runner resolved.
+pub(crate) fn select_adapter(
+    cli: Option<&str>,
+    config: Option<&serde_json::Value>,
+    detected: Option<&str>,
+    resolved: Option<&str>,
+) -> AdapterSelection {
+    if let Some(name) = cli {
+        return AdapterSelection::Named(name.to_string());
+    }
+    match config {
+        Some(value) => match value.as_str().or(resolved) {
+            Some(name) => AdapterSelection::Named(name.to_string()),
+            None => AdapterSelection::Unresolved,
+        },
+        None => match detected {
+            Some(name) => AdapterSelection::Named(name.to_string()),
+            None => AdapterSelection::NoAdapter,
+        },
+    }
 }
 
 fn run_adapter_stage(
@@ -1013,7 +1124,7 @@ pub(crate) async fn build_with_cache_override(
         .unwrap_or_else(|| build_cache_dir(&args.root, &config.cache));
     // Before any phase runs: the adapter is the last thing a build uses and the
     // first thing it can check.
-    ensure_selected_adapter_resolves(&args, &config, &out_dir)?;
+    let resolved_adapter = ensure_selected_adapter_resolves(&args, &config, &out_dir)?;
 
     if show_summary {
         print_build_header(&args, target, &app_dir, &out_dir);
@@ -1424,6 +1535,13 @@ pub(crate) async fn build_with_cache_override(
     )? {
         build_info["adapterArtifacts"] = artifacts;
     }
+    run_local_standalone_stage(
+        &args,
+        &config,
+        &out_dir,
+        &detected_adapter,
+        resolved_adapter.as_deref(),
+    )?;
     build_info["timing"]["totalMs"] = serde_json::json!(duration_ms(started.elapsed()));
     // The one write that lands in the output directory rather than being
     // committed into it, because two of its fields — `totalMs` and

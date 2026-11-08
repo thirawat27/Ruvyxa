@@ -74,7 +74,7 @@ spending an hour on it.
 | Shape                               | Why it bites                                                                                                                                                             |
 | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **Two module graphs**               | The Rust resolver and `runtime/compiler.mjs` both resolve imports. Teaching one a new specifier and not the other breaks SSG silently.                                   |
-| **Two request hosts**               | Axum serves `dev`/`start`; `createHandler` serves every deployed build. A feature added to one only works where it was added.                                            |
+| **Two request hosts**               | Production has one host (`createHandler`); `dev` still runs on Axum until Phase 2, so a feature still has to work in both for now.                                       |
 | **One source scanner per language** | `ruvyxa_bundler::ast` in Rust, `runtime/scanner.mjs` in JavaScript. A hand-rolled second scanner has caused the same class of silent bug five times.                     |
 | **Cache identity is derived**       | No hand-maintained `CACHE_VERSION`/`-v2` stamp decides reuse. A stamp is only correct while somebody remembers it, and forgetting is silent.                             |
 | **Ordering is a contract**          | Sort order decides cache keys, fingerprints, and emitted bytes, so `localeCompare` is banned outright — it answers by the host's ICU locale.                             |

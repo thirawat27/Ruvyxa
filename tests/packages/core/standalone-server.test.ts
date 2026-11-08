@@ -7,6 +7,7 @@ import { describe, it } from 'node:test'
 
 import { repoPath } from '../../repo-root.js'
 import { standaloneServerSource } from '../../../packages/@ruvyxa/core/dist/standalone-server.js'
+import { platformDocumentStoreSource } from '../../../packages/@ruvyxa/core/dist/index.js'
 
 const generated = standaloneServerSource({ runtimePolicy: {} })
 
@@ -318,6 +319,49 @@ describe('generated standalone server', () => {
       /const isrCacheDir = prerenderDir;/,
     )
   })
+
+  it('emits the cluster supervisor for node and bun, and the refusal for deno', () => {
+    const node = standaloneServerSource({ runtime: 'node', runtimePolicy: {} })
+    assert.match(node, /import cluster from 'node:cluster';/)
+    assert.match(node, /const IS_SUPERVISOR = WORKER_COUNT > 1 && cluster\.isPrimary;/)
+    assert.match(node, /if \(IS_SUPERVISOR\) \{\s*runSupervisor\(\);/)
+
+    const bun = standaloneServerSource({ runtime: 'bun', runtimePolicy: {} })
+    assert.match(bun, /reusePort: process\.env\.RUVYXA_REUSE_PORT === '1'/)
+    assert.match(bun, /needs SO_REUSEPORT load balancing/)
+
+    const deno = standaloneServerSource({ runtime: 'deno', runtimePolicy: {} })
+    assert.match(deno, /RUVYXA_WORKERS above 1 is not supported on Deno/)
+    assert.doesNotMatch(deno, /node:cluster/)
+  })
+
+  it('replaces an ISR document by rename, so another worker never reads half of one', () => {
+    const source = standaloneServerSource({ runtimePolicy: {} })
+    assert.match(
+      source,
+      /writeFileSync\(temporaryPath, html, 'utf8'\);\s*renameSync\(temporaryPath, htmlPath\);/,
+    )
+    assert.match(source, /rmSync\(temporaryPath, \{ force: true \}\)/)
+    assert.doesNotMatch(source, /writeFileSync\(htmlPath,/)
+  })
+
+  it('wires an image-service optimizer gated on onDemand and the service variable', () => {
+    const source = standaloneServerSource({ runtimePolicy: { image: { onDemand: true } } })
+    assert.match(source, /process\.env\.RUVYXA_IMAGE_SERVICE/)
+    assert.match(source, /'x-ruvyxa-image-token'/)
+    assert.match(source, /optimizeImage: imageServiceOptimizer,/)
+    // The gate is decided at runtime from the embedded policy, so the off
+    // branch is visible in the source as the policy and the gate together;
+    // what it answers is proved by the executed test in the conformance suite.
+    assert.match(
+      source,
+      /runtimePolicy\.image\?\.onDemand === true && IMAGE_SERVICE !== ''\s*\? async/,
+    )
+    assert.match(source, /:\s*undefined;\s*\n/)
+    const off = standaloneServerSource({ runtimePolicy: { image: { onDemand: false } } })
+    assert.match(off, /const runtimePolicy = \{"image":\{"onDemand":false\}\};/)
+    assert.doesNotMatch(off, /"onDemand":true/)
+  })
 })
 
 /**
@@ -366,5 +410,89 @@ describe('the ISR temporary cache has one derivation', () => {
       ['packages/@ruvyxa/core/src/utils.ts'],
       'every host must reach the directory through isrTemporaryCacheDirSource',
     )
+  })
+})
+
+/**
+ * The atomic ISR write names its temporary file per writer. pid and sequence
+ * alone did not: replicas in separate containers on one shared volume each have
+ * their own pid namespace — the first worker of each is commonly pid 1 — and
+ * each starts its sequence at one, so two of them wrote the same temporary file
+ * and one renamed the other's half-written document into place.
+ */
+describe('shared ISR document writer', () => {
+  /** One emitted store, as its own process would hold it, over fake fs calls. */
+  function emittedWriter(pid: number, written: string[]) {
+    const store = platformDocumentStoreSource()
+    const factory = new Function(
+      'prerenderRelativePath',
+      'readFileSync',
+      'statSync',
+      'mkdirSync',
+      'writeFileSync',
+      'renameSync',
+      'rmSync',
+      'path',
+      'process',
+      'isrCacheDir',
+      'prerenderDir',
+      `${store}\nreturn platformWritePrerendered;`,
+    )
+    return factory(
+      (pathname: string) => pathname.replace(/^\//, '') + '.html',
+      () => '',
+      () => ({ mtimeMs: 0 }),
+      () => undefined,
+      (file: string) => written.push(file),
+      () => undefined,
+      () => undefined,
+      path.posix,
+      { pid },
+      '/shared/isr',
+      '/shared/prerender',
+    ) as (pathname: string, html: string, revalidate: number, forced: boolean) => void
+  }
+
+  it('gives two writers with the same pid and sequence different temporary files', () => {
+    const written: string[] = []
+    emittedWriter(1, written)('/page', '<p>one</p>', 60, false)
+    emittedWriter(1, written)('/page', '<p>two</p>', 60, false)
+    assert.equal(written.length, 2)
+    for (const file of written) {
+      assert.match(file, /^\/shared\/isr\/page\.html\.1\.1\.[0-9a-z]+\.tmp$/)
+    }
+    assert.notEqual(written[0], written[1])
+  })
+
+  it('still throws a failed write and removes its temporary file', () => {
+    const store = platformDocumentStoreSource()
+    const removed: string[] = []
+    const write = new Function(
+      'prerenderRelativePath',
+      'mkdirSync',
+      'writeFileSync',
+      'renameSync',
+      'rmSync',
+      'path',
+      'process',
+      'isrCacheDir',
+      'prerenderDir',
+      `${store}\nreturn platformWritePrerendered;`,
+    )(
+      () => 'page.html',
+      () => undefined,
+      () => undefined,
+      () => {
+        throw new Error('disk full')
+      },
+      (file: string) => removed.push(file),
+      path.posix,
+      { pid: 1 },
+      '/shared/isr',
+      '/shared/prerender',
+    ) as (pathname: string, html: string, revalidate: number, forced: boolean) => void
+    assert.throws(() => write('/page', '<p></p>', 60, false), /disk full/)
+    assert.equal(removed.length, 1)
+    assert.match(removed[0], /\.tmp$/)
   })
 })
