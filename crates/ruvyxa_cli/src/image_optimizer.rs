@@ -354,7 +354,7 @@ fn ensure_unique_outputs(
     // file and racing writers would silently drop one image.
     let mut output_sources = HashMap::<String, &Path>::new();
     for source in sources {
-        let mut output = assets_dir.join(source.strip_prefix(public_dir).unwrap_or(source));
+        let mut output = assets_dir.join(source.trim_prefix(public_dir));
         if optimize && is_optimizable_source(source) {
             output.set_extension("webp");
         }
@@ -381,7 +381,7 @@ fn ensure_unique_originals(
     // onto a WebP name that `ensure_unique_outputs` already rejects.
     let mut output_sources = HashMap::<String, &Path>::new();
     for source in sources {
-        let output = assets_dir.join(source.strip_prefix(public_dir).unwrap_or(source));
+        let output = assets_dir.join(source.trim_prefix(public_dir));
         let folded = output.to_string_lossy().to_lowercase();
         if let Some(existing) = output_sources.insert(folded, source) {
             bail!(
@@ -402,7 +402,7 @@ fn process_one(
     cache_dir: &Path,
     options: &ImageOptimizationOptions,
 ) -> anyhow::Result<Option<Conversion>> {
-    let relative = source.strip_prefix(public_dir).unwrap_or(source);
+    let relative = source.trim_prefix(public_dir);
     let unchanged_output = assets_dir.join(relative);
     if !options.optimize || !is_optimizable_source(source) {
         copy_asset(source, &unchanged_output)?;

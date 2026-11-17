@@ -23,7 +23,7 @@ strip = "symbols"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/thirawat27/Ruvyxa"
-rust-version = "1.98"
+rust-version = "1.100"
 
 [workspace.lints.clippy]
 # Nursery lint, off by default. Turned on because the JavaScript side now has
@@ -38,8 +38,8 @@ axum = { version = "0.8.9", features = ["ws"] }
 base64 = "0.23.1"
 blake3 = "1.8.7"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
-clap = { version = "4.6.7", features = ["derive"] }
-fancy-regex = "0.20.0"
+clap = { version = "4.6.8", features = ["derive"] }
+fancy-regex = "0.20.2"
 dashmap = "6.2.1"
 futures-core = "0.3.34"
 # Already compiled as part of axum's dependency tree; declaring it directly adds
@@ -80,12 +80,12 @@ jpeg-encoder = "0.7.1"
 # lockfile with no unmaintained crate in it.
 pic-scale = "0.7.12"
 markdown = "1.0.0"
-notify = "8.2.1"
+notify = "8.2.2"
 # Pinned exactly and kept in lockstep with `oxc-transform` in
 # packages/ruvyxa/package.json: the Rust bundler compiles the client bundle and
 # the Node runtime compiles the server bundle, so a version split would let the
 # two halves of one page disagree. `scripts/check-oxc-lockstep.mjs` enforces it.
-oxc = { version = "=0.157.0", default-features = false, features = ["codegen", "minifier", "semantic", "transformer"] }
+oxc = { version = "=0.159.0", default-features = false, features = ["codegen", "minifier", "semantic", "transformer"] }
 parking_lot = "0.12.5"
 rayon = "1.12.0"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -100,3 +100,11 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 walkdir = "2.5"
 webp = { version = "0.3.1", default-features = false }
+
+[workspace.lints.cargo]
+# Cargo's own check (stable since 1.100) for a declared dependency no target of
+# the crate uses. Knip holds the JavaScript workspaces to the same rule; until
+# this lint existed a Rust dependency outlived its last `use` with nothing to
+# say so. `deny`, because `cargo clippy -- -D warnings` raises rustc and Clippy
+# lints only, and a Cargo warning would not fail CI.
+unused_dependencies = "deny"

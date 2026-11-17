@@ -12,6 +12,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode, header};
 use tower::{Layer, Service};
 use tracing::info;
@@ -527,7 +528,17 @@ impl RateLimitLayer {
         // configuration limited per real client once deployed. A forwarded
         // header is still believed only when the peer that sent it is loopback
         // or listed in `security.trustedProxyIps`.
-        let Some(peer) = request.extensions().get::<std::net::SocketAddr>() else {
+        //
+        // The peer is read from `ConnectInfo`, the extension axum's
+        // `into_make_service_with_connect_info` actually inserts. This looked
+        // for a bare `SocketAddr`, which only the unit tests ever inserted, so
+        // on a real server every request missed it and every client shared the
+        // one `"unknown"` bucket: the first caller to reach `max` locked out
+        // every visitor for the rest of the window.
+        let Some(ConnectInfo(peer)) = request
+            .extensions()
+            .get::<ConnectInfo<std::net::SocketAddr>>()
+        else {
             return bounded_key("unknown");
         };
         bounded_key(&client_ip(peer.ip(), request.headers(), trusted).to_string())
@@ -1170,7 +1181,7 @@ mod tests {
                 .unwrap();
             request
                 .extensions_mut()
-                .insert(peer.parse::<std::net::SocketAddr>().unwrap());
+                .insert(ConnectInfo(peer.parse::<std::net::SocketAddr>().unwrap()));
             request
         };
 
@@ -1219,12 +1230,12 @@ mod tests {
     fn a_missing_key_header_falls_back_to_the_peer_not_a_shared_bucket() {
         let peer: std::net::SocketAddr = "198.51.100.7:44321".parse().unwrap();
         let mut absent = Request::builder().body(Body::empty()).unwrap();
-        absent.extensions_mut().insert(peer);
+        absent.extensions_mut().insert(ConnectInfo(peer));
         let mut empty = Request::builder()
             .header("x-api-key", "")
             .body(Body::empty())
             .unwrap();
-        empty.extensions_mut().insert(peer);
+        empty.extensions_mut().insert(ConnectInfo(peer));
 
         // Two clients that both fail to identify themselves must not land in
         // one bucket, or either of them can rate-limit the other.
@@ -1343,7 +1354,7 @@ mod tests {
                 .header("x-api-key", value)
                 .body(Body::empty())
                 .unwrap();
-            request.extensions_mut().insert(peer);
+            request.extensions_mut().insert(ConnectInfo(peer));
             RateLimitLayer::extract_key(&request, "header:x-api-key", &TrustedProxies::default())
         };
 
@@ -1422,7 +1433,7 @@ mod tests {
             // forwarded chain instead.
             if let Some(client) = case["client"].as_str() {
                 let peer: std::net::SocketAddr = format!("{client}:44321").parse().unwrap();
-                request.extensions_mut().insert(peer);
+                request.extensions_mut().insert(ConnectInfo(peer));
             }
 
             let key = RateLimitLayer::extract_key(&request, key_by, &TrustedProxies::default());

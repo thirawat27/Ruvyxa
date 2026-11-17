@@ -983,7 +983,7 @@ pub(crate) fn stable_prerender_inputs(
             staging_root
                 .and_then(|staging_root| {
                     input.strip_prefix(staging_root).ok().map(|relative| {
-                        let relative = relative.strip_prefix("server").unwrap_or(relative);
+                        let relative = relative.trim_prefix("server");
                         // Normalized like the branch above it. `root` is the
                         // `--root` value as the CLI received it, so rejoining
                         // onto it reintroduces whatever spelling the caller

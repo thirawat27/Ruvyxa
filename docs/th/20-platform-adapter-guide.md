@@ -1,14 +1,12 @@
 # คู่มือ platform adapter
 
-> **เป้าหมายของ tutorial:** จับคู่ build target ที่ทดสอบแล้วกับ artifact และ handoff ที่ platform
-> ของคุณต้องการ **เริ่มจาก:** delivery model ที่เลือกใน
-> [Release-readiness playbook](19-release-readiness-playbook.md) **Checkpoint:** ตรวจ generated
-> artifact และทำ provider handoff checklist ให้ครบ
+> **เป้าหมายของ tutorial:** จับคู่ build target ที่ทดสอบแล้วกับ artifact และ handoff ที่ platform ของคุณต้องการ
+> **เริ่มจาก:** delivery model ที่เลือกใน [Release-readiness playbook](19-release-readiness-playbook.md)
+> **Checkpoint:** ตรวจ generated artifact และทำ provider handoff checklist ให้ครบ
 
-หน้านี้บันทึก deployment artifact ที่ first-party adapter สร้างจริง มันบอกว่า Ruvyxa เขียนอะไรและ
-command ใดใช้เริ่มมัน แต่ไม่สร้างขั้นตอน dashboard, account, DNS, IAM หรือ billing ของ provider
-ที่ไม่มีใน repository นี้ path ของ artifact ทุกอันอยู่ใต้ `outDir`; เมื่อใช้ default ให้ใช้
-`.ruvyxa` แทน `<outDir>`
+หน้านี้บันทึก deployment artifact ที่ first-party adapter สร้างจริง มันบอกว่า Ruvyxa เขียนอะไรและ command
+ใดใช้เริ่มมัน แต่ไม่สร้างขั้นตอน dashboard, account, DNS, IAM หรือ billing ของ provider ที่ไม่มีใน repository นี้
+path ของ artifact ทุกอันอยู่ใต้ `outDir`; เมื่อใช้ default ให้ใช้ `.ruvyxa` แทน `<outDir>`
 
 ## เลือกและตรวจ adapter
 
@@ -31,36 +29,35 @@ CLI ตรวจ Vercel, Netlify, Cloudflare, Railway, Render และ AWS จ�
 
 ## แผนที่ capability และ artifact
 
-ตารางนี้สร้างจาก adapter release contract โดยตรง และ `pnpm release:validate` จะปฏิเสธเมื่อเอกสาร
-drift
+ตารางนี้สร้างจาก adapter release contract โดยตรง และ `pnpm release:validate` จะปฏิเสธเมื่อเอกสาร drift
 
 <!-- adapter-matrix:start -->
 
-| Adapter    | Target     | Runtime | Route ที่รองรับ              | On-demand image |
+| Adapter    | Target     | Runtime | Route ที่รองรับ                 | On-demand image |
 | ---------- | ---------- | ------- | ---------------------------- | --------------- |
-| AWS        | serverless | node    | SSR, SSG, CSR, ISR, PPR, API | ไม่ได้          |
-| Bun        | node       | bun     | SSR, SSG, CSR, ISR, PPR, API | ไม่ได้          |
-| Cloudflare | edge       | edge    | SSR, SSG, CSR, API           | ได้             |
-| Deno       | node       | deno    | SSR, SSG, CSR, ISR, PPR, API | ไม่ได้          |
-| Firebase   | serverless | node    | SSR, SSG, CSR, ISR, PPR, API | ไม่ได้          |
-| Netlify    | serverless | node    | SSR, SSG, CSR, ISR, PPR, API | ไม่ได้          |
-| Node       | node       | node    | SSR, SSG, CSR, ISR, PPR, API | ไม่ได้          |
-| Railway    | node       | node    | SSR, SSG, CSR, ISR, PPR, API | ไม่ได้          |
-| Render     | node       | node    | SSR, SSG, CSR, ISR, PPR, API | ไม่ได้          |
-| Static     | static     | static  | SSG, CSR                     | ไม่ได้          |
-| Vercel     | serverless | node    | SSR, SSG, CSR, ISR, PPR, API | ได้             |
+| AWS        | serverless | node    | SSR, SSG, CSR, ISR, PPR, API | ไม่ได้            |
+| Bun        | node       | bun     | SSR, SSG, CSR, ISR, PPR, API | ไม่ได้            |
+| Cloudflare | edge       | edge    | SSR, SSG, CSR, API           | ได้              |
+| Deno       | node       | deno    | SSR, SSG, CSR, ISR, PPR, API | ไม่ได้            |
+| Firebase   | serverless | node    | SSR, SSG, CSR, ISR, PPR, API | ไม่ได้            |
+| Netlify    | serverless | node    | SSR, SSG, CSR, ISR, PPR, API | ไม่ได้            |
+| Node       | node       | node    | SSR, SSG, CSR, ISR, PPR, API | ไม่ได้            |
+| Railway    | node       | node    | SSR, SSG, CSR, ISR, PPR, API | ไม่ได้            |
+| Render     | node       | node    | SSR, SSG, CSR, ISR, PPR, API | ไม่ได้            |
+| Static     | static     | static  | SSG, CSR                     | ไม่ได้            |
+| Vercel     | serverless | node    | SSR, SSG, CSR, ISR, PPR, API | ได้              |
 
 <!-- adapter-matrix:end -->
 
-native realtime ต้องใช้ long-lived Node/Bun output มันใช้ได้กับ Node, Bun, Railway และ Render
-แต่ปฏิเสธ Deno, AWS, Cloudflare, Firebase, Netlify, static และ Vercel ดู
+native realtime ต้องใช้ long-lived Node/Bun output มันใช้ได้กับ Node, Bun, Railway และ Render แต่ปฏิเสธ
+Deno, AWS, Cloudflare, Firebase, Netlify, static และ Vercel ดู
 [การเชื่อมต่อ](09-integrations-auth-data-and-realtime.md)
 
 ## Node, Bun, and Deno: copy a standalone app
 
-build ด้วย adapter แล้ว copy ทั้ง `deploy/node/`, `deploy/bun/` หรือ `deploy/deno/` ไป runtime image
-หรือ host อย่า copy เฉพาะ server file: public asset เป็น sibling artifact standalone server
-ทั้งสามไม่ต้องใช้ Ruvyxa CLI หรือ native binary ตอน runtime
+build ด้วย adapter แล้ว copy ทั้ง `deploy/node/`, `deploy/bun/` หรือ `deploy/deno/` ไป runtime image หรือ
+host อย่า copy เฉพาะ server file: public asset เป็น sibling artifact standalone server ทั้งสามไม่ต้องใช้
+Ruvyxa CLI หรือ native binary ตอน runtime
 
 ```bash
 npm run build -- --adapter node
@@ -73,8 +70,8 @@ npm run build -- --adapter deno
 PORT=3000 HOST=0.0.0.0 deno run -A --no-prompt .ruvyxa/deploy/deno/server/index.mjs
 ```
 
-สองบรรทัด start ด้านบนใช้ syntax ตั้ง environment variable ของ POSIX หากใช้ PowerShell ให้ตั้งค่า
-ก่อนเริ่ม artifact เดิมดังนี้:
+สองบรรทัด start ด้านบนใช้ syntax ตั้ง environment variable ของ POSIX หากใช้ PowerShell ให้ตั้งค่า ก่อนเริ่ม
+artifact เดิมดังนี้:
 
 ```powershell
 $env:PORT = '3000'
@@ -88,111 +85,97 @@ bun .ruvyxa/deploy/bun/server/index.mjs
 deno run -A --no-prompt .ruvyxa/deploy/deno/server/index.mjs
 ```
 
-generated server ทั้งสามใช้ `PORT=3000` และ `HOST=0.0.0.0` เป็น default adapter แต่ละตัวสร้าง
-`start.mjs` ที่เริ่มผ่าน Ruvyxa CLI ที่ติดตั้งด้วย; เลือก standalone command เมื่อ runtime image
-ไม่ควรมี CLI Deno standalone command ตั้ง permission ที่ server ต้องใช้โดยตั้งใจ จึงรันเฉพาะ
-artifact ที่ build จาก project ที่คุณเชื่อถือ
+generated server ทั้งสามใช้ `PORT=3000` และ `HOST=0.0.0.0` เป็น default adapter แต่ละตัวสร้าง `start.mjs`
+ที่เริ่มผ่าน Ruvyxa CLI ที่ติดตั้งด้วย; เลือก standalone command เมื่อ runtime image ไม่ควรมี CLI Deno standalone
+command ตั้ง permission ที่ server ต้องใช้โดยตั้งใจ จึงรันเฉพาะ artifact ที่ build จาก project ที่คุณเชื่อถือ
 
-**เวอร์ชัน runtime ที่รองรับ** Node ใช้ค่า `engines.node` ใน package manifest ส่วนเกณฑ์ขั้นต่ำของ
-Bun และ Deno อยู่ที่ `MINIMUM_BUN_VERSION` และ `MINIMUM_DENO_VERSION` ใน
+**เวอร์ชัน runtime ที่รองรับ** Node ใช้ค่า `engines.node` ใน package manifest ส่วนเกณฑ์ขั้นต่ำของ Bun และ Deno
+อยู่ที่ `MINIMUM_BUN_VERSION` และ `MINIMUM_DENO_VERSION` ใน
 [`crates/ruvyxa_cli/src/environment.rs`](../../crates/ruvyxa_cli/src/environment.rs)
-โดยแต่ละตัวบันทึกเหตุผลไว้ข้าง ๆ ค่า: ของ Bun คือรุ่นที่เพิ่ม `idleTimeout` ให้ `Bun.serve` ซึ่งเป็น
-API ใหม่สุดที่ server ที่ emit ออกมาเรียกใช้ ส่วนของ Deno คือรุ่นที่ Node built-in ที่มัน import
-(`node:process`, `node:fs`, `node:path`) กลายเป็นทางที่รองรับจริงแทนการเปิดด้วย flag
+โดยแต่ละตัวบันทึกเหตุผลไว้ข้าง ๆ ค่า: ของ Bun คือรุ่นที่เพิ่ม `idleTimeout` ให้ `Bun.serve` ซึ่งเป็น API ใหม่สุดที่ server
+ที่ emit ออกมาเรียกใช้ ส่วนของ Deno คือรุ่นที่ Node built-in ที่มัน import (`node:process`, `node:fs`,
+`node:path`) กลายเป็นทางที่รองรับจริงแทนการเปิดด้วย flag
 
 อย่าตรวจด้วยสายตา ให้ `ruvyxa doctor` อ่านเวอร์ชันที่ติดตั้งของแต่ละตัวและเตือนเมื่อต่ำกว่าเกณฑ์
 ซึ่งเป็นเหตุผลทั้งหมดที่ค่าคงที่สองตัวนั้นมีอยู่
 
 server แต่ละตัวใช้ HTTP server ของ runtime ตัวเอง: `node:http` บน Node, `Bun.serve` บน Bun และ
-`Deno.serve` บน Deno ทุกอย่างเหนือ transport เป็นโปรแกรมชุดเดียวกัน — URL ไหนหมายถึงไฟล์ไหน, serve
-เป็นอะไร, cache ได้นานเท่าไร, range ขอ byte ช่วงไหน, routing หรือ publish directory ตอบก่อน และ
-shutdown drain อย่างไร — ทั้งสามจึงตอบเหมือนกัน `RUVYXA_SHUTDOWN_GRACE` จำกัดเวลา drain ทั้งสามตัว
-ส่วน `RUVYXA_KEEP_ALIVE_TIMEOUT` ยก keep-alive window ของ Node ให้สูงกว่า idle window ของ managed
-proxy — ถ้าไม่ตั้ง Node จะปิด idle connection ที่ห้าวินาที แล้ว request ถัดไปของ proxy บน connection
-นั้นจะพังเป็น 502 — และเมื่อตั้งค่าไว้จะจำกัด `idleTimeout` ของ Bun ด้วย (หน่วยวินาที สูงสุด 255)
-นอกนั้นปล่อย Bun ไว้ที่ default ของมันเอง ซึ่งไม่ปิด idle connection เลยและไม่ตัด streamed response
-ที่ยาว
+`Deno.serve` บน Deno ทุกอย่างเหนือ transport เป็นโปรแกรมชุดเดียวกัน — URL ไหนหมายถึงไฟล์ไหน, serve เป็นอะไร,
+cache ได้นานเท่าไร, range ขอ byte ช่วงไหน, routing หรือ publish directory ตอบก่อน และ shutdown drain
+อย่างไร — ทั้งสามจึงตอบเหมือนกัน `RUVYXA_SHUTDOWN_GRACE` จำกัดเวลา drain ทั้งสามตัว ส่วน
+`RUVYXA_KEEP_ALIVE_TIMEOUT` ยก keep-alive window ของ Node ให้สูงกว่า idle window ของ managed proxy —
+ถ้าไม่ตั้ง Node จะปิด idle connection ที่ห้าวินาที แล้ว request ถัดไปของ proxy บน connection นั้นจะพังเป็น 502 —
+และเมื่อตั้งค่าไว้จะจำกัด `idleTimeout` ของ Bun ด้วย (หน่วยวินาที สูงสุด 255) นอกนั้นปล่อย Bun ไว้ที่ default ของมันเอง
+ซึ่งไม่ปิด idle connection เลยและไม่ตัด streamed response ที่ยาว
 
-**Deadline** render ที่ไม่มีวันเสร็จจะถูกเลิกรอหลัง `RUVYXA_RENDER_TIMEOUT` มิลลิวินาที ค่าปริยาย
-30000 — เท่ากับ window ที่ `ruvyxa start` ให้ worker round-trip หนึ่งครั้ง
-โปรเจกต์เดียวกันจึงถูกจำกัดแบบเดียวกันทั้งตอนพัฒนาและตอน build ของตัวเอง คำตอบคือ `503` พร้อม
-`Retry-After` เพราะ render ไม่ได้ล้มเหลว เซิร์ฟเวอร์แค่เลิกรอ และผู้เรียกที่ลองใหม่อาจได้รับบริการ
-สิ่งที่ถูกจำกัดคือการรอ response เท่านั้น ไม่ใช่ body ที่ตามมา — streamed document และ
-server-sent-event stream จึงทำงานได้นานเท่าที่ต้องการเมื่อ header ออกไปแล้ว ตั้ง
-`RUVYXA_RENDER_TIMEOUT=0` เพื่อปิด สำหรับ deployment ที่ render นานกว่านั้นจริง ๆ และรู้ตัว
-ถ้าไม่มีสิ่งนี้ connection หน่วยความจำ และสิ่งที่ render รออยู่ จะถูกถือไว้ตราบเท่าที่ process
-ยังมีชีวิต — route แบบนั้นเพียงตัวเดียวภายใต้ ทราฟฟิกปกติจบลงด้วย out-of-memory kill โดยไม่มีอะไรใน
-log บน Node connection ที่เริ่ม request แล้วส่งไม่จบจะถูกปิดตาม window ของ `RUVYXA_HEADERS_TIMEOUT`
-เพราะ `headersTimeout` ของ Node เองไม่ทำงานกับรูปแบบนี้ ส่วน Bun ปิดเอง และ Deno ไม่มี API ให้ทำ —
-deployment ของ Deno ที่เปิดสู่อินเทอร์เน็ตโดยตรงจึงควรมี reverse proxy ด้านหน้า
+**Deadline** render ที่ไม่มีวันเสร็จจะถูกเลิกรอหลัง `RUVYXA_RENDER_TIMEOUT` มิลลิวินาที ค่าปริยาย 30000 — เท่ากับ
+window ที่ `ruvyxa start` ให้ worker round-trip หนึ่งครั้ง โปรเจกต์เดียวกันจึงถูกจำกัดแบบเดียวกันทั้งตอนพัฒนาและตอน
+build ของตัวเอง คำตอบคือ `503` พร้อม `Retry-After` เพราะ render ไม่ได้ล้มเหลว เซิร์ฟเวอร์แค่เลิกรอ
+และผู้เรียกที่ลองใหม่อาจได้รับบริการ สิ่งที่ถูกจำกัดคือการรอ response เท่านั้น ไม่ใช่ body ที่ตามมา — streamed document และ
+server-sent-event stream จึงทำงานได้นานเท่าที่ต้องการเมื่อ header ออกไปแล้ว ตั้ง `RUVYXA_RENDER_TIMEOUT=0`
+เพื่อปิด สำหรับ deployment ที่ render นานกว่านั้นจริง ๆ และรู้ตัว ถ้าไม่มีสิ่งนี้ connection หน่วยความจำ และสิ่งที่ render
+รออยู่ จะถูกถือไว้ตราบเท่าที่ process ยังมีชีวิต — route แบบนั้นเพียงตัวเดียวภายใต้ ทราฟฟิกปกติจบลงด้วย out-of-memory
+kill โดยไม่มีอะไรใน log บน Node connection ที่เริ่ม request แล้วส่งไม่จบจะถูกปิดตาม window ของ
+`RUVYXA_HEADERS_TIMEOUT` เพราะ `headersTimeout` ของ Node เองไม่ทำงานกับรูปแบบนี้ ส่วน Bun ปิดเอง และ Deno
+ไม่มี API ให้ทำ — deployment ของ Deno ที่เปิดสู่อินเทอร์เน็ตโดยตรงจึงควรมี reverse proxy ด้านหน้า
 
 **Health** `GET /__ruvyxa/health` ตอบ `{"status":"ok","host":"<runtime>"}` พร้อม `no-store` ขณะที่
-process ยังให้บริการ และตอบ `503` พร้อม `{"status":"draining"}` กับ `Retry-After` เมื่อได้รับสัญญาณ
-shutdown แล้ว — orchestrator จึงหยุดส่งทราฟฟิกไปยัง process ที่เริ่มปิดตัวแล้ว
-แทนที่จะส่งงานที่มันกำลังจะปฏิเสธ `HEAD` ตอบ status เดียวกัน endpoint นี้ถูกเสิร์ฟก่อน routing
-และก่อน admission เพราะ probe ที่ต้องเข้าคิวรอ render ที่มันมีหน้าที่รายงาน จะบอกว่า "ไม่แข็งแรง"
-ทั้งที่เซิร์ฟเวอร์แค่ยุ่ง แล้ว orchestrator จะรีสตาร์ตสิ่งที่ยังทำงานได้อยู่ `ruvyxa start` ตอบ path
-เดียวกันแบบเดียวกัน ทั้งสอง host ถูกยึดไว้ด้วย `tests/fixtures/framework-endpoint-conformance.json`
-ส่วน deployment แบบ serverless ไม่มี path นี้ เพราะ liveness ของ function เป็นเรื่องของ platform
-ที่เรียกมัน body มีแค่ status กับชื่อ runtime ไม่มีอย่างอื่น เพราะนี่คือ path
-สาธารณะบนเซิร์ฟเวอร์ที่ deploy แล้ว และจำนวนงานที่ค้างอยู่กับความลึกของคิวคือ load oracle
-สำหรับใครก็ตามที่ยอมถามบ่อยพอ
+process ยังให้บริการ และตอบ `503` พร้อม `{"status":"draining"}` กับ `Retry-After` เมื่อได้รับสัญญาณ shutdown
+แล้ว — orchestrator จึงหยุดส่งทราฟฟิกไปยัง process ที่เริ่มปิดตัวแล้ว แทนที่จะส่งงานที่มันกำลังจะปฏิเสธ `HEAD` ตอบ status
+เดียวกัน endpoint นี้ถูกเสิร์ฟก่อน routing และก่อน admission เพราะ probe ที่ต้องเข้าคิวรอ render ที่มันมีหน้าที่รายงาน
+จะบอกว่า "ไม่แข็งแรง" ทั้งที่เซิร์ฟเวอร์แค่ยุ่ง แล้ว orchestrator จะรีสตาร์ตสิ่งที่ยังทำงานได้อยู่ `ruvyxa start` ตอบ path
+เดียวกันแบบเดียวกัน ทั้งสอง host ถูกยึดไว้ด้วย `tests/fixtures/framework-endpoint-conformance.json` ส่วน
+deployment แบบ serverless ไม่มี path นี้ เพราะ liveness ของ function เป็นเรื่องของ platform ที่เรียกมัน body
+มีแค่ status กับชื่อ runtime ไม่มีอย่างอื่น เพราะนี่คือ path สาธารณะบนเซิร์ฟเวอร์ที่ deploy แล้ว
+และจำนวนงานที่ค้างอยู่กับความลึกของคิวคือ load oracle สำหรับใครก็ตามที่ยอมถามบ่อยพอ
 
-**Draining** คำตอบนั้นจะมีค่าก็ต่อเมื่อยังมีใครไปถึงมันได้ สัญญาณ shutdown จึงไม่ปิด socket ทันที
-process ยัง listen และยังให้บริการตามปกติต่ออีก `RUVYXA_DRAIN_DELAY` มิลลิวินาที — ค่าปริยาย 5000
-และถูกจำกัดไม่ให้เกินครึ่งหนึ่งของ `RUVYXA_SHUTDOWN_GRACE`
-เพื่อให้งานที่ค้างอยู่ยังมีงบเวลาของตัวเอง — แล้วจึงหยุดรับ connection ใหม่และรอ response
-ที่เปิดอยู่จนจบ การปิดทันทีที่ได้รับสัญญาณทำให้ `{"status":"draining"}` เป็นคำตอบที่ไม่มีใครอ่านได้
-เพราะ readiness probe เปิด connection ใหม่แล้วถูก ปฏิเสธ คำตอบเดียวที่บอก load balancer
-ให้เลิกส่งทราฟฟิกมาที่นี่จึงไม่เคยไปถึง และทุก request ที่มันส่งมาระหว่างที่ยัง deregister
-ไม่เสร็จก็พังในเบราว์เซอร์ แทนที่จะถูกลองใหม่กับ instance อื่น ตั้ง `RUVYXA_DRAIN_DELAY=0`
-เมื่อไม่มีอะไร load-balance process นี้ สัญญาณครั้งที่สองออกทันที ผู้ดูแลที่กด Ctrl-C
+**Draining** คำตอบนั้นจะมีค่าก็ต่อเมื่อยังมีใครไปถึงมันได้ สัญญาณ shutdown จึงไม่ปิด socket ทันที process ยัง listen
+และยังให้บริการตามปกติต่ออีก `RUVYXA_DRAIN_DELAY` มิลลิวินาที — ค่าปริยาย 5000 และถูกจำกัดไม่ให้เกินครึ่งหนึ่งของ
+`RUVYXA_SHUTDOWN_GRACE` เพื่อให้งานที่ค้างอยู่ยังมีงบเวลาของตัวเอง — แล้วจึงหยุดรับ connection ใหม่และรอ response
+ที่เปิดอยู่จนจบ การปิดทันทีที่ได้รับสัญญาณทำให้ `{"status":"draining"}` เป็นคำตอบที่ไม่มีใครอ่านได้ เพราะ readiness probe
+เปิด connection ใหม่แล้วถูก ปฏิเสธ คำตอบเดียวที่บอก load balancer ให้เลิกส่งทราฟฟิกมาที่นี่จึงไม่เคยไปถึง และทุก request
+ที่มันส่งมาระหว่างที่ยัง deregister ไม่เสร็จก็พังในเบราว์เซอร์ แทนที่จะถูกลองใหม่กับ instance อื่น ตั้ง
+`RUVYXA_DRAIN_DELAY=0` เมื่อไม่มีอะไร load-balance process นี้ สัญญาณครั้งที่สองออกทันที ผู้ดูแลที่กด Ctrl-C
 สองครั้งจึงไม่ต้องรอ window ที่มีไว้ให้ load balancer
 
-**Logging** ตั้ง `RUVYXA_LOG_FORMAT=json` แล้วทุกบรรทัดที่เซิร์ฟเวอร์เขียนจะเป็น JSON record
-หนึ่งอัน — `{"level","msg",…fields}` — ซึ่งเป็นสิ่งที่ collector ต้องการ และทำให้การ escape
+**Logging** ตั้ง `RUVYXA_LOG_FORMAT=json` แล้วทุกบรรทัดที่เซิร์ฟเวอร์เขียนจะเป็น JSON record หนึ่งอัน —
+`{"level","msg",…fields}` — ซึ่งเป็นสิ่งที่ collector ต้องการ และทำให้การ escape
 เป็นเรื่องเชิงโครงสร้างแทนที่จะเป็นเรื่องที่ต้องจำ เพราะ `JSON.stringify` เขียน newline ดิบไม่ได้
 ค่าปริยายยังเป็นรูปแบบที่คนอ่านได้ `[ruvyxa] msg key=value` โดย escape ค่าเดียวกันด้วยมือ
-ไม่ว่าทางไหนค่าที่ผู้เรียกส่งมาก็เปิดบรรทัดที่สองไม่ได้: query parameter ถูก percent-decode
-ก่อนถึงข้อความ log ดังนั้น `?name=bad%0Ainjected…` บน action endpoint เคยเพิ่ม entry ลงใน log ของ
-deployment ที่ไม่มีใครเขียน บรรทัดบอกความพร้อมยังมีคำว่า `listening on` ในทั้งสองรูปแบบ เพราะ
-supervisor ที่รอบน stdout อ่านบรรทัดนี้อยู่ ส่วน serverless adapter ถูกปล่อยไว้ในรูปแบบของ platform
-ตัวเองและไม่ได้รับผลกระทบ
+ไม่ว่าทางไหนค่าที่ผู้เรียกส่งมาก็เปิดบรรทัดที่สองไม่ได้: query parameter ถูก percent-decode ก่อนถึงข้อความ log ดังนั้น
+`?name=bad%0Ainjected…` บน action endpoint เคยเพิ่ม entry ลงใน log ของ deployment ที่ไม่มีใครเขียน
+บรรทัดบอกความพร้อมยังมีคำว่า `listening on` ในทั้งสองรูปแบบ เพราะ supervisor ที่รอบน stdout อ่านบรรทัดนี้อยู่ ส่วน
+serverless adapter ถูกปล่อยไว้ในรูปแบบของ platform ตัวเองและไม่ได้รับผลกระทบ
 
 **Metrics** `GET /__ruvyxa/metrics` เสิร์ฟ Prometheus text exposition — render concurrency,
-ความลึกของคิว, จำนวนที่ถูกปฏิเสธ, render timeout, uptime — และมีอยู่ก็ต่อเมื่อตั้ง
-`RUVYXA_METRICS_TOKEN` เท่านั้น ถ้าไม่ตั้ง path จะตอบ `404` ไม่ใช่ `401` เพราะ deployment
-ที่ไม่เคยเปิด metrics ไม่ควรประกาศว่ามี endpoint นี้อยู่ เมื่อตั้งแล้ว scrape ต้องส่ง
-`Authorization: Bearer <token>` โดย token ถูกเปรียบเทียบแบบ constant time
-เวลาที่ใช้ปฏิเสธจึงไม่บอกว่าเดา prefix ถูกไปกี่ตัว ตัวเลขชุดนี้คือสิ่งที่ `/__ruvyxa/health`
-จงใจไม่บอก จึงอยู่หลัง token แทนที่จะอยู่ข้าง probe สาธารณะ มีเฉพาะ standalone: `ruvyxa start`
-รับและปฏิเสธงานด้วยกติกาเดียวกัน แต่ไม่ได้ให้บริการ endpoint นี้
+ความลึกของคิว, จำนวนที่ถูกปฏิเสธ, render timeout, uptime — และมีอยู่ก็ต่อเมื่อตั้ง `RUVYXA_METRICS_TOKEN` เท่านั้น
+ถ้าไม่ตั้ง path จะตอบ `404` ไม่ใช่ `401` เพราะ deployment ที่ไม่เคยเปิด metrics ไม่ควรประกาศว่ามี endpoint นี้อยู่
+เมื่อตั้งแล้ว scrape ต้องส่ง `Authorization: Bearer <token>` โดย token ถูกเปรียบเทียบแบบ constant time
+เวลาที่ใช้ปฏิเสธจึงไม่บอกว่าเดา prefix ถูกไปกี่ตัว ตัวเลขชุดนี้คือสิ่งที่ `/__ruvyxa/health` จงใจไม่บอก จึงอยู่หลัง token
+แทนที่จะอยู่ข้าง probe สาธารณะ มีเฉพาะ standalone: `ruvyxa start` รับและปฏิเสธงานด้วยกติกาเดียวกัน แต่ไม่ได้ให้บริการ
+endpoint นี้
 
-**Capacity** render ที่เกินกำลังเครื่องจะถูกปฏิเสธแทนที่จะเริ่มทำ `RUVYXA_MAX_CONCURRENCY`
-คือจำนวนที่รันพร้อมกัน — ค่าปริยายคือส่วนแบ่ง core ของ container จำกัดไว้ระหว่างสองถึงแปด เพราะ
-render ใช้ CPU เป็นหลัก การรับเกินกว่านั้นมีแต่ทำให้ตัวที่กำลังทำอยู่ช้าลง — ส่วน `RUVYXA_MAX_QUEUE`
-คือจำนวนที่รอได้ ค่าปริยายสี่ตัวต่อหนึ่งช่อง เกินจากนั้นผู้เรียกจะได้ `503` พร้อม `Retry-After`
-แทนที่จะถูกพักไว้บนหน่วยความจำที่ process นี้ต้องแบก ถ้าไม่จำกัด
-ทราฟฟิกที่พุ่งเกินกำลังเครื่องจะกลายเป็น heap ที่ถือ render ทุกตัวไว้พร้อมกัน
-และความล้มเหลวไม่ใช่เซิร์ฟเวอร์ช้า แต่เป็น out-of-memory kill ที่ลาก request
-ที่เกือบเสร็จแล้วลงไปด้วย `ruvyxa start` อ่าน variable สองตัวเดียวกันและปฏิเสธด้วยกติกาเดียวกัน
-โปรเจกต์เดียวกันจึงปฏิเสธงานเหมือนกันทั้งใต้ `ruvyxa start` และใต้ build ของตัวเอง ส่วน `ruvyxa dev`
-ปิดไว้เป็นค่าปริยาย เพราะนักพัฒนาคนเดียวกับเบราว์เซอร์หนึ่งตัวไม่ใช่เหตุการณ์โหลด
+**Capacity** render ที่เกินกำลังเครื่องจะถูกปฏิเสธแทนที่จะเริ่มทำ `RUVYXA_MAX_CONCURRENCY` คือจำนวนที่รันพร้อมกัน —
+ค่าปริยายคือส่วนแบ่ง core ของ container จำกัดไว้ระหว่างสองถึงแปด เพราะ render ใช้ CPU เป็นหลัก
+การรับเกินกว่านั้นมีแต่ทำให้ตัวที่กำลังทำอยู่ช้าลง — ส่วน `RUVYXA_MAX_QUEUE` คือจำนวนที่รอได้ ค่าปริยายสี่ตัวต่อหนึ่งช่อง
+เกินจากนั้นผู้เรียกจะได้ `503` พร้อม `Retry-After` แทนที่จะถูกพักไว้บนหน่วยความจำที่ process นี้ต้องแบก ถ้าไม่จำกัด
+ทราฟฟิกที่พุ่งเกินกำลังเครื่องจะกลายเป็น heap ที่ถือ render ทุกตัวไว้พร้อมกัน และความล้มเหลวไม่ใช่เซิร์ฟเวอร์ช้า แต่เป็น
+out-of-memory kill ที่ลาก request ที่เกือบเสร็จแล้วลงไปด้วย `ruvyxa start` อ่าน variable
+สองตัวเดียวกันและปฏิเสธด้วยกติกาเดียวกัน โปรเจกต์เดียวกันจึงปฏิเสธงานเหมือนกันทั้งใต้ `ruvyxa start` และใต้ build
+ของตัวเอง ส่วน `ruvyxa dev` ปิดไว้เป็นค่าปริยาย เพราะนักพัฒนาคนเดียวกับเบราว์เซอร์หนึ่งตัวไม่ใช่เหตุการณ์โหลด
 
-ช่องจะถูกถือไว้จนกว่า **response** จะเกิดขึ้น ไม่ใช่จนกว่า body จะจบ streamed document และ
-server-sent-event stream จึงกินช่องแค่ระดับมิลลิวินาที ไม่ใช่ตลอดอายุของมัน — stream
-พร้อมกันร้อยตัวบนค่าปริยายถูกเสิร์ฟครบ ส่วนไฟล์ static ไม่เข้าสู่ admission เลย
-หน้าเว็บที่กำลังพังจึงไม่ลาก stylesheet ของตัวเองลงไปด้วย ตั้ง `RUVYXA_MAX_CONCURRENCY=0` เพื่อปิด
-admission สำหรับ deployment ที่มีอย่างอื่นด้านหน้าทำหน้าที่นี้อยู่แล้ว
+ช่องจะถูกถือไว้จนกว่า **response** จะเกิดขึ้น ไม่ใช่จนกว่า body จะจบ streamed document และ server-sent-event
+stream จึงกินช่องแค่ระดับมิลลิวินาที ไม่ใช่ตลอดอายุของมัน — stream พร้อมกันร้อยตัวบนค่าปริยายถูกเสิร์ฟครบ ส่วนไฟล์ static
+ไม่เข้าสู่ admission เลย หน้าเว็บที่กำลังพังจึงไม่ลาก stylesheet ของตัวเองลงไปด้วย ตั้ง `RUVYXA_MAX_CONCURRENCY=0`
+เพื่อปิด admission สำหรับ deployment ที่มีอย่างอื่นด้านหน้าทำหน้าที่นี้อยู่แล้ว
 
-**Compression** ทั้งสามตัวบีบอัด response ที่เป็น text — document, JSON, JavaScript, CSS, SVG — ด้วย
-gzip เมื่อ client รับได้ และประกาศ `Vary: Accept-Encoding` บนทุก response ที่บีบอัดได้ เพื่อให้
-shared cache แยก key ได้ถูก ประเภทที่บีบอัดมาแล้ว (รูป วิดีโอ ฟอนต์) ถูกปล่อยไว้เหมือนเดิม
-เช่นเดียวกับ byte range ซึ่ง offset ของมันอ้างถึง byte ที่ยังไม่ถูก encode ตั้ง
-`RUVYXA_COMPRESSION=0` เมื่อมี proxy หรือ CDN ด้านหน้าบีบอัดอยู่แล้ว การบีบอัดซ้ำเปลืองแต่ CPU
+**Compression** ทั้งสามตัวบีบอัด response ที่เป็น text — document, JSON, JavaScript, CSS, SVG — ด้วย gzip เมื่อ
+client รับได้ และประกาศ `Vary: Accept-Encoding` บนทุก response ที่บีบอัดได้ เพื่อให้ shared cache แยก key ได้ถูก
+ประเภทที่บีบอัดมาแล้ว (รูป วิดีโอ ฟอนต์) ถูกปล่อยไว้เหมือนเดิม เช่นเดียวกับ byte range ซึ่ง offset ของมันอ้างถึง byte
+ที่ยังไม่ถูก encode ตั้ง `RUVYXA_COMPRESSION=0` เมื่อมี proxy หรือ CDN ด้านหน้าบีบอัดอยู่แล้ว การบีบอัดซ้ำเปลืองแต่ CPU
 ของเครื่องที่เล็กกว่า การเจรจา encoding ถือว่า `q=0` คือการปฏิเสธ ตรงกับ `ruvyxa start` ส่วน brotli
-ตั้งใจไม่รองรับที่นี่ เพราะไม่มี format ของ `CompressionStream` การรองรับจะทำให้ runtime
-ตัวหนึ่งบีบอัดได้ดีกว่าอีกสองตัว สำหรับ build เดียวกัน
+ตั้งใจไม่รองรับที่นี่ เพราะไม่มี format ของ `CompressionStream` การรองรับจะทำให้ runtime ตัวหนึ่งบีบอัดได้ดีกว่าอีกสองตัว
+สำหรับ build เดียวกัน
 
 ## Static hosting: publish เฉพาะ static output
 
@@ -200,34 +183,31 @@ shared cache แยก key ได้ถูก ประเภทที่บี�
 npm run build -- --target static
 ```
 
-publish folder ปริยายคือ `<outDir>/static/` factory `static` รับเฉพาะ relative directory ที่ไม่ว่าง
-และไม่ทับ protected build folder เนื่องจาก `static` เป็น reserved word เมื่อเรียก function โดยตรง
-ให้ import ด้วย alias เช่น `staticOutput` แล้วเรียก `staticOutput({ outputDir })` ให้ publish folder
-นั้น `_headers` ถูกสร้างสำหรับ host ที่อ่านไฟล์นี้เท่านั้น — Netlify และ Cloudflare Pages บน host
-อื่นไฟล์นี้ไม่มีผล และเนื่องจากทุกหน้าที่ adapter นี้สร้างเป็นเอกสาร pre-render ที่ CDN เป็นคนเสิร์ฟ
-จึงไม่มีที่อื่นให้ security header มาจากได้อีก: static deployment บน GitHub Pages หรือ S3 จะไม่มี
-header เหล่านั้นเลย เว้นแต่คุณตั้งค่าไว้ที่ CDN หรือ bucket เอง หาก build ปฏิเสธ route ให้คง route
-เป็น static/CSR หรือเลือก server-capable adapter—อย่า publish static build ที่ทำ SSR/API behavior
-ของคุณไม่ได้
+publish folder ปริยายคือ `<outDir>/static/` factory `static` รับเฉพาะ relative directory ที่ไม่ว่าง และไม่ทับ
+protected build folder เนื่องจาก `static` เป็น reserved word เมื่อเรียก function โดยตรง ให้ import ด้วย
+alias เช่น `staticOutput` แล้วเรียก `staticOutput({ outputDir })` ให้ publish folder นั้น `_headers`
+ถูกสร้างสำหรับ host ที่อ่านไฟล์นี้เท่านั้น — Netlify และ Cloudflare Pages บน host อื่นไฟล์นี้ไม่มีผล และเนื่องจากทุกหน้าที่
+adapter นี้สร้างเป็นเอกสาร pre-render ที่ CDN เป็นคนเสิร์ฟ จึงไม่มีที่อื่นให้ security header มาจากได้อีก: static
+deployment บน GitHub Pages หรือ S3 จะไม่มี header เหล่านั้นเลย เว้นแต่คุณตั้งค่าไว้ที่ CDN หรือ bucket เอง หาก build
+ปฏิเสธ route ให้คง route เป็น static/CSR หรือเลือก server-capable adapter—อย่า publish static build ที่ทำ
+SSR/API behavior ของคุณไม่ได้
 
 ## Vercel, Netlify และ Cloudflare
 
-| Platform   | Artifact ที่แน่นอน                                                                 | รายละเอียดเชิงปฏิบัติการ                                                                                                                                                                                                                                                                                                                |
-| ---------- | ---------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Vercel     | `<outDir>/deploy/vercel/.vercel/output/`; project-root `.vercel/output/` โดยปริยาย | มี static file, `__ruvyxa_handler.func`, function config และ route config serverless เป็น default; `vercel({ edge: true })` เลือก edge output                                                                                                                                                                                           |
-| Netlify    | `<outDir>/deploy/netlify/` พร้อม project-root `netlify.toml` โดยปริยาย             | ISR/PPR ไม่อยู่ใน static publish เพื่อให้ request ไป function และ revalidate ได้ root `netlify.toml` เขียนครั้งเดียวและไม่เขียนทับไฟล์เดิม — Netlify ไม่มีช่องทางอื่นที่จะรู้ publish directory `projectConfig: false` เปลี่ยนไปใช้ `.netlify/v1/` Frameworks API แทน สองอย่างเป็นทางเลือก เพราะส่งทั้งคู่จะได้ function สองตัวที่ `/*` |
-| Cloudflare | `<outDir>/deploy/cloudflare/worker`, `assets/` และ `wrangler.jsonc`                | Worker จัดการ dynamic traffic และ assets binding serve static file ใช้ `wrangler deploy -c .ruvyxa/deploy/cloudflare/wrangler.jsonc` `projectConfig: true` เขียน root config เฉพาะเมื่อไม่มีไฟล์                                                                                                                                        |
+| Platform   | Artifact ที่แน่นอน                                                                   | รายละเอียดเชิงปฏิบัติการ                                                                                                                                                                                                                                                                             |
+| ---------- | --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Vercel     | `<outDir>/deploy/vercel/.vercel/output/`; project-root `.vercel/output/` โดยปริยาย | มี static file, `__ruvyxa_handler.func`, function config และ route config serverless เป็น default; `vercel({ edge: true })` เลือก edge output                                                                                                                                                      |
+| Netlify    | `<outDir>/deploy/netlify/` พร้อม project-root `netlify.toml` โดยปริยาย              | ISR/PPR ไม่อยู่ใน static publish เพื่อให้ request ไป function และ revalidate ได้ root `netlify.toml` เขียนครั้งเดียวและไม่เขียนทับไฟล์เดิม — Netlify ไม่มีช่องทางอื่นที่จะรู้ publish directory `projectConfig: false` เปลี่ยนไปใช้ `.netlify/v1/` Frameworks API แทน สองอย่างเป็นทางเลือก เพราะส่งทั้งคู่จะได้ function สองตัวที่ `/*` |
+| Cloudflare | `<outDir>/deploy/cloudflare/worker`, `assets/` และ `wrangler.jsonc`               | Worker จัดการ dynamic traffic และ assets binding serve static file ใช้ `wrangler deploy -c .ruvyxa/deploy/cloudflare/wrangler.jsonc` `projectConfig: true` เขียน root config เฉพาะเมื่อไม่มีไฟล์                                                                                                        |
 
-ให้ส่ง private environment value ผ่าน secret mechanism ของ host เหล่านี้ อย่า publish deploy
-directory เป็น generic static site: provider config ที่สร้างคือสิ่งที่ route dynamic traffic ไป
-runtime
+ให้ส่ง private environment value ผ่าน secret mechanism ของ host เหล่านี้ อย่า publish deploy directory เป็น
+generic static site: provider config ที่สร้างคือสิ่งที่ route dynamic traffic ไป runtime
 
 ### ISR และ PPR บน Cloudflare
 
-Worker ไม่มี filesystem เอกสารที่ revalidate แล้วจึงต้องเก็บใน Workers KV ระบุชื่อ binding แล้ว
-adapter จะได้ทั้งสอง strategy ถ้าไม่ระบุ มันจะประกาศว่าไม่รองรับทั้งคู่
-โปรเจกต์ที่ใช้อย่างใดอย่างหนึ่ง จึงถูกปฏิเสธตั้งแต่ build ด้วย `RUV2202` แทนที่จะถูก deploy ไปเป็น
-Worker ที่เรนเดอร์ใหม่ทุก request แล้วรายงานว่า cache hit
+Worker ไม่มี filesystem เอกสารที่ revalidate แล้วจึงต้องเก็บใน Workers KV ระบุชื่อ binding แล้ว adapter
+จะได้ทั้งสอง strategy ถ้าไม่ระบุ มันจะประกาศว่าไม่รองรับทั้งคู่ โปรเจกต์ที่ใช้อย่างใดอย่างหนึ่ง จึงถูกปฏิเสธตั้งแต่ build ด้วย
+`RUV2202` แทนที่จะถูก deploy ไปเป็น Worker ที่เรนเดอร์ใหม่ทุก request แล้วรายงานว่า cache hit
 
 ```ts
 import { cloudflare } from '@ruvyxa/adapter-cloudflare'
@@ -241,89 +221,81 @@ export default config({ adapter: cloudflare({ isr: { kvBinding: 'RUVYXA_ISR' } }
 
 ### On-demand revalidation บน Vercel
 
-route แบบ ISR บน Vercel ถูกเสิร์ฟด้วย Prerender Function ซึ่ง cache อยู่ "หน้า" function
-ไม่ใช่ข้างใน `revalidatePath()` จึงต้องยิงถึง CDN และ Vercel รับ credential เดียวสำหรับเรื่องนี้คือ
-prerender bypass token ที่ adapter เขียนลงใน `<route>.prerender-config.json` แต่ละไฟล์ และลงใน
-function ที่ส่ง token กลับไป
+route แบบ ISR บน Vercel ถูกเสิร์ฟด้วย Prerender Function ซึ่ง cache อยู่ "หน้า" function ไม่ใช่ข้างใน
+`revalidatePath()` จึงต้องยิงถึง CDN และ Vercel รับ credential เดียวสำหรับเรื่องนี้คือ prerender bypass token ที่
+adapter เขียนลงใน `<route>.prerender-config.json` แต่ละไฟล์ และลงใน function ที่ส่ง token กลับไป
 
-ตั้ง `RUVYXA_PREVIEW_SECRET` ใน build environment adapter จะ hash ค่านั้นเป็น token
-ตัวค่าจริงจึงไม่เคย ไปโผล่ใน output ที่ deploy draft mode อ่านตัวแปรเดียวกันตอนรับ request
-เพื่อลงลายเซ็นและตรวจ cookie ของมัน project ที่ใช้ `draftMode()` จึงต้องตั้งค่านี้ใน runtime
-environment ด้วย ดูหัวข้อ "เปิด draft mode" ใน
+ตั้ง `RUVYXA_PREVIEW_SECRET` ใน build environment adapter จะ hash ค่านั้นเป็น token ตัวค่าจริงจึงไม่เคย ไปโผล่ใน
+output ที่ deploy draft mode อ่านตัวแปรเดียวกันตอนรับ request เพื่อลงลายเซ็นและตรวจ cookie ของมัน project ที่ใช้
+`draftMode()` จึงต้องตั้งค่านี้ใน runtime environment ด้วย ดูหัวข้อ "เปิด draft mode" ใน
 [ข้อมูล, action และ API route](05-data-actions-api.md)
 
-ถ้าไม่ตั้ง token จะ derive จาก build id ซึ่งทำให้ `ruvyxa build` ยัง reproducible แต่ก็แปลว่า token
-เป็น ฟังก์ชันของสิ่งที่ build เปิดเผยอยู่แล้ว ทั้งชื่อ asset, path ของเอกสาร และตาราง route
-ให้ถือว่าค่า default นี้ สะดวกสำหรับ preview deployment ไม่ใช่ความลับ ใครถือ token ก็สั่งข้าม CDN
-cache ได้ทุก request
+ถ้าไม่ตั้ง token จะ derive จาก build id ซึ่งทำให้ `ruvyxa build` ยัง reproducible แต่ก็แปลว่า token เป็น
+ฟังก์ชันของสิ่งที่ build เปิดเผยอยู่แล้ว ทั้งชื่อ asset, path ของเอกสาร และตาราง route ให้ถือว่าค่า default นี้
+สะดวกสำหรับ preview deployment ไม่ใช่ความลับ ใครถือ token ก็สั่งข้าม CDN cache ได้ทุก request
 
 ### Edge Function ต่อ route บน Vercel
 
-route ที่ประกาศ `export const runtime = 'edge'` จะรันบน Node เหมือน route อื่นถ้าไม่ได้สั่งให้
-adapter ไปวาง เพราะ Node ตอบ edge route ได้ถูกต้อง — การประกาศเป็นการ*จำกัด*สิ่งที่ route ทำได้
-ไม่ใช่การเปลี่ยนว่าใครตอบได้ เปิด `splitEdgeRoutes` เมื่อ latency ของ route นั้นต้องการ point of
-presence จริงๆ ไม่ใช่แค่ region:
+route ที่ประกาศ `export const runtime = 'edge'` จะรันบน Node เหมือน route อื่นถ้าไม่ได้สั่งให้ adapter ไปวาง
+เพราะ Node ตอบ edge route ได้ถูกต้อง — การประกาศเป็นการ*จำกัด*สิ่งที่ route ทำได้ ไม่ใช่การเปลี่ยนว่าใครตอบได้ เปิด
+`splitEdgeRoutes` เมื่อ latency ของ route นั้นต้องการ point of presence จริงๆ ไม่ใช่แค่ region:
 
 ```ts
 export default config({ adapter: vercel({ splitEdgeRoutes: true }) })
 ```
 
-ตัว build จะสร้างฟังก์ชันที่สอง `__ruvyxa_edge.func` ซึ่ง `.vc-config.json` ระบุ edge runtime และ
-registry ที่คอมไพล์ไว้มีเฉพาะ route เหล่านั้น ส่วน Build Output config จะส่ง path ของมัน
-ไปที่ฟังก์ชันนี้ก่อน catch-all ที่เหลือยังไปที่ฟังก์ชัน Node เหมือนเดิม
+ตัว build จะสร้างฟังก์ชันที่สอง `__ruvyxa_edge.func` ซึ่ง `.vc-config.json` ระบุ edge runtime และ registry
+ที่คอมไพล์ไว้มีเฉพาะ route เหล่านั้น ส่วน Build Output config จะส่ง path ของมัน ไปที่ฟังก์ชันนี้ก่อน catch-all
+ที่เหลือยังไปที่ฟังก์ชัน Node เหมือนเดิม
 
-route จะผ่านเกณฑ์เมื่อไม่ต้องพึ่งสิ่งที่เฟรมเวิร์กเก็บไว้ที่เดียว server component และ server action
-ตอบผ่าน `/__ruvyxa/rsc`, `/__ruvyxa/flight` และ `/__ruvyxa/action` ซึ่งเป็น path
-เดี่ยวที่ฟังก์ชันเดียวเป็นเจ้าของ ส่วน ISR และ PPR ต้องการที่เก็บที่เขียนได้ซึ่งฟังก์ชัน edge ไม่มี
-route ที่ประกาศ `edge` แล้วต้องใช้อย่างใดอย่างหนึ่งจะถูกปฏิเสธพร้อมระบุชื่อด้วย `RUV2203`
-แทนที่จะถูกทิ้งไว้บน Node เงียบๆ — เพราะการถูกเมินเงียบๆ คือวิธีที่การตัดสินใจเรื่อง latency
-เลิกเป็นจริงโดยไม่มีใครรู้
+route จะผ่านเกณฑ์เมื่อไม่ต้องพึ่งสิ่งที่เฟรมเวิร์กเก็บไว้ที่เดียว server component และ server action ตอบผ่าน
+`/__ruvyxa/rsc`, `/__ruvyxa/flight` และ `/__ruvyxa/action` ซึ่งเป็น path เดี่ยวที่ฟังก์ชันเดียวเป็นเจ้าของ ส่วน
+ISR และ PPR ต้องการที่เก็บที่เขียนได้ซึ่งฟังก์ชัน edge ไม่มี route ที่ประกาศ `edge`
+แล้วต้องใช้อย่างใดอย่างหนึ่งจะถูกปฏิเสธพร้อมระบุชื่อด้วย `RUV2203` แทนที่จะถูกทิ้งไว้บน Node เงียบๆ — เพราะการถูกเมินเงียบๆ
+คือวิธีที่การตัดสินใจเรื่อง latency เลิกเป็นจริงโดยไม่มีใครรู้
 
-ฟังก์ชัน Node ยังคงถือทุก route รวมถึงตัวที่เป็น edge ด้วย เพราะมันคือ catch-all และ pattern ของ
-path ไม่ใช่ตัว router — `/edge/` ที่มี trailing slash ไม่แมตช์ `^/edge$`
-การถือไว้ทั้งสองที่แปลว่าคำขอแบบนั้น จะได้หน้าที่ถูกต้องจาก runtime ที่ผิด ดีกว่าได้ 404 จาก runtime
-ที่ถูก
+ฟังก์ชัน Node ยังคงถือทุก route รวมถึงตัวที่เป็น edge ด้วย เพราะมันคือ catch-all และ pattern ของ path ไม่ใช่ตัว
+router — `/edge/` ที่มี trailing slash ไม่แมตช์ `^/edge$` การถือไว้ทั้งสองที่แปลว่าคำขอแบบนั้น จะได้หน้าที่ถูกต้องจาก
+runtime ที่ผิด ดีกว่าได้ 404 จาก runtime ที่ถูก
 
 ## Railway และ Render
 
 `railway()` เขียน root `railway.json` โดยปริยาย; `render()` เขียน root `render.yaml` โดยปริยาย
-ทั้งคู่ไม่เขียนทับ user-maintained file configuration ที่สร้างใช้ `npm run build` และเริ่ม handler
-เหล่านี้:
+ทั้งคู่ไม่เขียนทับ user-maintained file configuration ที่สร้างใช้ `npm run build` และเริ่ม handler เหล่านี้:
 
 ```text
 node .ruvyxa/deploy/railway/server/index.mjs
 node .ruvyxa/deploy/render/server/index.mjs
 ```
 
-Railway config ที่สร้างใช้ Railpack และ `ON_FAILURE` ที่มี 10 retry Render Blueprint ตรึง Node
-ไว้ที่เมเจอร์ที่ framework ระบุไว้ใน `engines.node` ทำให้ Render เลือก patch ใหม่สุดในเมเจอร์นั้น
-handler ทั้งคู่ bind `0.0.0.0` และอ่าน `PORT` หากคุณดูแล provider file เอง ให้ใช้
-`projectConfig: false` และคง build/start relationship เดียวกัน
+Railway config ที่สร้างใช้ Railpack และ `ON_FAILURE` ที่มี 10 retry Render Blueprint ตรึง Node ไว้ที่เมเจอร์ที่
+framework ระบุไว้ใน `engines.node` ทำให้ Render เลือก patch ใหม่สุดในเมเจอร์นั้น handler ทั้งคู่ bind `0.0.0.0`
+และอ่าน `PORT` หากคุณดูแล provider file เอง ให้ใช้ `projectConfig: false` และคง build/start relationship
+เดียวกัน
 
 ## Firebase และ AWS Amplify Hosting
 
 `firebase()` สร้าง `<outDir>/deploy/firebase/public`, Functions bundle, function `package.json` และ
-`firebase.json`; root `firebase.json` ถูกสร้างโดยปริยายแต่ไม่เขียนทับ README ที่ adapter สร้างให้
-handoff command ที่ยืนยันแล้ว:
+`firebase.json`; root `firebase.json` ถูกสร้างโดยปริยายแต่ไม่เขียนทับ README ที่ adapter สร้างให้ handoff
+command ที่ยืนยันแล้ว:
 
 ```bash
 npm run build -- --adapter firebase
 firebase deploy --only hosting,functions
 ```
 
-`aws()` เขียน Amplify `.amplify-hosting/` static-plus-compute bundle โดยปริยายที่ project root
-และใต้ `<outDir>/deploy/aws/` deploy manifest route static asset ไป static hosting และ dynamic
-traffic ไป compute resource `default` compute runtime ปริยายคือ `nodejs24.x`; ค่า `nodejs20.x` และ
-`nodejs22.x` เก่ายังคงใช้ได้เมื่อกำหนด compatibility override โดยตรง ตั้ง `projectOutput: false`
-เฉพาะเมื่อ build system อื่นเก็บ deploy artifact
+`aws()` เขียน Amplify `.amplify-hosting/` static-plus-compute bundle โดยปริยายที่ project root และใต้
+`<outDir>/deploy/aws/` deploy manifest route static asset ไป static hosting และ dynamic traffic ไป
+compute resource `default` compute runtime ปริยายคือ `nodejs24.x`; ค่า `nodejs20.x` และ `nodejs22.x`
+เก่ายังคงใช้ได้เมื่อกำหนด compatibility override โดยตรง ตั้ง `projectOutput: false` เฉพาะเมื่อ build system
+อื่นเก็บ deploy artifact
 
 ## เขียน adapter สำหรับ platform ที่ Ruvyxa ไม่ได้ ship มาให้
 
-adapter คือ factory ที่คืน object ซึ่งมี `name`, `target`, `supports` (ไม่บังคับ) และ `build(ctx)`
-ที่คืน `AdapterOutput` กลไกนี้ไม่ได้สงวนไว้ให้เฉพาะ adapter ใน repository นี้:
-`ruvyxa build --adapter <package>` จะ resolve `@ruvyxa/adapter-<name>`, `ruvyxa-adapter-<name>`
-และชื่อ package ตรง ๆ ตามลำดับ ดังนั้นแค่ publish `ruvyxa-adapter-flyio` ก็ทำให้ `--adapter flyio`
-ใช้งานได้
+adapter คือ factory ที่คืน object ซึ่งมี `name`, `target`, `supports` (ไม่บังคับ) และ `build(ctx)` ที่คืน
+`AdapterOutput` กลไกนี้ไม่ได้สงวนไว้ให้เฉพาะ adapter ใน repository นี้: `ruvyxa build --adapter <package>`
+จะ resolve `@ruvyxa/adapter-<name>`, `ruvyxa-adapter-<name>` และชื่อ package ตรง ๆ ตามลำดับ ดังนั้นแค่
+publish `ruvyxa-adapter-flyio` ก็ทำให้ `--adapter flyio` ใช้งานได้
 
 ```ts
 import type { Adapter, BuildContext } from '@ruvyxa/core'
@@ -378,19 +350,18 @@ export default function flyio(options: FlyAdapterOptions = {}): Adapter {
 กติกาสี่ข้อที่ runner บังคับ และอีกหนึ่งข้อที่ควรทำ:
 
 - **รับ options object ก้อนเดียวและใส่ค่า default ให้ทุก field** factory จะถูกเรียกด้วย
-  `config.adapterOptions` เมื่อ adapter ถูกเลือกด้วยชื่อ และด้วย `{}` เมื่อไม่ได้เลือกแบบนั้น option
-  ที่ factory ปฏิเสธจะทำให้ build ล้มเหลวพร้อมข้อความของคุณเอง ซึ่งเป็นที่ที่ validation ควรอยู่
+  `config.adapterOptions` เมื่อ adapter ถูกเลือกด้วยชื่อ และด้วย `{}` เมื่อไม่ได้เลือกแบบนั้น option ที่ factory
+  ปฏิเสธจะทำให้ build ล้มเหลวพร้อมข้อความของคุณเอง ซึ่งเป็นที่ที่ validation ควรอยู่
 - **`platform` เป็น string อะไรก็ได้** ชื่อข้างบน autocomplete ได้ ส่วน platform ที่ package
   นี้ไม่เคยรู้จักก็เขียนลงไปตรง ๆ
-- **`scope: 'project'` เขียน "ข้าง ๆ" project ไม่ใช่ "ทับ"** path ที่ resolve ออกนอก project root
-  หรือทับ source directory, manifest, lockfile, `tsconfig.json`, `ruvyxa.config.*` หรือ
-  `appDir`/`outDir` ที่ตั้งไว้ จะถูกปฏิเสธด้วย `RUV2200` ที่เหลือใน project root เป็นของคุณ —
-  ซึ่งเป็นที่ที่ platform มองหาไฟล์ config ของมัน ใช้คู่กับ `skipIfExists: true` เพื่อให้ไฟล์ที่
-  user เขียนเองชนะเสมอ
+- **`scope: 'project'` เขียน "ข้าง ๆ" project ไม่ใช่ "ทับ"** path ที่ resolve ออกนอก project root หรือทับ
+  source directory, manifest, lockfile, `tsconfig.json`, `ruvyxa.config.*` หรือ `appDir`/`outDir`
+  ที่ตั้งไว้ จะถูกปฏิเสธด้วย `RUV2200` ที่เหลือใน project root เป็นของคุณ — ซึ่งเป็นที่ที่ platform มองหาไฟล์ config
+  ของมัน ใช้คู่กับ `skipIfExists: true` เพื่อให้ไฟล์ที่ user เขียนเองชนะเสมอ
 - **ประกาศ `supports` ตามจริง** runner จะ validate ทุก route เทียบกับรายการนี้ และปฏิเสธ route
   ที่ไม่รองรับพร้อมระบุชื่อ (`RUV2202`) แทนที่จะปล่อยให้ deployment 404 ตอน runtime
-- **ใช้ `standaloneServerSource` ซ้ำ เว้นแต่ platform ต้องการ signature ของตัวเอง** มันคือ server
-  ที่ CI รันจริงบน Node, Bun และ Deno ส่วน wrapper ที่เขียนเองคือโค้ดที่มีแต่ test ของคุณครอบคลุม
+- **ใช้ `standaloneServerSource` ซ้ำ เว้นแต่ platform ต้องการ signature ของตัวเอง** มันคือ server ที่ CI
+  รันจริงบน Node, Bun และ Deno ส่วน wrapper ที่เขียนเองคือโค้ดที่มีแต่ test ของคุณครอบคลุม
 
 ตรวจผลลัพธ์โดยไม่ต้อง deploy:
 
@@ -403,10 +374,10 @@ ruvyxa build --adapter ruvyxa-adapter-flyio
 - deploy adapter artifact ไม่ใช่ raw application source file
 - ให้ private environment value ตอน build/runtime ตามที่ app ต้องใช้
 - ตั้ง provider health probe ไป application route ที่คุณ implement
-- review `netlify.toml`, `wrangler.jsonc`, `railway.json`, `render.yaml` และ `firebase.json`
-  ที่มีอยู่; adapter ตั้งใจ preserve
-- รัน [Release-readiness playbook](19-release-readiness-playbook.md) แล้ว probe static, dynamic,
-  API, authenticated และ error route แยกกันหลัง deploy
+- review `netlify.toml`, `wrangler.jsonc`, `railway.json`, `render.yaml` และ `firebase.json` ที่มีอยู่;
+  adapter ตั้งใจ preserve
+- รัน [Release-readiness playbook](19-release-readiness-playbook.md) แล้ว probe static, dynamic, API,
+  authenticated และ error route แยกกันหลัง deploy
 
 **ก่อนหน้า:** [Release-readiness playbook](19-release-readiness-playbook.md) · **ถัดไป:**
 [Practical recipes](21-practical-recipes.md)

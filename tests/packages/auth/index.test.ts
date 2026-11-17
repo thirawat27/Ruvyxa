@@ -765,6 +765,95 @@ describe('@ruvyxa/auth', () => {
     }
   })
 
+  it('never stores a protocol-relative returnTo, even before the callback re-checks it', async () => {
+    // A dot segment in front of two slashes keeps the origin on resolution and
+    // leaves the path "//evil.com", which a browser reads as another host. The
+    // callback sanitizes again, so this is held at the first pass: the value
+    // written to the store is what any other reader of it would trust.
+    const written: string[] = []
+    const store = memoryAuthStore({ development: true })
+    const recording = {
+      ...store,
+      set: async (key: string, value: string, ttl: number) => {
+        written.push(value)
+        return store.set(key, value, ttl)
+      },
+    }
+    const auth = runtime({
+      store: recording,
+      providers: {
+        example: {
+          type: 'oauth',
+          id: 'example',
+          authorizationUrl: 'https://provider.example/authorize',
+          tokenUrl: 'https://provider.example/token',
+          userInfoUrl: 'https://provider.example/me',
+          clientId: 'client-id',
+          scopes: ['openid'],
+          mapProfile: () => ({ id: 'oauth-user' }),
+        },
+      },
+    })
+    for (const payload of ['/.//evil.com', '/..//evil.com', '/%2e//evil.com', '/./\\evil.com']) {
+      written.length = 0
+      await auth.handle(
+        new Request(
+          `${origin}/__ruvyxa/auth/oauth/example/start?returnTo=${encodeURIComponent(payload)}`,
+          { headers: { 'user-agent': 'oauth-return-test' } },
+        ),
+      )
+      const stored = written.map((value) => JSON.parse(value) as { returnTo?: string })
+      assert.deepEqual(
+        stored.map((value) => value.returnTo),
+        ['/'],
+        `${payload} was stored as a redirect target`,
+      )
+    }
+  })
+
+  it('refuses a provider response past the size cap instead of buffering it', async () => {
+    // Valid JSON, so only the cap can be what refuses it: the body used to be
+    // read with \`response.json()\`, after the deadline had already been cleared.
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      if (String(input) === 'https://provider.example/token') {
+        return Response.json({ access_token: 'provider-secret-token', token_type: 'Bearer' })
+      }
+      return Response.json({ sub: 'oauth-1', pad: 'x'.repeat(2 * 1024 * 1024) })
+    }) as typeof fetch
+    try {
+      const auth = runtime({
+        providers: {
+          example: {
+            type: 'oauth',
+            id: 'example',
+            authorizationUrl: 'https://provider.example/authorize',
+            tokenUrl: 'https://provider.example/token',
+            userInfoUrl: 'https://provider.example/me',
+            clientId: 'client-id',
+            scopes: ['openid'],
+            mapProfile: (profile: unknown) => ({ id: (profile as { sub: string }).sub }),
+          },
+        },
+      })
+      const start = await auth.handle(
+        new Request(`${origin}/__ruvyxa/auth/oauth/example/start`, {
+          headers: { 'user-agent': 'oauth-size-test' },
+        }),
+      )
+      const state = new URL(start?.headers.get('location') ?? '').searchParams.get('state')!
+      const stateCookie = start?.headers.get('set-cookie')?.split(';')[0]
+      const completed = await auth.handle(
+        new Request(`${origin}/__ruvyxa/auth/oauth/example/callback?code=one&state=${state}`, {
+          headers: { cookie: stateCookie! },
+        }),
+      )
+      assert.equal(completed?.status, 502)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   it('binds OAuth state to the initiating browser and protects PKCE parameters', async () => {
     const provider = {
       type: 'oauth' as const,

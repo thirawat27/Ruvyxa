@@ -13,7 +13,7 @@ base64.workspace = true
 # Already compiled as part of tower-http's compression features; declaring them
 # directly adds no crate to the build and lets the render cache keep the encoded
 # copy of a page instead of re-encoding identical bytes on every cache hit.
-brotli = "9.1.1"
+brotli = "9.1.3"
 flate2 = "1.1.11"
 # Already in the tree via tower-http. Lets a large public asset reach the socket
 # as a stream instead of being read into memory in full before the first byte

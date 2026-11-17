@@ -2,19 +2,18 @@
 
 ## เรียนรู้ Ruvyxa แบบ tutorial
 
-เริ่มที่บท 1 และให้แอปขนาดเล็กหนึ่งตัวรันอยู่ตลอดขณะเรียนบท 2–7 ทุกบทจะบอกเป้าหมาย
-บทก่อนหน้าที่ควรอ่าน และ checkpoint ที่ต้องทำให้ครบก่อนกดลิงก์ **ถัดไป** บท 8–21 เป็น tutorial
-เฉพาะเรื่องและ reference ที่กลับมาใช้ได้เมื่อแอปของคุณเติบโตขึ้น
+เริ่มที่บท 1 และให้แอปขนาดเล็กหนึ่งตัวรันอยู่ตลอดขณะเรียนบท 2–7 ทุกบทจะบอกเป้าหมาย บทก่อนหน้าที่ควรอ่าน และ checkpoint
+ที่ต้องทำให้ครบก่อนกดลิงก์ **ถัดไป** บท 8–21 เป็น tutorial เฉพาะเรื่องและ reference
+ที่กลับมาใช้ได้เมื่อแอปของคุณเติบโตขึ้น
 
-Ruvyxa คือ Web framework ที่ให้ CLI, pipeline สำหรับ route/build ที่เขียนด้วย Rust และ runtime
-TypeScript ทำงานร่วมกันเพื่อค้นหา route ใน `app/`, compile และ serve หรือจัดแพ็กเกจผลลัพธ์
-คู่มือนี้อธิบายพฤติกรรมที่มี implementation อยู่จริงใน repository ณ revision ที่คุณกำลังอ่านอยู่
+Ruvyxa คือ Web framework ที่ให้ CLI, pipeline สำหรับ route/build ที่เขียนด้วย Rust และ runtime TypeScript
+ทำงานร่วมกันเพื่อค้นหา route ใน `app/`, compile และ serve หรือจัดแพ็กเกจผลลัพธ์ คู่มือนี้อธิบายพฤติกรรมที่มี
+implementation อยู่จริงใน repository ณ revision ที่คุณกำลังอ่านอยู่
 
 ## เลือกเส้นทางตามบทบาท
 
-- ผู้พัฒนาแอปที่เริ่มต้นใหม่: [บทนำ](01-introduction.md) →
-  [สร้าง app แรก](02-create-your-first-app.md) → [โครงสร้างโปรเจกต์](03-project-structure.md) →
-  [Routing และ rendering](04-routing-rendering.md)
+- ผู้พัฒนาแอปที่เริ่มต้นใหม่: [บทนำ](01-introduction.md) → [สร้าง app แรก](02-create-your-first-app.md) →
+  [โครงสร้างโปรเจกต์](03-project-structure.md) → [Routing และ rendering](04-routing-rendering.md)
 - ผู้พัฒนา full-stack: อ่านต่อ [ข้อมูล, action และ API route](05-data-actions-api.md),
   [UI, navigation, metadata และ asset](06-ui-navigation-metadata-and-assets.md), และ
   [Configuration](07-configuration.md)

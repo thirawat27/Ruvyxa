@@ -355,6 +355,32 @@ fn headers_for(rules: &[HeaderRule], path: &str) -> Vec<(HeaderName, HeaderValue
         .collect()
 }
 
+/// The path a `_headers` rule is matched against: the file the request is
+/// served from, not the bytes it was spelled with.
+///
+/// Matching the raw path let `/%61dmin/` and `/./admin/` reach the file behind
+/// `/admin/` while missing a `/admin/*` rule, so a header a project scoped to a
+/// section — `X-Frame-Options: DENY` on an admin area — was absent for anyone
+/// who spelled the path differently. The resolver decodes and normalises with
+/// `safe_relative_path`, so the rule does too. A path that resolver refuses is
+/// served no file, and keeps the raw spelling.
+fn rule_path(uri_path: &str) -> std::borrow::Cow<'_, str> {
+    let Some(relative) = safe_relative_path(uri_path) else {
+        return std::borrow::Cow::Borrowed(uri_path);
+    };
+    let mut normalised = String::from("/");
+    for (index, component) in relative.components().enumerate() {
+        if index > 0 {
+            normalised.push('/');
+        }
+        normalised.push_str(&component.as_os_str().to_string_lossy());
+    }
+    if uri_path.ends_with('/') && !normalised.ends_with('/') {
+        normalised.push('/');
+    }
+    std::borrow::Cow::Owned(normalised)
+}
+
 /// Whether `name` tells a cache how long it may keep the response.
 ///
 /// `Cache-Control` and `Expires` for every cache, and the CDN-targeted
@@ -433,7 +459,7 @@ where
     }
 
     fn call(&mut self, request: Request<ReqBody>) -> Self::Future {
-        let matched = headers_for(&self.rules, request.uri().path());
+        let matched = headers_for(&self.rules, &rule_path(request.uri().path()));
         let future = self.inner.call(request);
         Box::pin(async move {
             let mut response = future.await?;
@@ -897,6 +923,31 @@ mod tests {
         // A document is not an asset: no cache rule names it.
         let (_, headers, _) = get_path(&router, "/").await;
         assert_eq!(header(&headers, "cache-control"), None);
+    }
+
+    #[tokio::test]
+    async fn a_rule_follows_the_file_however_its_path_is_spelled() {
+        // The resolver decodes and normalises; the rule has to see the same
+        // path, or a differently spelled request reaches the file without it.
+        let temp = publish_dir();
+        let router = site(&temp).router();
+        for path in [
+            "/__ruvyxa/client/abc123.js",
+            "/__ruvyxa/%63lient/abc123.js",
+            "/./__ruvyxa/client/abc123.js",
+            "/__ruvyxa//client/abc123.js",
+        ] {
+            let (status, headers, _) = get_path(&router, path).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(
+                header(&headers, "cache-control"),
+                Some("public, max-age=31536000, immutable"),
+                "{path}"
+            );
+        }
+        assert_eq!(rule_path("/about/"), "/about/");
+        assert_eq!(rule_path("/"), "/");
+        assert_eq!(rule_path("/a/../b"), "/a/../b");
     }
 
     #[tokio::test]

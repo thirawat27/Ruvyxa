@@ -559,7 +559,7 @@ fn compile_tailwind_css(root: &Path, input: &Path) -> Result<String> {
             .at_file(input)
             .suggest("Install Tailwind support with `pnpm add tailwindcss && pnpm add -D @tailwindcss/cli`.")
     })?;
-    let input_arg = input.strip_prefix(root).unwrap_or(input);
+    let input_arg = input.trim_prefix(root);
     let mut command = Command::new(tailwind);
     command
         .current_dir(root)

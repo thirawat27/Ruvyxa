@@ -762,7 +762,7 @@ fn form_decode(text: &str) -> String {
         }
         index += 1;
     }
-    String::from_utf8_lossy(&output).into_owned()
+    String::from_utf8_lossy_owned(output)
 }
 
 fn hex_value(byte: Option<&u8>) -> Option<u8> {

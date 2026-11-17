@@ -121,9 +121,8 @@ where
         // half, and composing over half of one would corrupt it.
         let split = floor_char_boundary(&self.held, split);
         let head = self.head.take()?;
-        let prefix = String::from_utf8_lossy(&self.held[..split]).into_owned();
         let rest = self.held.split_off(split);
-        self.held = rest;
+        let prefix = String::from_utf8_lossy_owned(std::mem::replace(&mut self.held, rest));
         self.scanned = 0;
         let composed = if end.is_some() {
             (head.compose)(&prefix)
@@ -153,7 +152,7 @@ where
         // The head never arrived: emit the prefix as it stands rather than lose
         // it. `take_head` has already given up on editing by this point.
         self.head = None;
-        let mut held = String::from_utf8_lossy(&std::mem::take(&mut self.held)).into_owned();
+        let mut held = String::from_utf8_lossy_owned(std::mem::take(&mut self.held));
         match find_ascii_case(held.as_bytes(), b"</body>") {
             Some(at) => held.insert_str(at, &tail),
             // No closing tag to sit before. Appending still reaches the browser:

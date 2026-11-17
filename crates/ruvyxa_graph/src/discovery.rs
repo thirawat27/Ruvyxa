@@ -219,7 +219,7 @@ pub fn discover_routes(options: DiscoverOptions) -> Result<RouteManifest> {
 
         let file = entry.path().to_path_buf();
         let route_dir = file.parent().unwrap_or(&app_dir);
-        let relative_dir = route_dir.strip_prefix(&app_dir).unwrap_or(route_dir);
+        let relative_dir = route_dir.trim_prefix(&app_dir);
         let path = route_path_from_dir(relative_dir)?;
         let id = route_id(&app_dir, &file);
         let layout_chain = layout_chain(&app_dir, route_dir);
@@ -470,7 +470,7 @@ pub(crate) fn catch_all_must_be_last() -> RuvyxaError {
 }
 
 pub(crate) fn route_id(app_dir: &Path, file: &Path) -> String {
-    let relative = file.strip_prefix(app_dir).unwrap_or(file);
+    let relative = file.trim_prefix(app_dir);
     let without_extension = relative.with_extension("");
     format!(
         "app/{}",
@@ -495,7 +495,7 @@ pub(crate) fn layout_chain(app_dir: &Path, route_dir: &Path) -> Vec<String> {
 
 /// Route id for a directory, matching [`route_id`]'s shape for a file.
 pub(crate) fn directory_id(app_dir: &Path, directory: &Path) -> String {
-    let relative = directory.strip_prefix(app_dir).unwrap_or(directory);
+    let relative = directory.trim_prefix(app_dir);
     let segments = relative
         .components()
         .filter_map(|component| match component {

@@ -431,10 +431,7 @@ pub(crate) fn doctor(args: DoctorArgs) -> anyhow::Result<()> {
                 // The scope is already the section heading, and the longest
                 // scoped name is wider than the label column, so it is dropped
                 // rather than allowed to push every value out of alignment.
-                print_field(
-                    name.strip_prefix("@ruvyxa/").unwrap_or(&name),
-                    note(version),
-                );
+                print_field(name.trim_prefix("@ruvyxa/"), note(version));
             }
         }
         None => print_field("version match", warn_text("no package.json")),

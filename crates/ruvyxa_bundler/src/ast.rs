@@ -128,7 +128,7 @@ pub fn has_named_runtime_export(source: &str, ast: &ModuleAst, name: &str) -> bo
             continue;
         }
         let declaration = source[offset..].trim_start();
-        let declaration = declaration.strip_prefix("async ").unwrap_or(declaration);
+        let declaration = declaration.trim_prefix("async ");
         for prefix in ["function ", "const ", "let ", "var ", "class "] {
             if let Some(rest) = declaration.strip_prefix(prefix)
                 && is_export_name(rest, name)

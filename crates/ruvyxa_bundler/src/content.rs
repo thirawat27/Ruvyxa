@@ -358,7 +358,7 @@ fn has_named_export(source: &str, name: &str) -> bool {
 }
 
 fn split_frontmatter(source: &str) -> Result<(Option<String>, String), String> {
-    let normalized = source.strip_prefix('\u{feff}').unwrap_or(source);
+    let normalized = source.trim_prefix('\u{feff}');
     if !normalized.starts_with("---\n") && !normalized.starts_with("---\r\n") {
         return Ok((None, normalized.to_string()));
     }
@@ -882,7 +882,7 @@ fn render_mdx_element(
         .map(|attribute| match attribute {
             AttributeContent::Expression(value) => {
                 let expression = value.value.trim();
-                let expression = expression.strip_prefix("...").unwrap_or(expression);
+                let expression = expression.trim_prefix("...");
                 format!("...({expression})")
             }
             AttributeContent::Property(value) => {

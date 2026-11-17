@@ -31,3 +31,29 @@ allowBuilds:
   # Dart Sass uses this optional native watcher only for its CLI watch mode. Ruvyxa calls the
   # compile API directly, so keep the install deterministic without executing its build script.
   '@parcel/watcher': false
+# pnpm 12 holds back any release younger than its `minimumReleaseAge` cooldown.
+# oxc-transform has to move in lockstep with the Rust `oxc` crate
+# (`scripts/check-oxc-lockstep.mjs`), so its pinned release is exempted by exact
+# version rather than by turning the cooldown off. Entries for a version the
+# lockfile no longer names are dead and can be dropped at the next bump.
+minimumReleaseAgeExclude:
+  - '@oxc-transform/binding-android-arm-eabi@0.159.0'
+  - '@oxc-transform/binding-android-arm64@0.159.0'
+  - '@oxc-transform/binding-darwin-arm64@0.159.0'
+  - '@oxc-transform/binding-darwin-x64@0.159.0'
+  - '@oxc-transform/binding-freebsd-x64@0.159.0'
+  - '@oxc-transform/binding-linux-arm-gnueabihf@0.159.0'
+  - '@oxc-transform/binding-linux-arm-musleabihf@0.159.0'
+  - '@oxc-transform/binding-linux-arm64-gnu@0.159.0'
+  - '@oxc-transform/binding-linux-arm64-musl@0.159.0'
+  - '@oxc-transform/binding-linux-ppc64-gnu@0.159.0'
+  - '@oxc-transform/binding-linux-riscv64-gnu@0.159.0'
+  - '@oxc-transform/binding-linux-riscv64-musl@0.159.0'
+  - '@oxc-transform/binding-linux-s390x-gnu@0.159.0'
+  - '@oxc-transform/binding-linux-x64-gnu@0.159.0'
+  - '@oxc-transform/binding-linux-x64-musl@0.159.0'
+  - '@oxc-transform/binding-openharmony-arm64@0.159.0'
+  - '@oxc-transform/binding-win32-arm64-msvc@0.159.0'
+  - '@oxc-transform/binding-win32-ia32-msvc@0.159.0'
+  - '@oxc-transform/binding-win32-x64-msvc@0.159.0'
+  - oxc-transform@0.159.0

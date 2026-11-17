@@ -527,7 +527,7 @@ fn log_worker_stderr(line: &str) {
 fn parse_worker_stderr_tag(line: &str) -> Option<(&str, &str)> {
     let rest = line.strip_prefix("[ruvyxa:")?;
     let (level, message) = rest.split_once(']')?;
-    Some((level, message.strip_prefix(' ').unwrap_or(message)))
+    Some((level, message.trim_prefix(' ')))
 }
 
 /// Why a worker request produced no response.

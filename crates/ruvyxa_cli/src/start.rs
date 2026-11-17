@@ -38,7 +38,7 @@ pub(crate) fn local_standalone_adapter(
     runtime: JavaScriptRuntime,
     selected: Option<&str>,
 ) -> Option<&'static str> {
-    let selected = selected.map(|name| name.strip_prefix("@ruvyxa/adapter-").unwrap_or(name));
+    let selected = selected.map(|name| name.trim_prefix("@ruvyxa/adapter-"));
     (selected != Some(runtime.command())).then_some(runtime.command())
 }
 

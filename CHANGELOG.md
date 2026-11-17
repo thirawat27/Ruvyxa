@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- The built-in `rate` middleware keyed every request as `unknown` on a real server: it looked for a
+  bare `SocketAddr` extension, which only its unit tests inserted, while axum stores
+  `ConnectInfo<SocketAddr>`. One client reaching `max` locked every visitor out for the rest of the
+  window. It reads `ConnectInfo` now, and the tests insert what production does.
+- The Node standalone server and the Vercel wrapper resolved a request target against a base URL, so
+  `GET //evil.example/admin` was routed as `/admin` with host `evil.example` while a fronting proxy,
+  and the Bun and Deno transports, saw the path `//evil.example/admin`. An origin-form target is
+  kept a path now.
+- `ruvyxa-axum` matched `_headers` rules against the raw request path but served files by the
+  decoded, normalised one, so `/%61dmin/` reached `/admin/` without an `/admin/*` rule's headers.
+- `@ruvyxa/auth`: `safeReturnTo` no longer returns a protocol-relative `//host` path on a single
+  pass, and OAuth token and profile responses are read under the provider deadline and a 1 MiB cap
+  (a malformed body is a 502, not a 500).
+
+### Reliability
+
+- A `Request` rebuilt from a signal or from another request follows it through a weak reference, so
+  a handler parked on `request.signal` could lose the abort once the rebuilt request was garbage
+  collected. Every host keeps the derived request reachable while its source can abort
+  (`followingAbort` in `runtime/api-methods.mjs`).
+- The render worker survives an unhandled promise rejection in project code, as the standalone
+  server already did, instead of exiting and failing every in-flight request on it.
+
+### Toolchain and dependencies
+
+- MSRV is Rust 1.100. The workspace uses `str`/`Path::trim_prefix`/`trim_suffix`,
+  `String::from_utf8_lossy_owned`, and `bool::toggle`, and denies Cargo's `unused_dependencies`
+  lint.
+- oxc and oxc-transform 0.159 in lockstep, pnpm 12.21, prettier 3.10.1 (the Thai docs are re-wrapped
+  for its width rules, and the adapter table is laid out by prettier itself), oxlint 1.94, knip
+  6.45.1, clap 4.6.8, fancy-regex 0.20.2, notify 8.2.2, brotli 9.1.3, and semver-compatible updates
+  across `Cargo.lock`; Tailwind 4.3.5 and PostCSS 8.5.33 in the starters.
+
 ## v1.1.6 (2026-11-08)
 
 ### `ruvyxa start` runs the standalone server; production has one request host

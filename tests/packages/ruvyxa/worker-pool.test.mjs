@@ -2016,6 +2016,26 @@ test('a timed-out request is aborted and holds its slot until its work settles',
   await waitForIdle('the slot of a handler that never settles')
 })
 
+test('a stray rejected promise in a route does not take the worker down', async (t) => {
+  // Node's default for an unhandled rejection is to exit, and the worker is a
+  // process every in-flight request on it shares. The standalone server logs
+  // and keeps serving; this worker has to give the same answer.
+  const { projectRoot, apiRequest } = await apiRouteProject(
+    'stray-rejection-',
+    `export function GET() {
+  void Promise.reject(new Error('fire and forget'))
+  return Response.json({ answered: true })
+}
+`,
+  )
+  const { send } = startFramedWorker(t, [projectRoot])
+  const first = await send('stray', apiRequest('', { streamResponse: false }))
+  assert.equal(first.ok, true, first.message)
+  await delay(200)
+  const pong = await send('after', { type: 'ping' })
+  assert.equal(pong.ok, true, 'the worker exited on a rejection nobody awaited')
+})
+
 test('a request cancelled while queued gives its queue place back', async (t) => {
   const { projectRoot, apiRequest } = await apiRouteProject('queued-cancel-', PUSH_STREAM_ROUTE)
   const { send, write, framesFor } = startFramedWorker(t, [projectRoot], {

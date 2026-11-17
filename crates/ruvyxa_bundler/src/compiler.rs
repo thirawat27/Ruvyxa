@@ -159,7 +159,7 @@ const MODULE_KIND_EXTENSIONS: &[&str] = &[
 /// inline object literal, so no JSON text can be misread as code. Mirrors
 /// `compileJsonModuleSource()` in `packages/ruvyxa/runtime/compiler.mjs`.
 fn compile_json_module(source: &str, path: &Path) -> Result<String> {
-    let trimmed = source.strip_prefix('\u{feff}').unwrap_or(source);
+    let trimmed = source.trim_prefix('\u{feff}');
     let value: serde_json::Value = serde_json::from_str(trimmed).map_err(|error| {
         BundleError::Compiler(format!(
             "RUV1805 Invalid JSON module {}: {error}",

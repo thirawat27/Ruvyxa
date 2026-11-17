@@ -126,6 +126,8 @@ try {
 
   return `import { clientAddress, createHandler, logRecord, parseByteRange, parseTrustedProxies, prerenderRelativePath } from './serverless-handler.mjs';
 import { projectProxy, documentCacheHandler, loadActionModule, loadRouteModule } from './route-modules.mjs';
+// Keeps a rebuilt Request's signal reachable: see \`followingAbort\`.
+import { followingAbort } from './api-methods.mjs';
 // The controller the render worker pool already runs on, reused rather than
 // rewritten: bounded FIFO admission is one decision, and two implementations of
 // it would be two overload behaviours for one framework.
@@ -1048,9 +1050,8 @@ async function handleWithTimeout(request) {
   if (RENDER_TIMEOUT_MS === 0) return { response: await handler(request) };
 
   const deadlineAbort = new AbortController();
-  const bounded = new Request(request, {
-    signal: AbortSignal.any([request.signal, deadlineAbort.signal]),
-  });
+  const signal = AbortSignal.any([request.signal, deadlineAbort.signal]);
+  const bounded = followingAbort(new Request(request, { signal }), signal);
   let expire;
   const deadline = new Promise((resolve) => {
     expire = setTimeout(() => resolve(RENDER_TIMED_OUT), RENDER_TIMEOUT_MS);
@@ -1265,10 +1266,22 @@ async function readRequestBody(req) {
   return Buffer.concat(chunks);
 }
 
+// An origin-form request target is a path, never a reference to resolve.
+// Resolved against a base, a target that opens with two slashes (or a slash and
+// a backslash) is scheme-relative: WHATWG reads its first segment as a host and
+// drops it from the path, so the raw request "//evil.example/admin" was routed
+// as "/admin" while every proxy in front of this server, and the Bun and Deno
+// transports, saw the path "//evil.example/admin". A leading "/." is a dot
+// segment the parser always removes, and it keeps the target a path.
+function requestUrl(req) {
+  const target = req.url.startsWith('/') ? '/.' + req.url : req.url;
+  return new URL(target, \`http://\${req.headers.host || 'localhost'}\`);
+}
+
 const server = createServer(async (req, res) => {
   applySecurityHeaders(res);
   try {
-    const url = new URL(req.url, \`http://\${req.headers.host || 'localhost'}\`);
+    const url = requestUrl(req);
     const isRead = req.method === 'GET' || req.method === 'HEAD';
 
     // Ahead of everything: a probe that queues behind the renders it exists to
@@ -1345,7 +1358,7 @@ const server = createServer(async (req, res) => {
       if (!isRead) {
         requestInit.body = await readRequestBody(req);
       }
-      return new Request(url.toString(), requestInit);
+      return followingAbort(new Request(url.toString(), requestInit), disconnected.signal);
     }, url.pathname);
 
     if (response.status === 404 && isRead) {
@@ -1908,7 +1921,7 @@ function admissibleRequest(request, peer) {
   if (peerMayStateClientIdentity(peer)) return request;
   const headers = new Headers(request.headers);
   for (const name of FORWARDED_IDENTITY_HEADERS) headers.delete(name);
-  return new Request(request, { headers });
+  return followingAbort(new Request(request, { headers }), request.signal);
 }
 
 async function handleRequest(request, connection) {

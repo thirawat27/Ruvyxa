@@ -103,3 +103,31 @@ export function normalizeResponse(result, route = 'this route') {
     )
   }
 }
+
+/**
+ * Keep `request.signal` able to fire for as long as `source` can abort.
+ *
+ * A `Request` built with `{ signal }`, or from another `Request`, follows that
+ * signal through a weak reference: the source holds no strong path to the new
+ * request's own signal. A handler that registers a listener on
+ * `request.signal` and then holds nothing else — a long poll parked on a
+ * promise only the abort settles — leaves the `Request` collectable, and once
+ * it is collected the host's abort reaches nothing. Whether that happens is a
+ * question of garbage-collector timing, which is why it failed on one CI lane
+ * and passed on the others.
+ *
+ * The listener below is the strong path: `source` keeps it, and it keeps
+ * `request`. It is `once`, and every caller passes a per-request source, so it
+ * lives exactly as long as the request it describes.
+ *
+ * @template {Request} T
+ * @param {T} request
+ * @param {AbortSignal | null | undefined} source
+ * @returns {T}
+ */
+export function followingAbort(request, source) {
+  if (source && !source.aborted) {
+    source.addEventListener('abort', () => request.signal, { once: true })
+  }
+  return request
+}

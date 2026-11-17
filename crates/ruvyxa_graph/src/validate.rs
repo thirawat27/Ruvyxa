@@ -418,7 +418,7 @@ pub(crate) fn markdown_without_code_examples(source: &str) -> String {
                 let mut in_span = false;
                 for character in line.chars() {
                     if character == '`' {
-                        in_span = !in_span;
+                        in_span.toggle();
                         output.push(' ');
                     } else if in_span && character != '\n' {
                         output.push(' ');

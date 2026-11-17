@@ -16,6 +16,12 @@ export type * from './types.js'
 
 const MAX_BODY_BYTES = 32 * 1024
 const PROVIDER_TIMEOUT_MS = 10_000
+/**
+ * The most a token or profile response may be. Both are a few hundred bytes of
+ * JSON from every provider this package ships; a megabyte is room for any real
+ * one and a ceiling on what a hostile endpoint can make the callback buffer.
+ */
+const PROVIDER_RESPONSE_LIMIT_BYTES = 1024 * 1024
 const OAUTH_STATE_TTL_SECONDS = 600
 const MAGIC_LINK_TTL_SECONDS = 900
 const RESERVED_OAUTH_PARAMETERS = new Set([
@@ -280,13 +286,20 @@ async function finishOAuth(
     code_verifier: parsed.verifier,
   })
   if (provider.clientSecret) body.set('client_secret', provider.clientSecret)
-  const tokenResponse = await fetchWithTimeout(provider.tokenUrl, {
-    method: 'POST',
-    headers: { accept: 'application/json', 'content-type': 'application/x-www-form-urlencoded' },
-    body,
-  })
-  if (!tokenResponse.ok) throw new AuthError('RUV3104', 'OAuth token exchange failed', 502)
-  const tokenPayload = record(await tokenResponse.json())
+  const tokenPayload = record(
+    await fetchProviderJson(
+      provider.tokenUrl,
+      {
+        method: 'POST',
+        headers: {
+          accept: 'application/json',
+          'content-type': 'application/x-www-form-urlencoded',
+        },
+        body,
+      },
+      'OAuth token exchange failed',
+    ),
+  )
   if (typeof tokenPayload.access_token !== 'string') {
     throw new AuthError('RUV3104', 'OAuth provider returned no access token', 502)
   }
@@ -300,11 +313,12 @@ async function finishOAuth(
       : {}),
     raw: tokenPayload,
   }
-  const profileResponse = await fetchWithTimeout(provider.userInfoUrl, {
-    headers: { authorization: `Bearer ${tokens.accessToken}`, accept: 'application/json' },
-  })
-  if (!profileResponse.ok) throw new AuthError('RUV3104', 'OAuth profile request failed', 502)
-  const user = await provider.mapProfile(await profileResponse.json(), tokens)
+  const profile = await fetchProviderJson(
+    provider.userInfoUrl,
+    { headers: { authorization: `Bearer ${tokens.accessToken}`, accept: 'application/json' } },
+    'OAuth profile request failed',
+  )
+  const user = await provider.mapProfile(profile, tokens)
   const result = await issueSession(user, true, settings)
   const headers = new Headers(result.headers)
   headers.append('set-cookie', deleteOAuthStateCookie(settings))
@@ -1067,6 +1081,11 @@ function safeReturnTo(value: string | null): string {
   try {
     const resolved = new URL(value, 'http://ruvyxa.invalid')
     if (resolved.origin !== 'http://ruvyxa.invalid') return '/'
+    // The origin surviving is not enough: "/.//evil.com" resolves to the path
+    // "//evil.com", which a browser reads back as a protocol-relative URL. The
+    // callback happens to sanitize a second time, which collapses it, but a
+    // function named "safe" has to be safe on one pass.
+    if (resolved.pathname.startsWith('//')) return '/'
     return `${resolved.pathname}${resolved.search}${resolved.hash}`
   } catch {
     return '/'
@@ -1112,18 +1131,77 @@ function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
-async function fetchWithTimeout(input: string, init: RequestInit): Promise<Response> {
+/**
+ * One JSON answer from an OAuth provider, under one deadline and one size cap.
+ *
+ * The deadline used to cover only the wait for response headers: the timer was
+ * cleared as soon as `fetch` resolved, and the body was then read with
+ * `response.json()` — no deadline and no limit. A slow or hostile token or
+ * profile endpoint could hold the callback request open indefinitely, or hand
+ * it as much JSON as it liked to buffer. The whole exchange is bounded now, and
+ * a body that is not JSON is the provider's failure (502), not ours (500).
+ */
+async function fetchProviderJson(
+  input: string,
+  init: RequestInit,
+  failure: string,
+): Promise<unknown> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS)
+  const refused = (cause?: unknown) =>
+    new AuthError('RUV3104', failure, 502, undefined, cause === undefined ? undefined : { cause })
   try {
-    return await fetch(input, { ...init, signal: controller.signal })
+    let response: Response
+    try {
+      response = await fetch(input, { ...init, signal: controller.signal })
+    } catch (error) {
+      throw new AuthError('RUV3104', 'OAuth provider request failed', 502, undefined, {
+        cause: error,
+      })
+    }
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined)
+      throw refused()
+    }
+    const text = await readBoundedText(response, PROVIDER_RESPONSE_LIMIT_BYTES)
+    if (text === null) throw refused(new Error('provider response exceeded the size limit'))
+    try {
+      return JSON.parse(text) as unknown
+    } catch (error) {
+      throw refused(error)
+    }
   } catch (error) {
-    throw new AuthError('RUV3104', 'OAuth provider request failed', 502, undefined, {
-      cause: error,
-    })
+    if (error instanceof AuthError) throw error
+    // The deadline firing mid-body surfaces here as the reader's abort.
+    throw refused(error)
   } finally {
     clearTimeout(timeout)
   }
+}
+
+/** The body as text, or `null` once it passes `limit` bytes (the rest is cancelled). */
+async function readBoundedText(response: Response, limit: number): Promise<string | null> {
+  if (!response.body) return ''
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.byteLength
+    if (total > limit) {
+      await reader.cancel().catch(() => undefined)
+      return null
+    }
+    chunks.push(value)
+  }
+  const bytes = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return new TextDecoder().decode(bytes)
 }
 
 export class AuthError extends Error {

@@ -21,6 +21,9 @@ crates/
 *.toml
 
 # Generated / vendored
+# pnpm writes this file and rewrites it on every install; reformatting it
+# would only be undone by the next `pnpm install`.
+pnpm-lock.yaml
 *.wasm
 *.d.ts
 *.js.map

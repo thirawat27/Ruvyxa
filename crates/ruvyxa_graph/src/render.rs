@@ -218,7 +218,7 @@ pub(crate) const EDGE_UNAVAILABLE_BUILTINS: &[&str] = &[
 /// Matches the segment before the first `/` so `node:fs/promises` and
 /// `fs/promises` are the same answer as `fs`.
 pub(crate) fn edge_forbidden_builtin(specifier: &str) -> Option<&'static str> {
-    let bare = specifier.strip_prefix("node:").unwrap_or(specifier);
+    let bare = specifier.trim_prefix("node:");
     let head = bare.split('/').next().unwrap_or(bare);
     EDGE_UNAVAILABLE_BUILTINS
         .iter()
@@ -233,7 +233,7 @@ pub(crate) fn edge_forbidden_builtin(specifier: &str) -> Option<&'static str> {
 /// the shared table without a temporary project on disk.
 pub(crate) fn runtime_target_from_value(raw: &str) -> Option<RuntimeTarget> {
     let value = raw.trim_end_matches(';').trim();
-    let value = value.strip_suffix("as const").unwrap_or(value).trim();
+    let value = value.trim_suffix("as const").trim();
     match value.trim_matches(['\'', '"', '`']) {
         "edge" => Some(RuntimeTarget::Edge),
         "nodejs" | "node" => Some(RuntimeTarget::Node),
@@ -294,7 +294,7 @@ pub(crate) fn parse_hydration_mode(source: &str, masked: &str) -> HydrationMode 
         return HydrationMode::Load;
     };
     let value = value.trim_end_matches(';').trim();
-    let value = value.strip_suffix("as const").unwrap_or(value).trim();
+    let value = value.trim_suffix("as const").trim();
     match value.trim_matches(['\'', '"']) {
         "false" | "none" => HydrationMode::None,
         "idle" => HydrationMode::Idle,

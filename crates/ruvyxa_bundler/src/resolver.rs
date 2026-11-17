@@ -1544,13 +1544,13 @@ fn legacy_entry_candidates(
 }
 
 fn strip_dot_slash(value: &str) -> &str {
-    value.strip_prefix("./").unwrap_or(value)
+    value.trim_prefix("./")
 }
 
 /// Join a package-relative path and probe it, refusing anything that escapes
 /// the package directory.
 fn resolve_package_relative(pkg_dir: &Path, relative: &str) -> Option<PathBuf> {
-    let relative = relative.strip_prefix("./").unwrap_or(relative);
+    let relative = relative.trim_prefix("./");
     if relative.is_empty() || relative.contains('\\') {
         return None;
     }

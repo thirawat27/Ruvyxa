@@ -2082,7 +2082,7 @@ fn try_rewrite_export_statement(line: &str, deps: &DepIndex<'_>) -> Option<Rewri
     // `function* ` all along; only the dispatcher above it did not, so the
     // `export` survived the link and `RUV1612` failed the build.
     if is_exported_declaration(line) {
-        let decl = line.strip_prefix("export ").unwrap_or(line);
+        let decl = line.trim_prefix("export ");
         let name = extract_declaration_name(decl);
         if let Some(name) = name {
             return Some(Rewrite::Pending {
@@ -2553,7 +2553,7 @@ fn extract_declaration_name(decl: &str) -> Option<String> {
     let decl = decl.trim();
 
     // Skip `async` prefix.
-    let decl = decl.strip_prefix("async ").unwrap_or(decl);
+    let decl = decl.trim_prefix("async ");
 
     let rest = decl
         .strip_prefix("function* ")
@@ -2631,7 +2631,7 @@ fn collect_pattern_names(pattern: &str, names: &mut Vec<String>) {
         if element.is_empty() {
             continue;
         }
-        let element = element.strip_prefix("...").unwrap_or(element).trim();
+        let element = element.trim_prefix("...").trim();
         // `key: target` — the binding is the target. Split before any default,
         // so `{ a: b = 1 }` reads `b` rather than `b = 1`.
         let target = match split_top_level_once(element, b':') {

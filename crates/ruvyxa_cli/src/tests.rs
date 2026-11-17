@@ -4244,7 +4244,7 @@ fn config_surface_matches_the_rust_config() {
         // A section whose parent does not declare it describes an object no
         // config can reach, which is how a stale entry survives a rename.
         if let Some((parent, own)) = path.rsplit_once('.') {
-            let own = own.strip_suffix("[]").unwrap_or(own);
+            let own = own.trim_suffix("[]");
             let parent = fixture
                 .sections
                 .get(parent)

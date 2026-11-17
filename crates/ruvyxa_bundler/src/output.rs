@@ -1323,7 +1323,7 @@ mod tests {
     fn without_terminators(source: &str) -> String {
         source
             .lines()
-            .map(|line| line.strip_suffix(';').unwrap_or(line))
+            .map(|line| line.trim_suffix(';'))
             .collect::<Vec<_>>()
             .join("\n")
     }

@@ -26,7 +26,12 @@
  */
 
 import { runAction, validateActionPayload, validateActionRequest } from './action-runtime.mjs'
-import { methodNotAllowed, normalizeResponse, selectRouteHandler } from './api-methods.mjs'
+import {
+  followingAbort,
+  methodNotAllowed,
+  normalizeResponse,
+  selectRouteHandler,
+} from './api-methods.mjs'
 import {
   collectCacheInvalidations,
   collectRevalidatedTags,
@@ -679,7 +684,9 @@ export function createHandler(options) {
       return fetch(new Request(target, request), { redirect: 'manual' })
     }
     const url = new URL(target, request.url)
-    return dispatch(new Request(url, request), runtimeContext, { rewritten: true })
+    return dispatch(followingAbort(new Request(url, request), request.signal), runtimeContext, {
+      rewritten: true,
+    })
   }
 
   /**
@@ -2829,8 +2836,9 @@ function limitBodyStream(request, limit) {
   try {
     // The method comes from `request`, and the guard at the top already returned
     // for a request with no body, so a GET can never reach here carrying one.
+    const body = request.body.pipeThrough(limiter)
     // oxlint-disable-next-line unicorn/no-invalid-fetch-options
-    return new Request(request, { body: request.body.pipeThrough(limiter), duplex: 'half' })
+    return followingAbort(new Request(request, { body, duplex: 'half' }), request.signal)
   } catch {
     return request
   }

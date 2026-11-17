@@ -1,72 +1,70 @@
 # Configuration และ environment
 
-> **เป้าหมายของ tutorial:** เปลี่ยนแอป development เป็นแอปที่กำหนดค่าอย่างตั้งใจและเก็บ secret
-> อย่างปลอดภัย **เริ่มจาก:** UI และ asset ใน
+> **เป้าหมายของ tutorial:** เปลี่ยนแอป development เป็นแอปที่กำหนดค่าอย่างตั้งใจและเก็บ secret อย่างปลอดภัย
+> **เริ่มจาก:** UI และ asset ใน
 > [UI, navigation, metadata และ asset](06-ui-navigation-metadata-and-assets.md) **Checkpoint:**
 > commit environment example ที่ปลอดภัย เก็บ secret ไว้เฉพาะ server และรัน app check
 
-`ruvyxa.config.ts` ถูกประเมินโดย configuration renderer แล้ว validate ใช้ `config()` จาก
-`ruvyxa/config` เพื่อเขียนแบบ typed ชื่อ configuration ด้านล่างมาจาก `RuvyxaConfig` และ nested
-source type ของมัน
+`ruvyxa.config.ts` ถูกประเมินโดย configuration renderer แล้ว validate ใช้ `config()` จาก `ruvyxa/config`
+เพื่อเขียนแบบ typed ชื่อ configuration ด้านล่างมาจาก `RuvyxaConfig` และ nested source type ของมัน
 
 ## Option หลัก
 
-| Key                                                                                             | Type / ค่าเริ่มต้น                                     | ผลกระทบ                                                                  |
-| ----------------------------------------------------------------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------ |
-| `appDir`, `outDir`                                                                              | string                                                 | ตำแหน่ง app source และ generated output                                  |
-| `runtime`                                                                                       | `node \| bun \| deno \| edge \| static`, ปริยาย `node` | นโยบาย runtime/target                                                    |
+| Key                                                                                             | Type / ค่าเริ่มต้น                                        | ผลกระทบ                                                             |
+| ----------------------------------------------------------------------------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------- |
+| `appDir`, `outDir`                                                                              | string                                                | ตำแหน่ง app source และ generated output                              |
+| `runtime`                                                                                       | `node \| bun \| deno \| edge \| static`, ปริยาย `node` | นโยบาย runtime/target                                               |
 | `typedRoutes`                                                                                   | boolean, ปริยาย `false`                                | สร้าง `.ruvyxa/types/routes.d.ts` เพื่อตรวจ `<Link href>` กับ route จริง |
-| `server.host`, `server.port`                                                                    | string, number                                         | address ที่ฟัง ดู [Listening address](#listening-address)                |
-| `build.minify`, `map`, `treeShake`, `manifest`, `warm`, `prerenderCache`                        | boolean; cache ปริยาย true                             | พฤติกรรม compiler/build artifact                                         |
-| `build.split`                                                                                   | `single \| route \| manual`                            | นโยบาย bundle splitting                                                  |
-| `build.workers`                                                                                 | number                                                 | build parallelism ดูหมายเหตุด้านล่าง                                     |
-| `render.strategy`, `render.revalidate`                                                          | strategy, seconds                                      | นโยบาย page rendering ปริยาย                                             |
-| `cache.routes`, `cache.css`, `cache.dir`, `cache.handler`, `cache.maxEntries`, `cache.maxBytes` | boolean/string                                         | setting route/CSS/cache directory                                        |
+| `server.host`, `server.port`                                                                    | string, number                                        | address ที่ฟัง ดู [Listening address](#listening-address)               |
+| `build.minify`, `map`, `treeShake`, `manifest`, `warm`, `prerenderCache`                        | boolean; cache ปริยาย true                             | พฤติกรรม compiler/build artifact                                     |
+| `build.split`                                                                                   | `single \| route \| manual`                           | นโยบาย bundle splitting                                             |
+| `build.workers`                                                                                 | number                                                | build parallelism ดูหมายเหตุด้านล่าง                                    |
+| `render.strategy`, `render.revalidate`                                                          | strategy, seconds                                     | นโยบาย page rendering ปริยาย                                         |
+| `cache.routes`, `cache.css`, `cache.dir`, `cache.handler`, `cache.maxEntries`, `cache.maxBytes` | boolean/string                                        | setting route/CSS/cache directory                                   |
 
 ## แผนที่ option แบบครบกลุ่ม
 
-| กลุ่ม         | Key                                                                                                                              | การตัดสินใจเชิงปฏิบัติการ                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| ------------- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Root          | `appDir`, `outDir`, `runtime`, `typedRoutes`, `reactCompiler`                                                                    | ใช้ default จนกว่าจะต้องเปลี่ยน source/output layout หรือ target `runtime` คือ `node`, `bun`, `deno`, `edge` หรือ `static`; CLI target override ได้ `typedRoutes` ต้องมี `.ruvyxa/types/**/*.d.ts` ใน `include` ของ tsconfig ด้วย ส่วน `react` และ `typescript` ตัว validator รับค่าอยู่แต่ไม่มีอะไรอ่าน — ตั้ง strictness ใน `tsconfig.json` ของโปรเจกต์เอง ส่วน `reactCompiler` ปิดไว้เป็นค่าเริ่มต้น — ดู [React Compiler](#react-compiler)                                                                                                   |
-| CSS และ debug | `css.entries`, `debug.overlay`, `debug.traces`                                                                                   | `entries` สำหรับ global style แบบ project-relative ที่ไม่มี module import debug flag เปลี่ยน development diagnostic ไม่ใช่ production access control                                                                                                                                                                                                                                                                                                                                                                                             |
+| กลุ่ม           | Key                                                                                                                              | การตัดสินใจเชิงปฏิบัติการ                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Root          | `appDir`, `outDir`, `runtime`, `typedRoutes`, `reactCompiler`                                                                    | ใช้ default จนกว่าจะต้องเปลี่ยน source/output layout หรือ target `runtime` คือ `node`, `bun`, `deno`, `edge` หรือ `static`; CLI target override ได้ `typedRoutes` ต้องมี `.ruvyxa/types/**/*.d.ts` ใน `include` ของ tsconfig ด้วย ส่วน `react` และ `typescript` ตัว validator รับค่าอยู่แต่ไม่มีอะไรอ่าน — ตั้ง strictness ใน `tsconfig.json` ของโปรเจกต์เอง ส่วน `reactCompiler` ปิดไว้เป็นค่าเริ่มต้น — ดู [React Compiler](#react-compiler)                                                                |
+| CSS และ debug | `css.entries`, `debug.overlay`, `debug.traces`                                                                                   | `entries` สำหรับ global style แบบ project-relative ที่ไม่มี module import debug flag เปลี่ยน development diagnostic ไม่ใช่ production access control                                                                                                                                                                                                                                                                                                                                 |
 | Build         | `minify`, `map`, `treeShake`, `split`, `workers`, `jsx`, `target`, `manifest`, `warm`, `prerenderCache`                          | `split` เป็น `single`, `route` หรือ `manual`; `jsx` เป็น `classic` หรือ `automatic`; `target` เป็น `es2015` ถึง `es2026` หรือ `esnext` (ค่าปริยาย) และ compiler ทั้งสองตัวใช้ค่านี้จริง target ที่ต่ำกว่า syntax ที่โค้ดใช้อาจต้องพึ่ง runtime helper — Ruvyxa ไม่ได้ ship helper runtime มาด้วย ดังนั้นโมดูลที่ต้องใช้ helper จะทำให้ build ล้มเหลวพร้อมบอกชื่อ helper แทนที่จะ emit import ที่ resolve ไม่ได้ โค้ดแอปพลิเคชันทั่วไปคอมไพล์ได้โดยไม่ต้องใช้ helper ที่ `es2022` ขึ้นไป ใช้ source map อย่างตั้งใจเพราะอาจเปิดเผย source content |
-| Rendering     | `render.strategy`, `render.revalidate`                                                                                           | Strategy คือ `ssr`, `ssg`, `isr`, `csr` หรือ `ppr` strategy ปริยายคือ SSR และ revalidation ปริยาย 60 วินาที                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| Image         | `optimize`, `quality`, `lossless`, `keepOriginal`, `variantWidths`, `workers`, `effort`, `onDemand.enabled`, `onDemand.maxWidth` | Default คือ optimize true, quality 82, lossless false, keep-original false, ไม่สร้าง prebuilt variant, worker 0 (จำนวน CPU ที่ใช้ได้) และ effort 4 จึงได้ WebP หนึ่งไฟล์ต่อต้นฉบับ ส่วน on-demand image แบบ object เปิดโดยปริยายและ max width 3840                                                                                                                                                                                                                                                                                               |
-| i18n          | `locales`, `defaultLocale`, `localeParam`, `detectLocale`, `cookie`                                                              | `locales` และ `defaultLocale` จำเป็นเมื่อกำหนด i18n param ปริยาย `lang`, detection true, cookie `RUVYXA_LOCALE`                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| Site          | `site.url`, `site.sitemap`, `site.robots`                                                                                        | Sitemap ตั้ง `exclude`, `additionalPaths`, `defaults` และ `entries` ที่เพิ่ม metadata ได้; robots ตั้ง rule, sitemap URL และ host ได้                                                                                                                                                                                                                                                                                                                                                                                                            |
-| Middleware    | `builtin.cors`, `builtin.timing`, `builtin.log`, `builtin.rate`, `builtin.headers`, `workers`, `timeoutMs`                       | CORS มี origins/methods/headers/credentials/maxAge built-in rate ต้องมี `max`, `window`, `key` แบบเลือกได้ project worker 1–8; timeout ปริยาย 30,000 ms และสูงสุด 300,000                                                                                                                                                                                                                                                                                                                                                                        |
-| Integration   | `adapter`, `adapterOptions`                                                                                                      | `adapter` เก็บ adapter ที่สร้างไว้แล้ว ส่วน `adapterOptions` ใช้ตั้งค่า adapter ที่เลือกด้วยชื่อแทน (ดู [Configuring an adapter selected by name](#configuring-an-adapter-selected-by-name)) การตั้งทั้งสองพร้อมกันเป็น error                                                                                                                                                                                                                                                                                                                    |
+| Rendering     | `render.strategy`, `render.revalidate`                                                                                           | Strategy คือ `ssr`, `ssg`, `isr`, `csr` หรือ `ppr` strategy ปริยายคือ SSR และ revalidation ปริยาย 60 วินาที                                                                                                                                                                                                                                                                                                                                                                        |
+| Image         | `optimize`, `quality`, `lossless`, `keepOriginal`, `variantWidths`, `workers`, `effort`, `onDemand.enabled`, `onDemand.maxWidth` | Default คือ optimize true, quality 82, lossless false, keep-original false, ไม่สร้าง prebuilt variant, worker 0 (จำนวน CPU ที่ใช้ได้) และ effort 4 จึงได้ WebP หนึ่งไฟล์ต่อต้นฉบับ ส่วน on-demand image แบบ object เปิดโดยปริยายและ max width 3840                                                                                                                                                                                                                                            |
+| i18n          | `locales`, `defaultLocale`, `localeParam`, `detectLocale`, `cookie`                                                              | `locales` และ `defaultLocale` จำเป็นเมื่อกำหนด i18n param ปริยาย `lang`, detection true, cookie `RUVYXA_LOCALE`                                                                                                                                                                                                                                                                                                                                                                 |
+| Site          | `site.url`, `site.sitemap`, `site.robots`                                                                                        | Sitemap ตั้ง `exclude`, `additionalPaths`, `defaults` และ `entries` ที่เพิ่ม metadata ได้; robots ตั้ง rule, sitemap URL และ host ได้                                                                                                                                                                                                                                                                                                                                                 |
+| Middleware    | `builtin.cors`, `builtin.timing`, `builtin.log`, `builtin.rate`, `builtin.headers`, `workers`, `timeoutMs`                       | CORS มี origins/methods/headers/credentials/maxAge built-in rate ต้องมี `max`, `window`, `key` แบบเลือกได้ project worker 1–8; timeout ปริยาย 30,000 ms และสูงสุด 300,000                                                                                                                                                                                                                                                                                                           |
+| Integration   | `adapter`, `adapterOptions`                                                                                                      | `adapter` เก็บ adapter ที่สร้างไว้แล้ว ส่วน `adapterOptions` ใช้ตั้งค่า adapter ที่เลือกด้วยชื่อแทน (ดู [Configuring an adapter selected by name](#configuring-an-adapter-selected-by-name)) การตั้งทั้งสองพร้อมกันเป็น error                                                                                                                                                                                                                                                                        |
 
 ## Runtime selection
 
 สำหรับ JavaScript process ให้ใช้ `node`, `bun` หรือ `deno` โดย `--runtime` มีลำดับสูงสุด ตามด้วย
-`RUVYXA_RUNTIME` และ `runtime` ใน `ruvyxa.config.ts` หาก project ไม่ระบุ runtime การเรียกผ่าน
-`bun run` หรือ `deno task` เป็นเพียง hint; หากไม่มีให้ตรวจ Node, Bun แล้ว Deno ตามลำดับ `edge` และ
-`static` เป็น build target ไม่ใช่ JavaScript worker host
+`RUVYXA_RUNTIME` และ `runtime` ใน `ruvyxa.config.ts` หาก project ไม่ระบุ runtime การเรียกผ่าน `bun run`
+หรือ `deno task` เป็นเพียง hint; หากไม่มีให้ตรวจ Node, Bun แล้ว Deno ตามลำดับ `edge` และ `static` เป็น build
+target ไม่ใช่ JavaScript worker host
 
 Deno รัน trusted local project configuration พร้อม permission ที่ต้องใช้
 (`deno run -A --no-prompt --node-modules-dir=manual`) อย่าเลือกใช้กับ project code ที่ไม่น่าเชื่อถือ
 
 ## Listening address
 
-`--host` และ `--port` มีลำดับสูงสุด ตามด้วย environment variable `HOST` และ `PORT` แล้วจึงเป็น
-`server.host` และ `server.port` ใน `ruvyxa.config.ts` และค่าปริยายของแต่ละคำสั่งเป็นลำดับสุดท้าย
+`--host` และ `--port` มีลำดับสูงสุด ตามด้วย environment variable `HOST` และ `PORT` แล้วจึงเป็น `server.host`
+และ `server.port` ใน `ruvyxa.config.ts` และค่าปริยายของแต่ละคำสั่งเป็นลำดับสุดท้าย
 
-ที่ environment ชนะ config file เป็นความตั้งใจ: platform แบบ managed จะฉีด `PORT`
-เข้ามาและคาดหวังให้ process ใช้ค่านั้น ส่วน `ruvyxa.config.ts` ที่ commit ไว้ใน repository
-ไม่มีทางรู้เลขนั้นได้ หาก `PORT` ไม่ใช่ตัวเลขระหว่าง 0 ถึง 65535
-คำสั่งจะล้มเหลวแทนที่จะถอยไปใช้ค่าอื่น เพื่อให้ deployment ที่ตั้งค่าผิดรายงานสาเหตุออกมา
-แทนที่จะเห็นเพียง health check ที่ไม่ผ่าน
+ที่ environment ชนะ config file เป็นความตั้งใจ: platform แบบ managed จะฉีด `PORT` เข้ามาและคาดหวังให้ process
+ใช้ค่านั้น ส่วน `ruvyxa.config.ts` ที่ commit ไว้ใน repository ไม่มีทางรู้เลขนั้นได้ หาก `PORT` ไม่ใช่ตัวเลขระหว่าง 0
+ถึง 65535 คำสั่งจะล้มเหลวแทนที่จะถอยไปใช้ค่าอื่น เพื่อให้ deployment ที่ตั้งค่าผิดรายงานสาเหตุออกมา แทนที่จะเห็นเพียง health
+check ที่ไม่ผ่าน
 
-| คำสั่ง                           | host ปริยาย | port ปริยาย |
-| -------------------------------- | ----------- | ----------- |
-| `ruvyxa dev`                     | `localhost` | `3000`      |
-| `ruvyxa start`, `ruvyxa preview` | `0.0.0.0`   | `3000`      |
+| คำสั่ง                             | host ปริยาย  | port ปริยาย |
+| -------------------------------- | ----------- | ---------- |
+| `ruvyxa dev`                     | `localhost` | `3000`     |
+| `ruvyxa start`, `ruvyxa preview` | `0.0.0.0`   | `3000`     |
 
 `start` และ `preview` bind ทุก interface เพราะ container จะ route ไปยัง address ของ container ไม่ใช่
-loopback ของมัน — production server ที่ bind `localhost` จึงไม่ตอบอะไรเลยจากภายนอก ค่านี้ตรงกับ
-standalone server ที่ `ruvyxa build` สร้างออกมา ซึ่งอ่าน `PORT` และ `HOST` แบบเดียวกันมาตลอด ใช้
-`--host localhost` หากต้องการรัน production ในเครื่องโดยไม่เปิดออกสู่เครือข่าย
+loopback ของมัน — production server ที่ bind `localhost` จึงไม่ตอบอะไรเลยจากภายนอก ค่านี้ตรงกับ standalone
+server ที่ `ruvyxa build` สร้างออกมา ซึ่งอ่าน `PORT` และ `HOST` แบบเดียวกันมาตลอด ใช้ `--host localhost`
+หากต้องการรัน production ในเครื่องโดยไม่เปิดออกสู่เครือข่าย
 
 ## Configuring an adapter selected by name
 
@@ -82,8 +80,8 @@ export default config({ adapter: render({ serviceName: 'checkout-api' }) })
 ```
 
 เลือกด้วยชื่อ — `ruvyxa build --adapter render`, `RUVYXA_ADAPTER=render` หรือการตรวจ platform จาก
-environment ของ hosting กรณีนี้ไม่มี factory call ให้ส่ง option เข้าไป `adapterOptions`
-จึงทำหน้าที่เป็น argument ของ call นั้น:
+environment ของ hosting กรณีนี้ไม่มี factory call ให้ส่ง option เข้าไป `adapterOptions` จึงทำหน้าที่เป็น argument
+ของ call นั้น:
 
 ```ts
 import { config } from 'ruvyxa/config'
@@ -91,17 +89,17 @@ import { config } from 'ruvyxa/config'
 export default config({ adapterOptions: { serviceName: 'checkout-api' } })
 ```
 
-รูปแบบที่สองคือสิ่งที่ทำให้ zero-config deploy ยังตั้งค่าได้: project ไม่ระบุ adapter, platform
-เลือกให้ และ option ยังมีผลอยู่ adapter จะ validate option เอง ดังนั้นค่าที่ adapter ไม่รับจะทำให้
-build ล้มเหลวพร้อม diagnostic ของ adapter ตัวนั้น
+รูปแบบที่สองคือสิ่งที่ทำให้ zero-config deploy ยังตั้งค่าได้: project ไม่ระบุ adapter, platform เลือกให้ และ option
+ยังมีผลอยู่ adapter จะ validate option เอง ดังนั้นค่าที่ adapter ไม่รับจะทำให้ build ล้มเหลวพร้อม diagnostic ของ
+adapter ตัวนั้น
 
-การตั้ง `adapter` และ `adapterOptions` พร้อมกันเป็น error ไม่ใช่กฎลำดับความสำคัญ เพราะ adapter
-ที่สร้างแล้วถือ option ของตัวเองอยู่ และจะไม่มีอะไรอ่าน option ชุดที่สอง
+การตั้ง `adapter` และ `adapterOptions` พร้อมกันเป็น error ไม่ใช่กฎลำดับความสำคัญ เพราะ adapter ที่สร้างแล้วถือ
+option ของตัวเองอยู่ และจะไม่มีอะไรอ่าน option ชุดที่สอง
 
 ## Production configuration example
 
-เริ่มจาก configuration ที่แคบนี้ แล้วเพิ่มเฉพาะ feature ที่ application ทดสอบแล้ว value ทั้งหมดเป็น
-option name ที่รองรับ ให้แทน origin ตัวอย่างก่อน release
+เริ่มจาก configuration ที่แคบนี้ แล้วเพิ่มเฉพาะ feature ที่ application ทดสอบแล้ว value ทั้งหมดเป็น option name
+ที่รองรับ ให้แทน origin ตัวอย่างก่อน release
 
 ```ts
 import { config } from 'ruvyxa/config'
@@ -128,9 +126,9 @@ export default config({
 ```
 
 environment ที่จำเป็นถูกตรวจตรงจุดที่โปรเซสเริ่ม — `register()` ใน `instrumentation.ts` (ดู
-[Observability](14-observability-performance.md#instrumentationts)) — deployment ที่ขาด secret
-จึงล้ม ตอนเริ่มพร้อมชื่อที่ขาด CSP มักต้องการ source เพิ่มสำหรับ analytics, image, font หรือ API
-ให้ทดสอบทุก route หลังทำให้เข้มขึ้น
+[Observability](14-observability-performance.md#instrumentationts)) — deployment ที่ขาด secret จึงล้ม
+ตอนเริ่มพร้อมชื่อที่ขาด CSP มักต้องการ source เพิ่มสำหรับ analytics, image, font หรือ API ให้ทดสอบทุก route
+หลังทำให้เข้มขึ้น
 
 ```ts
 import { config } from 'ruvyxa/config'
@@ -150,8 +148,8 @@ export default config({
 
 ## React Compiler
 
-`reactCompiler: true` จะรัน React Compiler ตัวจริงกับ component ของคุณก่อน Oxc transform ของ Ruvyxa
-เอง ทำให้การ memoize ถูกอนุมานให้แทนที่จะเขียน `useMemo` กับ `useCallback` เอง
+`reactCompiler: true` จะรัน React Compiler ตัวจริงกับ component ของคุณก่อน Oxc transform ของ Ruvyxa เอง
+ทำให้การ memoize ถูกอนุมานให้แทนที่จะเขียน `useMemo` กับ `useCallback` เอง
 
 ```ts
 export default config({ reactCompiler: true })
@@ -159,80 +157,75 @@ export default config({ reactCompiler: true })
 
 ค่าเริ่มต้นคือ **ปิด** และตั้งใจไม่มี option ย่อยของตัวเอง มีสองข้อที่ควรรู้ก่อนเปิดใช้:
 
-- มันรันใน **inference mode** ซึ่งเป็นค่าเริ่มต้นของ upstream และ target React 19 อันเป็นเวอร์ชัน
-  peer ที่ Ruvyxa ต้องการอยู่แล้ว ที่นี่ไม่มีการ opt-in/opt-out รายไฟล์ — component ใช้ directive
-  ของ compiler เองในการหลีกเลี่ยง
-- ไฟล์ config ของ Babel จะถูก **ละเว้น** (`babelrc: false`, `configFile: false`)
-  ซึ่งตั้งใจไว้เช่นนั้น: `.babelrc` ในโปรเจกต์อาจทำให้ lane ฝั่ง server กับ lane ฝั่ง client compile
-  component เดียวกันไม่เหมือนกัน ซึ่งเป็นความต่างที่มักโผล่มาในรูป hydration mismatch บน production
-  เท่านั้น
+- มันรันใน **inference mode** ซึ่งเป็นค่าเริ่มต้นของ upstream และ target React 19 อันเป็นเวอร์ชัน peer ที่ Ruvyxa
+  ต้องการอยู่แล้ว ที่นี่ไม่มีการ opt-in/opt-out รายไฟล์ — component ใช้ directive ของ compiler เองในการหลีกเลี่ยง
+- ไฟล์ config ของ Babel จะถูก **ละเว้น** (`babelrc: false`, `configFile: false`) ซึ่งตั้งใจไว้เช่นนั้น:
+  `.babelrc` ในโปรเจกต์อาจทำให้ lane ฝั่ง server กับ lane ฝั่ง client compile component เดียวกันไม่เหมือนกัน
+  ซึ่งเป็นความต่างที่มักโผล่มาในรูป hydration mismatch บน production เท่านั้น
 
-output ที่ compile แล้วถูก key ด้วยเนื้อหาเหมือน transform อื่นทุกตัว การตั้งค่านี้จึงยังใช้ build
-cache ได้ตามปกติ เปิดใช้ แล้วรัน `ruvyxa build` เพื่อเทียบดู — มันเปลี่ยน JavaScript ที่ emit ออกมา
-ไม่ใช่ semantics ของโค้ดที่ถูกต้องอยู่แล้ว
+output ที่ compile แล้วถูก key ด้วยเนื้อหาเหมือน transform อื่นทุกตัว การตั้งค่านี้จึงยังใช้ build cache ได้ตามปกติ เปิดใช้
+แล้วรัน `ruvyxa build` เพื่อเทียบดู — มันเปลี่ยน JavaScript ที่ emit ออกมา ไม่ใช่ semantics ของโค้ดที่ถูกต้องอยู่แล้ว
 
 ## Compiler สำหรับ Markdown และ MDX
 
-`markdown` ตั้งค่า pipeline `@mdx-js/mdx` ชุดเดียวที่ development, SSR/SSG, adapter และ native
-production client bundle ใช้ร่วมกัน `gfm` เปิดเป็นค่าเริ่มต้น ส่วน `remarkPlugins`, `rehypePlugins`
-และ `recmaPlugins` รับ unified plugin หรือ tuple `[plugin, options]` และ `remarkRehypeOptions`
-ใช้ส่งค่าภาษา footnote กับค่าของ bridge อ่านตัวอย่างเต็มและ contract ของ frontmatter/heading ได้ที่
+`markdown` ตั้งค่า pipeline `@mdx-js/mdx` ชุดเดียวที่ development, SSR/SSG, adapter และ native production
+client bundle ใช้ร่วมกัน `gfm` เปิดเป็นค่าเริ่มต้น ส่วน `remarkPlugins`, `rehypePlugins` และ `recmaPlugins` รับ
+unified plugin หรือ tuple `[plugin, options]` และ `remarkRehypeOptions` ใช้ส่งค่าภาษา footnote กับค่าของ
+bridge อ่านตัวอย่างเต็มและ contract ของ frontmatter/heading ได้ที่
 [Routing และ rendering](04-routing-rendering.md)
 
 ## Security, middleware, site และ route rule
 
 `security.actionLimit` ปริยาย 1,048,576 byte; `security.apiLimit` ปริยาย 10,485,760 byte;
-`security.actionRateLimit` ปริยาย 600 request ใน 60 วินาที `trustedProxyIps` รับ IPv4/IPv6 แบบ exact
-หรือ CIDR range; เฉพาะ non-loopback proxy ที่ตั้งค่าเท่านั้นที่ส่ง forwarded client/protocol header
-ได้
+`security.actionRateLimit` ปริยาย 600 request ใน 60 วินาที `trustedProxyIps` รับ IPv4/IPv6 แบบ exact หรือ
+CIDR range; เฉพาะ non-loopback proxy ที่ตั้งค่าเท่านั้นที่ส่ง forwarded client/protocol header ได้
 
 `middleware` มี built-in (`cors`, `timing`, `log`, `rate`, `headers`) และค่าของ project worker
-`build.workers` ควรปล่อยไม่ตั้งค่า เมื่อไม่ตั้ง การ bundle route จะปรับตามเครื่อง:
-ค่าที่น้อยกว่าระหว่างจำนวน core (เคารพ `RAYON_NUM_THREADS`) กับจำนวนที่ memory ว่างรองรับได้ การ pin
-ตัวเลขไว้จะจำกัดเครื่องใหญ่ — ค่า 4 ใช้แค่ 4 worker บนเครื่อง 16 core — และ starter template
-ไม่ส่งค่านี้มาแล้ว การตั้งค่าจะลด CPU budget เท่านั้น ส่วนขอบเขต memory ยังบังคับอยู่ ค่าที่ copy
-มาจากโปรเจกต์อื่นจึงทำให้ CI container ที่จำกัด memory ขอเกินที่มีไม่ได้
+`build.workers` ควรปล่อยไม่ตั้งค่า เมื่อไม่ตั้ง การ bundle route จะปรับตามเครื่อง: ค่าที่น้อยกว่าระหว่างจำนวน core
+(เคารพ `RAYON_NUM_THREADS`) กับจำนวนที่ memory ว่างรองรับได้ การ pin ตัวเลขไว้จะจำกัดเครื่องใหญ่ — ค่า 4 ใช้แค่ 4
+worker บนเครื่อง 16 core — และ starter template ไม่ส่งค่านี้มาแล้ว การตั้งค่าจะลด CPU budget เท่านั้น ส่วนขอบเขต
+memory ยังบังคับอยู่ ค่าที่ copy มาจากโปรเจกต์อื่นจึงทำให้ CI container ที่จำกัด memory ขอเกินที่มีไม่ได้
 
-`workers` (1–8) กับ `timeoutMs` (ปริยาย 30,000, สูงสุด 300,000) ซึ่งจำกัด `proxy.handler` บน native
-host `site` ตั้งค่า `sitemap.xml` และ `robots.txt` ตอน build; exact app route หรือไฟล์ชื่อเดียวกันใน
-`public/` จะระงับ core generator `headers`, `redirects`, `rewrites` และ `proxy` ประกาศ request
-pipeline — ดู [Request pipeline](08-request-pipeline.md)
+`workers` (1–8) กับ `timeoutMs` (ปริยาย 30,000, สูงสุด 300,000) ซึ่งจำกัด `proxy.handler` บน native host
+`site` ตั้งค่า `sitemap.xml` และ `robots.txt` ตอน build; exact app route หรือไฟล์ชื่อเดียวกันใน `public/`
+จะระงับ core generator `headers`, `redirects`, `rewrites` และ `proxy` ประกาศ request pipeline — ดู
+[Request pipeline](08-request-pipeline.md)
 
 ## Entry ของ sitemap และ robots
 
-`site.sitemap: true` เผยแพร่ทุก route ที่ค้นพบ ส่วนรูปแบบ object เป็นการเพิ่มข้อมูลให้ตารางนั้น
-ไม่ใช่แทนที่ URL ที่ route discovery เจอแล้วจึงยังอยู่เหมือนเดิม และได้ข้อมูลเพิ่มตามที่ entry ระบุ
+`site.sitemap: true` เผยแพร่ทุก route ที่ค้นพบ ส่วนรูปแบบ object เป็นการเพิ่มข้อมูลให้ตารางนั้น ไม่ใช่แทนที่ URL ที่
+route discovery เจอแล้วจึงยังอยู่เหมือนเดิม และได้ข้อมูลเพิ่มตามที่ entry ระบุ
 
-| Key                            | Type                                                           | จุดประสงค์                                                                         |
-| ------------------------------ | -------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `sitemap.exclude`              | `string[]`                                                     | path ตรงตัวหรือ prefix ที่ลงท้ายด้วย `*` ที่จะไม่ใส่                               |
+| Key                            | Type                                                           | จุดประสงค์                                                                       |
+| ------------------------------ | -------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `sitemap.exclude`              | `string[]`                                                     | path ตรงตัวหรือ prefix ที่ลงท้ายด้วย `*` ที่จะไม่ใส่                                     |
 | `sitemap.additionalPaths`      | `string[]`                                                     | URL แบบ dynamic ที่ discovery และ prerendering เดาไม่ได้                           |
-| `sitemap.defaults`             | `{ lastModified?, changeFrequency?, priority? }`               | ค่าที่ทุก entry ทั้งที่ค้นพบเองและที่ระบุเองสืบทอด                                 |
-| `sitemap.entries[].url`        | `string`                                                       | จำเป็น URL แบบ root-relative จะ resolve เทียบกับ `site.url`                        |
-| `sitemap.entries[]`            | `lastModified`, `changeFrequency`, `priority`                  | override ค่า default สามตัวเดียวกันเป็นราย entry                                   |
-| `sitemap.entries[].alternates` | `{ languages: Record<string, string> }`                        | `hreflang` alternate ของ URL หนึ่ง                                                 |
-| `sitemap.entries[].images`     | `string[]`                                                     | URL ของรูปสำหรับส่วนขยาย image sitemap                                             |
+| `sitemap.defaults`             | `{ lastModified?, changeFrequency?, priority? }`               | ค่าที่ทุก entry ทั้งที่ค้นพบเองและที่ระบุเองสืบทอด                                          |
+| `sitemap.entries[].url`        | `string`                                                       | จำเป็น URL แบบ root-relative จะ resolve เทียบกับ `site.url`                       |
+| `sitemap.entries[]`            | `lastModified`, `changeFrequency`, `priority`                  | override ค่า default สามตัวเดียวกันเป็นราย entry                                    |
+| `sitemap.entries[].alternates` | `{ languages: Record<string, string> }`                        | `hreflang` alternate ของ URL หนึ่ง                                               |
+| `sitemap.entries[].images`     | `string[]`                                                     | URL ของรูปสำหรับส่วนขยาย image sitemap                                            |
 | `sitemap.entries[].videos`     | `SiteSitemapVideo[]`                                           | entry ของ video sitemap; แต่ละตัวต้องมี `title`, `thumbnail_loc` และ `description` |
-| `robots.rules`                 | `SiteRobotsRule` หรือ `SiteRobotsRule[]`                       | หนึ่งกลุ่มหรือหลายกลุ่ม ค่า default คืออนุญาตทุก crawler                           |
-| `robots.rules[]`               | `userAgent` (default `"*"`), `allow`, `disallow`, `crawlDelay` | field ที่เป็น string รับได้ทั้งค่าเดียวและ array                                   |
-| `robots.sitemap`               | `string \| string[]`                                           | URL sitemap แบบเต็ม ค่า default คือ root sitemap ที่ระบบสร้าง                      |
-| `robots.host`                  | `string`                                                       | origin แบบเต็มที่ต้องการ เขียนเป็นเรกคอร์ด `Host:`                                 |
+| `robots.rules`                 | `SiteRobotsRule` หรือ `SiteRobotsRule[]`                        | หนึ่งกลุ่มหรือหลายกลุ่ม ค่า default คืออนุญาตทุก crawler                                  |
+| `robots.rules[]`               | `userAgent` (default `"*"`), `allow`, `disallow`, `crawlDelay` | field ที่เป็น string รับได้ทั้งค่าเดียวและ array                                        |
+| `robots.sitemap`               | `string \| string[]`                                           | URL sitemap แบบเต็ม ค่า default คือ root sitemap ที่ระบบสร้าง                        |
+| `robots.host`                  | `string`                                                       | origin แบบเต็มที่ต้องการ เขียนเป็นเรกคอร์ด `Host:`                                    |
 
-`changeFrequency` เป็นหนึ่งใน `always`, `hourly`, `daily`, `weekly`, `monthly`, `yearly` หรือ
-`never`; `priority` อยู่ระหว่าง `0`–`1` entry ของวิดีโอยังรับ `content_loc`, `player_loc`,
-`duration`, `view_count`, `rating`, `expiration_date`, `publication_date`, `family_friendly`,
-`requires_subscription`, `live`, `restriction`, `platform`, `uploader` และ `tag`; โดย `restriction`
-กับ `platform` เป็น `{ relationship: 'allow' | 'deny', content }` และ `uploader` เป็น
-`{ content, info? }` type ที่ export ไว้ — `SiteSitemapConfig`, `SiteSitemapEntry`,
-`SiteSitemapVideo`, `SiteRobotsConfig`, `SiteRobotsRule` — คือการสะกดตารางนี้แบบที่ type checker
-ตรวจได้ ดู [Public API reference](17-public-api-reference.md)
+`changeFrequency` เป็นหนึ่งใน `always`, `hourly`, `daily`, `weekly`, `monthly`, `yearly` หรือ `never`;
+`priority` อยู่ระหว่าง `0`–`1` entry ของวิดีโอยังรับ `content_loc`, `player_loc`, `duration`, `view_count`,
+`rating`, `expiration_date`, `publication_date`, `family_friendly`, `requires_subscription`, `live`,
+`restriction`, `platform`, `uploader` และ `tag`; โดย `restriction` กับ `platform` เป็น
+`{ relationship: 'allow' | 'deny', content }` และ `uploader` เป็น `{ content, info? }` type ที่ export
+ไว้ — `SiteSitemapConfig`, `SiteSitemapEntry`, `SiteSitemapVideo`, `SiteRobotsConfig`,
+`SiteRobotsRule` — คือการสะกดตารางนี้แบบที่ type checker ตรวจได้ ดู
+[Public API reference](17-public-api-reference.md)
 
 ## Content artifact
 
-route Markdown และ MDX ใช้งานได้โดยไม่ต้องตั้ง `content` ให้เปิด `content: true` เฉพาะเมื่อ site
-ต้องการ `/content.json`, `/search-index.json`, `/rss.xml`, `/sitemap.xml` และ `/llms.txt` เพิ่มด้วย
-content engine จะใช้ `site.url`, `site.title`, `site.description` และ `site.language` ร่วมกัน
-จึงไม่ต้องกรอกข้อมูล site ซ้ำ
+route Markdown และ MDX ใช้งานได้โดยไม่ต้องตั้ง `content` ให้เปิด `content: true` เฉพาะเมื่อ site ต้องการ
+`/content.json`, `/search-index.json`, `/rss.xml`, `/sitemap.xml` และ `/llms.txt` เพิ่มด้วย content
+engine จะใช้ `site.url`, `site.title`, `site.description` และ `site.language` ร่วมกัน จึงไม่ต้องกรอกข้อมูล
+site ซ้ำ
 
 ```ts
 export default config({
@@ -252,70 +245,67 @@ export default config({
 })
 ```
 
-| Key ของ `content.engine` | Default                | จุดประสงค์                                                             |
-| ------------------------ | ---------------------- | ---------------------------------------------------------------------- |
-| `exclude`                | ไม่มี                  | route path ตรงตัวหรือ pattern ที่ลงท้ายด้วย `*` ที่จะไม่ใส่ใน artifact |
-| `locale`                 | `site.language`        | locale แบบ BCP 47 ที่ใช้ตัดคำสำหรับ search                             |
-| `stopWords`              | ลิสต์ในตัว             | คำที่ search index ข้าม                                                |
-| `minTermLength`          | `2`                    | ข้ามคำค้นที่สั้นกว่านี้                                                |
-| `manifestPath`           | `"/content.json"`      | ที่เผยแพร่ content manifest                                            |
-| `searchPath`             | `"/search-index.json"` | ที่เผยแพร่ search index                                                |
-| `feedPath`               | `"/rss.xml"`           | ที่เผยแพร่ feed                                                        |
-| `sitemapPath`            | `"/sitemap.xml"`       | ที่เผยแพร่ content sitemap                                             |
-| `llmsPath`               | `"/llms.txt"`          | ดัชนีให้ agent ค้นพบ ใส่ `false` เพื่อปิด                              |
-| `language`               | `site.language`        | ภาษาของ feed เมื่อต่างจาก locale ของ search                            |
+| Key ของ `content.engine` | Default                | จุดประสงค์                                                     |
+| ------------------------ | ---------------------- | ------------------------------------------------------------ |
+| `exclude`                | ไม่มี                    | route path ตรงตัวหรือ pattern ที่ลงท้ายด้วย `*` ที่จะไม่ใส่ใน artifact |
+| `locale`                 | `site.language`        | locale แบบ BCP 47 ที่ใช้ตัดคำสำหรับ search                        |
+| `stopWords`              | ลิสต์ในตัว                | คำที่ search index ข้าม                                         |
+| `minTermLength`          | `2`                    | ข้ามคำค้นที่สั้นกว่านี้                                               |
+| `manifestPath`           | `"/content.json"`      | ที่เผยแพร่ content manifest                                     |
+| `searchPath`             | `"/search-index.json"` | ที่เผยแพร่ search index                                         |
+| `feedPath`               | `"/rss.xml"`           | ที่เผยแพร่ feed                                                 |
+| `sitemapPath`            | `"/sitemap.xml"`       | ที่เผยแพร่ content sitemap                                      |
+| `llmsPath`               | `"/llms.txt"`          | ดัชนีให้ agent ค้นพบ ใส่ `false` เพื่อปิด                            |
+| `language`               | `site.language`        | ภาษาของ feed เมื่อต่างจาก locale ของ search                     |
 
-ใน `ruvyxa dev` artifact ถูก derive จาก content tree ตอน request หน้าที่แก้จึงสะท้อนโดยไม่ต้อง
-restart; `ruvyxa build` เขียนมันไว้ใต้ `assets/` และทุก production host เสิร์ฟไฟล์เหล่านั้น
+ใน `ruvyxa dev` artifact ถูก derive จาก content tree ตอน request หน้าที่แก้จึงสะท้อนโดยไม่ต้อง restart;
+`ruvyxa build` เขียนมันไว้ใต้ `assets/` และทุก production host เสิร์ฟไฟล์เหล่านั้น
 
 ## Environment variable
 
-| Variable                                                                                                                                                                 | วัตถุประสงค์ที่ยืนยันจากหลักฐาน                                                                                                                |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `RUVYXA_SITE_URL`                                                                                                                                                        | fallback canonical origin ของ site discovery                                                                                                   |
-| `RUVYXA_RUNTIME`                                                                                                                                                         | CLI/runtime override (`node`, `bun` หรือ `deno`) ที่ dev/build ใช้                                                                             |
-| `RUVYXA_ADAPTER`                                                                                                                                                         | build adapter selection override                                                                                                               |
-| `RUVYXA_BUILD_CACHE_DIR`                                                                                                                                                 | shared build cache directory override                                                                                                          |
-| `RUVYXA_RENDER_CACHE_SIZE`                                                                                                                                               | render-cache capacity                                                                                                                          |
-| `RUVYXA_WORKER_POOL_SIZE`, `RUVYXA_WORKER_TIMEOUT_MS`, `RUVYXA_WORKER_MAX_CONCURRENCY`, `RUVYXA_WORKER_MAX_QUEUE`, `RUVYXA_MEMORY_LIMIT_MB`, `RUVYXA_WORKER_SHUTDOWN_MS` | worker-pool operational control                                                                                                                |
+| Variable                                                                                                                                                                 | วัตถุประสงค์ที่ยืนยันจากหลักฐาน                                                                                                    |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| `RUVYXA_SITE_URL`                                                                                                                                                        | fallback canonical origin ของ site discovery                                                                               |
+| `RUVYXA_RUNTIME`                                                                                                                                                         | CLI/runtime override (`node`, `bun` หรือ `deno`) ที่ dev/build ใช้                                                             |
+| `RUVYXA_ADAPTER`                                                                                                                                                         | build adapter selection override                                                                                           |
+| `RUVYXA_BUILD_CACHE_DIR`                                                                                                                                                 | shared build cache directory override                                                                                      |
+| `RUVYXA_RENDER_CACHE_SIZE`                                                                                                                                               | render-cache capacity                                                                                                      |
+| `RUVYXA_WORKER_POOL_SIZE`, `RUVYXA_WORKER_TIMEOUT_MS`, `RUVYXA_WORKER_MAX_CONCURRENCY`, `RUVYXA_WORKER_MAX_QUEUE`, `RUVYXA_MEMORY_LIMIT_MB`, `RUVYXA_WORKER_SHUTDOWN_MS` | worker-pool operational control                                                                                            |
 | `RUVYXA_MAX_CONCURRENCY`, `RUVYXA_MAX_QUEUE`                                                                                                                             | จำนวน render ที่ `ruvyxa start` รันพร้อมกันและจำนวนที่รอได้ ตั้ง concurrency เป็น `0` เพื่อปิด admission ส่วน `ruvyxa dev` ปิดไว้เป็นค่าปริยาย |
-| `RUVYXA_DRAIN_DELAY`, `RUVYXA_SHUTDOWN_GRACE`                                                                                                                            | จำนวนมิลลิวินาทีที่ยังรับ connection ต่อหลังรับสัญญาณ shutdown เพื่อให้ readiness probe อ่าน `503` ได้ และเวลาที่งานค้างมีให้ทำจนจบ            |
-| `RUVYXA_PRERENDER_RECYCLE_AFTER`                                                                                                                                         | จำนวน isolated render ที่ build worker หนึ่งตัวทำก่อนถูกแทนที่ (default 32); `0` คือปิดการ recycle                                             |
-| `RUVYXA_STREAM_ASSET_THRESHOLD_BYTES`                                                                                                                                    | ขนาด public asset ที่เกินแล้วจะ stream แทนการ buffer (default 8 MiB)                                                                           |
-| `RUVYXA_WORKER_MAX_LINE_BYTES`                                                                                                                                           | ขนาดสูงสุดของ worker protocol line หนึ่งบรรทัดก่อนที่ worker จะถูกแทนที่ (default 64 MiB)                                                      |
-| `RUVYXA_PUBLIC_*`                                                                                                                                                        | browser-safe value ที่ inject เพื่อใช้ใน client                                                                                                |
-| `RUVYXA_FUN`                                                                                                                                                             | ตั้งเป็น `0`/`false`/`off` เพื่อปิด spinner และมาสคอตที่วิ่งใน CLI โดยสีไม่เปลี่ยน                                                             |
-| `RUVYXA_ASCII`                                                                                                                                                           | ตั้งเป็น `1` เพื่อวาด progress และ status ด้วย glyph แบบ ASCII เท่านั้น                                                                        |
-| `FORCE_COLOR`, `CLICOLOR_FORCE`                                                                                                                                          | บังคับให้ output ที่ถูก redirect มีสี และกำหนดความลึกของสีได้: `1` = 16 สี, `2` = 256, `3` = 24-bit                                            |
+| `RUVYXA_DRAIN_DELAY`, `RUVYXA_SHUTDOWN_GRACE`                                                                                                                            | จำนวนมิลลิวินาทีที่ยังรับ connection ต่อหลังรับสัญญาณ shutdown เพื่อให้ readiness probe อ่าน `503` ได้ และเวลาที่งานค้างมีให้ทำจนจบ              |
+| `RUVYXA_PRERENDER_RECYCLE_AFTER`                                                                                                                                         | จำนวน isolated render ที่ build worker หนึ่งตัวทำก่อนถูกแทนที่ (default 32); `0` คือปิดการ recycle                                    |
+| `RUVYXA_STREAM_ASSET_THRESHOLD_BYTES`                                                                                                                                    | ขนาด public asset ที่เกินแล้วจะ stream แทนการ buffer (default 8 MiB)                                                           |
+| `RUVYXA_WORKER_MAX_LINE_BYTES`                                                                                                                                           | ขนาดสูงสุดของ worker protocol line หนึ่งบรรทัดก่อนที่ worker จะถูกแทนที่ (default 64 MiB)                                             |
+| `RUVYXA_PUBLIC_*`                                                                                                                                                        | browser-safe value ที่ inject เพื่อใช้ใน client                                                                                 |
+| `RUVYXA_FUN`                                                                                                                                                             | ตั้งเป็น `0`/`false`/`off` เพื่อปิด spinner และมาสคอตที่วิ่งใน CLI โดยสีไม่เปลี่ยน                                                       |
+| `RUVYXA_ASCII`                                                                                                                                                           | ตั้งเป็น `1` เพื่อวาด progress และ status ด้วย glyph แบบ ASCII เท่านั้น                                                             |
+| `FORCE_COLOR`, `CLICOLOR_FORCE`                                                                                                                                          | บังคับให้ output ที่ถูก redirect มีสี และกำหนดความลึกของสีได้: `1` = 16 สี, `2` = 256, `3` = 24-bit                                    |
 
-output ของ CLI ยังเคารพ opt-out มาตรฐานของเทอร์มินัลสองตัว: `NO_COLOR` ปิดสี และ `TERM=dumb`
-ปิดทั้งสี อนิเมชัน และ glyph ที่ไม่ใช่ ASCII ส่วน output ที่ถูก pipe หรือ redirect
-จะไม่มีอนิเมชันเสมอ
+output ของ CLI ยังเคารพ opt-out มาตรฐานของเทอร์มินัลสองตัว: `NO_COLOR` ปิดสี และ `TERM=dumb` ปิดทั้งสี อนิเมชัน
+และ glyph ที่ไม่ใช่ ASCII ส่วน output ที่ถูก pipe หรือ redirect จะไม่มีอนิเมชันเสมอ
 
-`FORCE_COLOR` มีไว้สำหรับกรณีที่สองตัวนั้นตอบผิด: log ของ CI ที่ render ANSI ได้ มันมีลำดับเหนือทั้ง
-`NO_COLOR` และ `TERM=dumb` เพราะมันเป็นตัวเดียวที่ถูกตั้งโดยตั้งใจสำหรับการรันครั้งนั้น
-ไม่ใช่ค่าที่ติดมาจาก shell profile หรือ build image ส่วน `FORCE_COLOR=0` คือวิธีที่ variable
-เดียวกันใช้ปฏิเสธ การบังคับสีไม่เคยบังคับอนิเมชัน เพราะ spinner ต้องวาดทับบนบรรทัดเดิม ซึ่ง log file
-ทำไม่ได้
+`FORCE_COLOR` มีไว้สำหรับกรณีที่สองตัวนั้นตอบผิด: log ของ CI ที่ render ANSI ได้ มันมีลำดับเหนือทั้ง `NO_COLOR` และ
+`TERM=dumb` เพราะมันเป็นตัวเดียวที่ถูกตั้งโดยตั้งใจสำหรับการรันครั้งนั้น ไม่ใช่ค่าที่ติดมาจาก shell profile หรือ build image
+ส่วน `FORCE_COLOR=0` คือวิธีที่ variable เดียวกันใช้ปฏิเสธ การบังคับสีไม่เคยบังคับอนิเมชัน เพราะ spinner
+ต้องวาดทับบนบรรทัดเดิม ซึ่ง log file ทำไม่ได้
 
-เมื่อเทอร์มินัลรายงานว่ารองรับสี 24-bit ส่วนที่เป็นการตกแต่งของ output — wordmark, เส้นคั่นใต้
-header และหัวข้อ section, หางที่ลากตามมาสคอตใน progress, และแท่งขนาดใน `bench` — จะถูกวาดเป็น
-gradient ส่วนสิ่งที่สื่อความหมายไม่ถูกวาดแบบนั้น: ทุก status, จำนวน, path และการจำแนกประเภท
-ยังอยู่ในชุดสิบหกสีที่ทุกเทอร์มินัล render เหมือนกัน
-ดังนั้นเทอร์มินัลที่มีสีน้อยกว่าจึงเสียแค่การตกแต่ง ไม่เคยเสียความแตกต่าง
+เมื่อเทอร์มินัลรายงานว่ารองรับสี 24-bit ส่วนที่เป็นการตกแต่งของ output — wordmark, เส้นคั่นใต้ header และหัวข้อ
+section, หางที่ลากตามมาสคอตใน progress, และแท่งขนาดใน `bench` — จะถูกวาดเป็น gradient
+ส่วนสิ่งที่สื่อความหมายไม่ถูกวาดแบบนั้น: ทุก status, จำนวน, path และการจำแนกประเภท ยังอยู่ในชุดสิบหกสีที่ทุกเทอร์มินัล
+render เหมือนกัน ดังนั้นเทอร์มินัลที่มีสีน้อยกว่าจึงเสียแค่การตกแต่ง ไม่เคยเสียความแตกต่าง
 
-variable ภายในที่ขึ้นต้นหรือลงท้ายด้วย double underscore เป็น runtime transport detail ไม่ใช่
-application configuration ห้ามตั้งเอง ค่าเช่น `RUVYXA_AUTH_SECRET` ปรากฏใน auth scaffolder; ให้ใช้
-private environment source และอย่าเปิดเผยด้วย public prefix
+variable ภายในที่ขึ้นต้นหรือลงท้ายด้วย double underscore เป็น runtime transport detail ไม่ใช่ application
+configuration ห้ามตั้งเอง ค่าเช่น `RUVYXA_AUTH_SECRET` ปรากฏใน auth scaffolder; ให้ใช้ private environment
+source และอย่าเปิดเผยด้วย public prefix
 
-`RUVYXA_WORKER_MAX_QUEUE` มีค่าเริ่มต้นสี่เท่าของ `RUVYXA_WORKER_MAX_CONCURRENCY` มันจำกัด render
-work ที่รออยู่ และคืน `RUV1705` เมื่อเต็ม ให้ใช้หลักฐานจาก load test ก่อนเพิ่มค่า เพราะ queue
-ที่ใหญ่ขึ้นเก็บ request data มากขึ้นและเพิ่มเวลารอ
+`RUVYXA_WORKER_MAX_QUEUE` มีค่าเริ่มต้นสี่เท่าของ `RUVYXA_WORKER_MAX_CONCURRENCY` มันจำกัด render work ที่รออยู่
+และคืน `RUV1705` เมื่อเต็ม ให้ใช้หลักฐานจาก load test ก่อนเพิ่มค่า เพราะ queue ที่ใหญ่ขึ้นเก็บ request data
+มากขึ้นและเพิ่มเวลารอ
 
 ### กำหนด type ให้ public variable และเก็บ private variable ไว้ฝั่ง server
 
-ประกาศ public variable ที่ client code อ่าน เพื่อให้ชื่อที่พิมพ์ผิดกลายเป็น TypeScript error
-และทำให้ contract ที่ browser มองเห็นตรวจทานได้ โดยไม่ต้องเปิดเผยค่า private
+ประกาศ public variable ที่ client code อ่าน เพื่อให้ชื่อที่พิมพ์ผิดกลายเป็น TypeScript error และทำให้ contract ที่
+browser มองเห็นตรวจทานได้ โดยไม่ต้องเปิดเผยค่า private
 
 ```ts
 // app/ruvyxa-env.d.ts
@@ -345,39 +335,36 @@ export function AppName() {
 }
 ```
 
-อย่าเพิ่ม `DATABASE_URL` หรือชื่อ private อื่นลงใน `ImportMetaEnv` และอย่าอ่านมันใน client component
-ให้อ่านค่า private เฉพาะ server-only code เช่น loader, action หรือ API route การตรวจ boundary ของ
-framework เป็นด่านเสริม ไม่ใช่เหตุผลให้วาง secret ใน shared module จับคู่ `.env.example` ที่ commit
-ด้วย `requireEnv([...])` สำหรับชื่อที่ต้องมีจริงตอน release
+อย่าเพิ่ม `DATABASE_URL` หรือชื่อ private อื่นลงใน `ImportMetaEnv` และอย่าอ่านมันใน client component ให้อ่านค่า
+private เฉพาะ server-only code เช่น loader, action หรือ API route การตรวจ boundary ของ framework
+เป็นด่านเสริม ไม่ใช่เหตุผลให้วาง secret ใน shared module จับคู่ `.env.example` ที่ commit ด้วย
+`requireEnv([...])` สำหรับชื่อที่ต้องมีจริงตอน release
 
 ### `cache.handler` — store ไหนเก็บเอกสารที่ revalidate แล้ว
 
-route แบบ ISR หรือ PPR render ครั้งเดียวแล้วถูกเสิร์ฟจาก store จนหมด window ปกติแล้ว platform
-เป็นคนตอบว่า store คืออะไร: Cloudflare Worker ได้ KV, serverless function
-ได้ไดเรกทอรีเดียวที่เขียนได้, ส่วน `ruvyxa start` ใช้ build output ของตัวเอง
+route แบบ ISR หรือ PPR render ครั้งเดียวแล้วถูกเสิร์ฟจาก store จนหมด window ปกติแล้ว platform เป็นคนตอบว่า store
+คืออะไร: Cloudflare Worker ได้ KV, serverless function ได้ไดเรกทอรีเดียวที่เขียนได้, ส่วน `ruvyxa start` ใช้
+build output ของตัวเอง
 
-ไดเรกทอรีนั้นแยกต่อ instance และต่อ deployment สำหรับ container เดียวมันถูกแล้ว
-แต่สำหรับแอปที่รันหลาย instance อยู่หลังโดเมนเดียวมันไม่ถูก: แต่ละ instance revalidate แยกกัน
-แล้วผู้ชมได้สำเนาไหนก็แล้วแต่ load balancer เลือก มีแต่ตัวแอปที่รู้ว่าควรใช้ store ตัวไหนร่วมกัน
-ตรงนี้คือที่ที่มันบอก
+ไดเรกทอรีนั้นแยกต่อ instance และต่อ deployment สำหรับ container เดียวมันถูกแล้ว แต่สำหรับแอปที่รันหลาย instance
+อยู่หลังโดเมนเดียวมันไม่ถูก: แต่ละ instance revalidate แยกกัน แล้วผู้ชมได้สำเนาไหนก็แล้วแต่ load balancer เลือก
+มีแต่ตัวแอปที่รู้ว่าควรใช้ store ตัวไหนร่วมกัน ตรงนี้คือที่ที่มันบอก
 
-**`ruvyxa start` และ `ruvyxa preview` ใช้มัน ส่วน `ruvyxa dev` ไม่ใช้** deployed build จะ compile
-handler เข้าไปใน route registry ที่ wrapper ของทุก adapter import ส่วน `start` และ `preview`
+**`ruvyxa start` และ `ruvyxa preview` ใช้มัน ส่วน `ruvyxa dev` ไม่ใช้** deployed build จะ compile handler
+เข้าไปใน route registry ที่ wrapper ของทุก adapter import ส่วน `start` และ `preview`
 โหลดโมดูลเดียวกันนั้นเข้าไปใน render worker ของตัวเองแทน ดังนั้น `cache()`, `revalidateTag()`,
 `invalidateCache()` และเอกสาร ISR ที่เก็บไว้ ก็ไปถึง handler บนสองคำสั่งนี้ด้วย
 
-`ruvyxa dev` ถูกกันออกโดยตั้งใจ ทุก key ที่ shared store เก็บถูก namespace ด้วย build id แต่
-development server ไม่มี build — มันจะเขียน key แบบไม่มี prefix ลง store ที่โปรเจกต์ตั้งไว้
-ซึ่งส่วนใหญ่คือของ production หรือไม่ก็ต้องกุ identity ที่ไม่มีความหมายกับ deployment
-การอ่านและเขียน cache ของ production จาก working copy ไม่ใช่ feature เวอร์ชันย่อ ดังนั้น `dev`
-จะแจ้งตอนเริ่มทำงานว่ากำลังข้าม handler และใช้ cache ระดับ process ต่อไป
+`ruvyxa dev` ถูกกันออกโดยตั้งใจ ทุก key ที่ shared store เก็บถูก namespace ด้วย build id แต่ development server
+ไม่มี build — มันจะเขียน key แบบไม่มี prefix ลง store ที่โปรเจกต์ตั้งไว้ ซึ่งส่วนใหญ่คือของ production หรือไม่ก็ต้องกุ
+identity ที่ไม่มีความหมายกับ deployment การอ่านและเขียน cache ของ production จาก working copy ไม่ใช่ feature
+เวอร์ชันย่อ ดังนั้น `dev` จะแจ้งตอนเริ่มทำงานว่ากำลังข้าม handler และใช้ cache ระดับ process ต่อไป
 
-มีข้อต่างจาก deployed build อยู่หนึ่งข้อที่ควรรู้ ในนั้น handler แทนที่ document store ของ platform
-ไปเลย แต่ที่นี่มันถูกถาม*ก่อน* และไดเรกทอรี `prerender` ของ build เองเป็น fallback
-เพราะบนโฮสต์นี้สองอย่างนี้ไม่ใช่สิ่งเดียวกัน: path ที่ store ของคุณไม่เคยเก็บ ยังตอบด้วยเอกสารที่
-build นี้สร้างไว้ แทนที่จะ re-render หนึ่งครั้งต่อ instance กับ store ที่ยังว่าง ส่วนเอกสารที่ store
-บอกว่า `stale` จะถูกเสิร์ฟทันที และถ้าเป็น route แบบ ISR จะ refresh อยู่เบื้องหลัง response —
-stale-while-revalidate แบบเดียวกับ deployed build — แล้วเขียนเอกสารใหม่กลับผ่าน handler เพื่อให้ทุก
+มีข้อต่างจาก deployed build อยู่หนึ่งข้อที่ควรรู้ ในนั้น handler แทนที่ document store ของ platform ไปเลย
+แต่ที่นี่มันถูกถาม*ก่อน* และไดเรกทอรี `prerender` ของ build เองเป็น fallback เพราะบนโฮสต์นี้สองอย่างนี้ไม่ใช่สิ่งเดียวกัน:
+path ที่ store ของคุณไม่เคยเก็บ ยังตอบด้วยเอกสารที่ build นี้สร้างไว้ แทนที่จะ re-render หนึ่งครั้งต่อ instance กับ store
+ที่ยังว่าง ส่วนเอกสารที่ store บอกว่า `stale` จะถูกเสิร์ฟทันที และถ้าเป็น route แบบ ISR จะ refresh อยู่เบื้องหลัง
+response — stale-while-revalidate แบบเดียวกับ deployed build — แล้วเขียนเอกสารใหม่กลับผ่าน handler เพื่อให้ทุก
 instance เห็นตรงกัน string เปล่าจาก `read` ถือว่า stale บนทั้งสองโฮสต์
 
 ```ts
@@ -400,17 +387,17 @@ export async function write(pathname, html, revalidate, forced) {
 }
 ```
 
-path เป็น project-relative และ module ถูก compile เข้าไปใน deployed bundle ดังนั้นมัน import
-อะไรก็ได้ที่แอป import ได้ และมันไม่ถูกโหลดตอน build
+path เป็น project-relative และ module ถูก compile เข้าไปใน deployed bundle ดังนั้นมัน import อะไรก็ได้ที่แอป
+import ได้ และมันไม่ถูกโหลดตอน build
 
-export ทั้งสองตัวไม่บังคับ: ให้แค่ `read` ตัวเดียวก็ได้ platform ยังเขียนที่เดิมของมันอยู่
-ถ้าไม่ประกาศอะไรเลย ทุก host ทำงานเหมือนเดิมทุกอย่าง
+export ทั้งสองตัวไม่บังคับ: ให้แค่ `read` ตัวเดียวก็ได้ platform ยังเขียนที่เดิมของมันอยู่ ถ้าไม่ประกาศอะไรเลย ทุก host
+ทำงานเหมือนเดิมทุกอย่าง
 
 seam นี้มีอยู่เพราะ framework เลือก store ที่แอปใช้ร่วมกันแทนแอปไม่ได้
 
-`revalidateTag()` เคลียร์ `cache()` ของ process นี้ทันทีเหมือนเดิมทุกอย่าง ถ้า handler export
-`revalidateTag` ด้วย tag ที่ request นั้นสั่งไว้จะถูกส่งให้มัน หลังตอบ response —
-ซึ่งคือสิ่งที่ทำให้การ invalidate ไปถึงทุก instance ไม่ใช่แค่ instance ที่รับ mutation นั้น:
+`revalidateTag()` เคลียร์ `cache()` ของ process นี้ทันทีเหมือนเดิมทุกอย่าง ถ้า handler export `revalidateTag`
+ด้วย tag ที่ request นั้นสั่งไว้จะถูกส่งให้มัน หลังตอบ response — ซึ่งคือสิ่งที่ทำให้การ invalidate ไปถึงทุก instance
+ไม่ใช่แค่ instance ที่รับ mutation นั้น:
 
 ```js
 export async function revalidateTag(tags) {
@@ -418,14 +405,13 @@ export async function revalidateTag(tags) {
 }
 ```
 
-ไม่บังคับ และไม่มี fallback ของ platform: tag ติดป้ายอะไรก็ตามที่แอปตัดสินใจติด ส่วน cache ของ
-platform ที่ key ด้วย URL ไม่มีอะไรให้ค้นด้วย tag ได้ โปรเจกต์ที่ไม่ประกาศ handler ทำงานเหมือนเดิม
-คือ `revalidateTag()` เคลียร์ process เดียว
+ไม่บังคับ และไม่มี fallback ของ platform: tag ติดป้ายอะไรก็ตามที่แอปตัดสินใจติด ส่วน cache ของ platform ที่ key ด้วย
+URL ไม่มีอะไรให้ค้นด้วย tag ได้ โปรเจกต์ที่ไม่ประกาศ handler ทำงานเหมือนเดิม คือ `revalidateTag()` เคลียร์ process
+เดียว
 
-`invalidateCache()` มี seam เดียวกันนี้ และจำเป็นกว่าด้วย ถ้าไม่มี
-มันจะถูกยกเลิกโดยการอ่านครั้งถัดไป ของตัวเอง: key หายไปจาก process นี้ แต่ shared store ยังเก็บไว้
-การ miss ครั้งถัดไปจึงอ่านมันกลับมา แล้ว commit ใหม่ด้วย TTL เต็ม — เป็นการ invalidate
-ที่ดูเหมือนได้ผล
+`invalidateCache()` มี seam เดียวกันนี้ และจำเป็นกว่าด้วย ถ้าไม่มี มันจะถูกยกเลิกโดยการอ่านครั้งถัดไป ของตัวเอง: key
+หายไปจาก process นี้ แต่ shared store ยังเก็บไว้ การ miss ครั้งถัดไปจึงอ่านมันกลับมา แล้ว commit ใหม่ด้วย TTL เต็ม —
+เป็นการ invalidate ที่ดูเหมือนได้ผล
 
 ```js
 export async function deleteData(keys) {
@@ -436,11 +422,10 @@ export async function deleteData(keys) {
 }
 ```
 
-แต่ละ entry มีทั้ง key ตรงตัวและ prefix เพราะสองค่านี้อนุมานจากกันไม่ได้:
-`invalidateCache('products')` ล้าง `products` และทุกอย่างใต้ `products:` แต่ไม่ล้าง `productsXYZ`
-ส่วน `key` จะไม่มีเมื่อเรียก `invalidateCache()` แบบไม่ส่ง argument ซึ่งไม่ได้ระบุ key ใด —
-การเรียกแบบนั้นล้าง namespace ทั้งหมดของ deployment ซึ่ง prefix อย่างเดียวบอกได้ ทั้งสองค่ามี build
-id ของ deployment นี้ติดมาแล้ว ใช้ได้ตามที่มาเลย
+แต่ละ entry มีทั้ง key ตรงตัวและ prefix เพราะสองค่านี้อนุมานจากกันไม่ได้: `invalidateCache('products')` ล้าง
+`products` และทุกอย่างใต้ `products:` แต่ไม่ล้าง `productsXYZ` ส่วน `key` จะไม่มีเมื่อเรียก `invalidateCache()`
+แบบไม่ส่ง argument ซึ่งไม่ได้ระบุ key ใด — การเรียกแบบนั้นล้าง namespace ทั้งหมดของ deployment ซึ่ง prefix
+อย่างเดียวบอกได้ ทั้งสองค่ามี build id ของ deployment นี้ติดมาแล้ว ใช้ได้ตามที่มาเลย
 
 module เดียวกันนี้รองรับ `cache()` ได้ด้วย:
 
@@ -458,9 +443,8 @@ export async function writeData(key, entry) {
 }
 ```
 
-store ใน memory ของ process ยังตอบก่อนเสมอ — มันคือชั้นที่เร็ว เฉพาะตอน miss
-ในเครื่องเท่านั้นที่ไปถาม shared store และเฉพาะ miss ทั้งสองชั้นเท่านั้นที่ producer จะทำงาน
-ส่วนการเขียนถูกส่งออกไปโดย request ไม่ต้องรอ
+store ใน memory ของ process ยังตอบก่อนเสมอ — มันคือชั้นที่เร็ว เฉพาะตอน miss ในเครื่องเท่านั้นที่ไปถาม shared store
+และเฉพาะ miss ทั้งสองชั้นเท่านั้นที่ producer จะทำงาน ส่วนการเขียนถูกส่งออกไปโดย request ไม่ต้องรอ
 
 store ที่ throw คือ cache ที่ช้าลง ไม่ใช่ request ที่ล้มเหลว: error ถูกรายงาน แล้ว producer ทำงานต่อ
 ถ้าไม่ประกาศเลยไม่มีต้นทุนใดๆ — เส้นทางที่ไม่มี handler ไม่แม้แต่จะสร้าง promise
@@ -473,18 +457,17 @@ export default {
 }
 ```
 
-ชั้น in-memory เก็บ 1024 entry เป็นค่าเริ่มต้น เกินจากนั้นจะ evict ตัวที่ใช้ล่าสุดนานที่สุด ใส่ `0`
-เพื่อปิดทิ้งทั้งชั้น ทุกการอ่านจะไปถึง shared store
+ชั้น in-memory เก็บ 1024 entry เป็นค่าเริ่มต้น เกินจากนั้นจะ evict ตัวที่ใช้ล่าสุดนานที่สุด ใส่ `0` เพื่อปิดทิ้งทั้งชั้น
+ทุกการอ่านจะไปถึง shared store
 
-นี่คือค่าที่ควรใช้เมื่อ deployment รันหลาย instance หลัง shared store เดียวกัน: สำเนาต่อ instance
-ที่วางอยู่หน้า store ที่แชร์ คือสิ่งที่ทำให้สอง instance ตอบ key เดียวกันไม่เหมือนกัน
-การปิดมันคือการแลก round trip หนึ่งครั้งกับคำตอบเดียว
+นี่คือค่าที่ควรใช้เมื่อ deployment รันหลาย instance หลัง shared store เดียวกัน: สำเนาต่อ instance ที่วางอยู่หน้า store
+ที่แชร์ คือสิ่งที่ทำให้สอง instance ตอบ key เดียวกันไม่เหมือนกัน การปิดมันคือการแลก round trip หนึ่งครั้งกับคำตอบเดียว
 
-หน่วยเป็น entry โดยตั้งใจ — store นี้ไม่มีการนับขนาดที่จะตอบ budget แบบไบต์ได้ ถ้าไปประมาณเอาก็จะได้
-budget ที่ไม่มีใครเชื่อถือได้
+หน่วยเป็น entry โดยตั้งใจ — store นี้ไม่มีการนับขนาดที่จะตอบ budget แบบไบต์ได้ ถ้าไปประมาณเอาก็จะได้ budget
+ที่ไม่มีใครเชื่อถือได้
 
-ค่าที่ไม่ใช่จำนวนเต็มของ entry จะถูกรายงานแล้วเมิน: bound ที่ใช้ไม่ได้ต้องไม่กลายเป็น "ไม่มี cache"
-หรือ "ไม่จำกัด" อย่างเงียบๆ ซึ่งเป็นสองทิศทางที่เจ็บ และหน้าตาเหมือน โค้ดที่ทำงานได้ทั้งคู่
+ค่าที่ไม่ใช่จำนวนเต็มของ entry จะถูกรายงานแล้วเมิน: bound ที่ใช้ไม่ได้ต้องไม่กลายเป็น "ไม่มี cache" หรือ "ไม่จำกัด"
+อย่างเงียบๆ ซึ่งเป็นสองทิศทางที่เจ็บ และหน้าตาเหมือน โค้ดที่ทำงานได้ทั้งคู่
 
 ### `cache.maxBytes` — ขอบเขตหน่วยความจำที่จำนวน entry บอกไม่ได้
 
@@ -494,31 +477,26 @@ export default {
 }
 ```
 
-`maxEntries` คุมว่าเก็บกี่ค่า แต่ไม่ได้บอกว่าแต่ละค่าใหญ่แค่ไหน หนึ่งพัน entry
-ที่ค่าละสิบเมกะไบต์คือสิบกิกะไบต์ `maxBytes` ค่าเริ่มต้นห้าสิบเมกะไบต์ แล้ว evict ตัวที่ใช้ล่าสุด
-นานที่สุดจนกว่าจะพอดี
+`maxEntries` คุมว่าเก็บกี่ค่า แต่ไม่ได้บอกว่าแต่ละค่าใหญ่แค่ไหน หนึ่งพัน entry ที่ค่าละสิบเมกะไบต์คือสิบกิกะไบต์ `maxBytes`
+ค่าเริ่มต้นห้าสิบเมกะไบต์ แล้ว evict ตัวที่ใช้ล่าสุด นานที่สุดจนกว่าจะพอดี
 
-แต่ละค่าถูกชั่งจากความยาวหลัง serialize เป็นการประมาณ และเป็นตัวที่มีให้ใช้จริง: ทุกค่าที่ถูก cache
-ผ่าน `assertCacheSerializable` มาแล้ว จึงชั่งแบบนี้ได้เสมอ
-และการวัดที่คลาดไม่กี่เท่าดีกว่าไม่มีขอบเขตเลย ใส่ `0` เพื่อปิด byte budget แล้วให้ `maxEntries`
-คุมตัวเดียว
+แต่ละค่าถูกชั่งจากความยาวหลัง serialize เป็นการประมาณ และเป็นตัวที่มีให้ใช้จริง: ทุกค่าที่ถูก cache ผ่าน
+`assertCacheSerializable` มาแล้ว จึงชั่งแบบนี้ได้เสมอ และการวัดที่คลาดไม่กี่เท่าดีกว่าไม่มีขอบเขตเลย ใส่ `0` เพื่อปิด byte
+budget แล้วให้ `maxEntries` คุมตัวเดียว
 
 ค่าที่ใหญ่กว่า budget ทั้งก้อนยังถูกเก็บหนึ่งครั้งแล้วถูก evict โดยการเขียนครั้งถัดไป
 การเขียนที่รายงานว่าสำเร็จต้องไม่เหลืออะไรไว้ไม่ได้
 
 ### สิ่งที่ shared store ไม่ได้รับประกัน
 
-สามข้อที่ควรรู้ก่อนชี้ `cache.handler` ไปที่ store บนเครือข่าย แต่ละข้อเป็นการ แลกที่ตั้งใจ
-ไม่ใช่การมองข้าม:
+สามข้อที่ควรรู้ก่อนชี้ `cache.handler` ไปที่ store บนเครือข่าย แต่ละข้อเป็นการ แลกที่ตั้งใจ ไม่ใช่การมองข้าม:
 
 - **การ invalidate รอ ส่วนการเติม cache ไม่รอ** `revalidateTag()` ถูก await ก่อนตอบ response เพราะ
-  mutation ที่ตอบ `200` ได้บอกผู้เรียกไปแล้วว่าค่าเก่าหายไป การทำ write
-  นั้นหายคือความผิดพลาดเชิงความถูกต้อง ส่วนการ _เขียน_ cache ไม่ถูก await เพราะการกัก response
-  ไว้เพื่อเติม cache คือสิ่งตรงข้ามกับเหตุผลที่มี cache
-- **write ที่ไม่รอ มีเพดาน** ค้างได้มากสุด 256 ตัว เกินจากนั้นถูกทิ้งและนับไว้
-  ครั้งแรกที่ทิ้งถูกรายงาน ถ้าไม่มีเพดาน store ที่ช้าลงตอน traffic สูงจะสะสม promise
-  หนึ่งตัวต่อหนึ่งค่าที่ผลิต แล้ว cache ที่มีไว้ปกป้อง origin จะกลายเป็นตัวที่ทำ process หมดแรงเอง
-  ดูได้จาก `cacheStats()` ที่ `pendingSharedWrites` และ `droppedSharedWrites`
+  mutation ที่ตอบ `200` ได้บอกผู้เรียกไปแล้วว่าค่าเก่าหายไป การทำ write นั้นหายคือความผิดพลาดเชิงความถูกต้อง ส่วนการ
+  _เขียน_ cache ไม่ถูก await เพราะการกัก response ไว้เพื่อเติม cache คือสิ่งตรงข้ามกับเหตุผลที่มี cache
+- **write ที่ไม่รอ มีเพดาน** ค้างได้มากสุด 256 ตัว เกินจากนั้นถูกทิ้งและนับไว้ ครั้งแรกที่ทิ้งถูกรายงาน ถ้าไม่มีเพดาน store
+  ที่ช้าลงตอน traffic สูงจะสะสม promise หนึ่งตัวต่อหนึ่งค่าที่ผลิต แล้ว cache ที่มีไว้ปกป้อง origin จะกลายเป็นตัวที่ทำ
+  process หมดแรงเอง ดูได้จาก `cacheStats()` ที่ `pendingSharedWrites` และ `droppedSharedWrites`
 - **key พก build id ของ deployment นี้ไปด้วย** ไม่งั้นสอง deployment ที่ชี้ไป store เดียวกันจะเขียน
   `cache('user:1')` ทับกันและอ่านคำตอบของอีกฝั่ง handler ของคุณจะได้รับ key ที่เติม prefix แล้ว
 

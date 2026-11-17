@@ -943,6 +943,44 @@ describe('generated standalone server connection deadlines', () => {
  * serving a hung render while the Node one gave up would be the two disagreeing
  * about the same build.
  */
+describe('generated standalone server request target', () => {
+  /** Send one raw request line, because `fetch` normalizes the path first. */
+  function rawStatusLine(port: number, target: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const socket = netConnect(port, '127.0.0.1')
+      let received = ''
+      socket.setEncoding('utf8')
+      socket.on('connect', () =>
+        socket.write(`GET ${target} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n`),
+      )
+      socket.on('data', (chunk: string) => {
+        received += chunk
+      })
+      socket.on('end', () => resolve(received.split('\r\n')[0] ?? ''))
+      socket.on('error', reject)
+    })
+  }
+
+  it('routes a target that opens with two slashes as a path, not as another host', async () => {
+    // WHATWG reads `//evil.example/whoami` against a base as scheme-relative:
+    // host `evil.example`, path `/whoami`. A proxy in front of this server, and
+    // the Bun and Deno transports, see the path `//evil.example/whoami`, so a
+    // rule that guards `/whoami` upstream let this request through and the Node
+    // transport then served the route it was guarding.
+    const server = stageDeployment('node')
+    const started = await startProcessServer(process.execPath, [], server)
+    try {
+      assert.match(await rawStatusLine(started.port, '/whoami'), / 200 /)
+      for (const target of ['//evil.example/whoami', '/\\evil.example/whoami']) {
+        const status = await rawStatusLine(started.port, target)
+        assert.doesNotMatch(status, / 200 /, `${target} reached /whoami: ${status}`)
+      }
+    } finally {
+      started.stop()
+    }
+  })
+})
+
 describe('generated standalone server render deadline', () => {
   for (const runtime of runtimes) {
     const launcher = executables[runtime]

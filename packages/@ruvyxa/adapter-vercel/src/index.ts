@@ -202,7 +202,10 @@ async function readRequestBody(req) {
 }
 
 export default async function(req, res, context) {
-  const url = new URL(req.url, \`https://\${req.headers.host || 'localhost'}\`);
+  // A leading "/." keeps an origin-form target a path: resolved bare, a target
+  // that opens with two slashes is scheme-relative and names another host.
+  const target = req.url.startsWith('/') ? '/.' + req.url : req.url;
+  const url = new URL(target, \`https://\${req.headers.host || 'localhost'}\`);
   return requestOrigin.run(url.origin, () => serve(req, res, context, url));
 }
 

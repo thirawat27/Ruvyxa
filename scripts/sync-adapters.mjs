@@ -1,6 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { format, resolveConfig } from 'prettier'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const contractPath = path.join(root, 'tests', 'fixtures', 'adapter-contract.json')
@@ -64,7 +65,14 @@ for (const document of documents) {
     onDemandImages ? document.yes : document.no,
   ])
   const block = [START, '', markdownTable(document.headers, rows), '', END].join('\n')
-  const updated = replaceBlock(source, block, document.file)
+  // The table is padded by `String#length`, which is not how wide a cell is:
+  // prettier measures Thai combining marks as zero columns, so padding by code
+  // units and `prettier --check` can never both pass on `docs/th`. Prettier owns
+  // the layout of every committed Markdown file, so it lays this one out too.
+  const updated = await format(replaceBlock(source, block, document.file), {
+    ...(await resolveConfig(file)),
+    filepath: file,
+  })
   if (source === updated) continue
   if (!write) fail(`${document.file} is stale; run node scripts/sync-adapters.mjs --write`)
   await writeFile(file, updated)

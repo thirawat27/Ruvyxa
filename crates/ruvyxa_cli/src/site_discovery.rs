@@ -1275,7 +1275,7 @@ fn validate_application_path(path: &str, field: &str) -> std::io::Result<()> {
 }
 
 fn validate_exclusion_pattern(pattern: &str) -> std::io::Result<()> {
-    let path = pattern.strip_suffix('*').unwrap_or(pattern);
+    let path = pattern.trim_suffix('*');
     if path.contains('*') {
         return Err(invalid_input(format!(
             "site.sitemap.exclude only supports a trailing '*': {pattern}"

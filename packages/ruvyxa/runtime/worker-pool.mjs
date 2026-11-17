@@ -74,7 +74,12 @@ import {
   normalizeActionResult,
   parseActionPayload,
 } from './action-runtime.mjs'
-import { methodNotAllowed, normalizeResponse, selectRouteHandler } from './api-methods.mjs'
+import {
+  followingAbort,
+  methodNotAllowed,
+  normalizeResponse,
+  selectRouteHandler,
+} from './api-methods.mjs'
 import {
   clientEntrySource,
   metaSourceImports,
@@ -555,6 +560,18 @@ function enforceWorkerCacheBudget() {
 
 const memoryCheckInterval = setInterval(enforceWorkerCacheBudget, 30_000)
 memoryCheckInterval.unref()
+
+// A promise in project code that rejects with nothing listening -- a write a
+// route started and never awaited -- is, under Node's default, a process exit,
+// and it takes every request in flight on this worker down with the one that
+// caused it. The standalone server reports the same rejection and keeps
+// serving; this worker does the same, so `ruvyxa dev` and a deployment agree.
+process.on('unhandledRejection', (reason) => {
+  note(
+    'error',
+    `unhandled promise rejection: ${reason instanceof Error ? (reason.stack ?? reason.message) : String(reason)}`,
+  )
+})
 
 // --- Request Processing ---
 const rl = createInterface({ input: process.stdin })
@@ -1682,7 +1699,7 @@ async function handleApi(request, signal) {
       requestInit.body = requestBody
     }
   }
-  const req = new Request(`http://localhost${requestPath}`, requestInit)
+  const req = followingAbort(new Request(`http://localhost${requestPath}`, requestInit), signal)
   // An API route already receives the `Request`, so the ambient accessors are
   // redundant there — but a helper shared with a page must not stop working
   // because it was called from a route handler instead.

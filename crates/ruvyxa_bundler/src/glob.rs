@@ -499,7 +499,7 @@ mod tests {
                 .matches
                 .iter()
                 .map(|file| {
-                    let relative = file.strip_prefix(&root).unwrap_or(file);
+                    let relative = file.trim_prefix(&root);
                     format!("./{}", relative.to_string_lossy().replace('\\', "/"))
                 })
                 .collect::<Vec<_>>();

@@ -3,12 +3,14 @@ import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { describe, it } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { setFlagsFromString } from 'node:v8'
+import { runInNewContext } from 'node:vm'
 
 const workspaceRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta.url)))
 const runtimeUrl = (file) =>
   `file://${path.join(workspaceRoot, 'packages/ruvyxa/runtime', file).replaceAll('\\', '/')}`
 
-const { methodNotAllowed, routeMethods, selectRouteHandler } = await import(
+const { followingAbort, methodNotAllowed, routeMethods, selectRouteHandler } = await import(
   runtimeUrl('api-methods.mjs')
 )
 
@@ -100,5 +102,64 @@ describe('the three hosts that dispatch API routes', () => {
       'utf8',
     )
     assert.match(artifactCache, /"api-methods\.mjs"/)
+  })
+})
+
+describe('a rebuilt request keeps listening to the signal it was built from', () => {
+  // `--expose-gc` for this file alone, so the collection the bug depends on is
+  // forced rather than waited for. Without that the outcome is GC timing, which
+  // is how the original failure appeared on one CI lane and on no other.
+  setFlagsFromString('--expose-gc')
+  const gc = runInNewContext('gc')
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 5))
+  const collect = async () => {
+    for (let pass = 0; pass < 5; pass++) {
+      gc()
+      await settle()
+    }
+  }
+
+  /** A handler that parks on its signal and keeps nothing else. */
+  const park = (request, seen) => {
+    request.signal.addEventListener('abort', () => {
+      seen.aborted = true
+    })
+  }
+
+  it('delivers the abort to a Request built with { signal } after a collection', async () => {
+    const controller = new AbortController()
+    const seen = { aborted: false }
+    ;(() => {
+      const signal = controller.signal
+      park(followingAbort(new Request('http://localhost/x', { signal }), signal), seen)
+    })()
+    await collect()
+    controller.abort()
+    await settle()
+    assert.equal(seen.aborted, true, 'the abort reached nothing once the request was collected')
+  })
+
+  it('delivers the abort to a Request rebuilt from the one the host holds', async () => {
+    // The host keeps the request it was handed; it is the rebuilt copy the
+    // handler receives that nothing else refers to.
+    const controller = new AbortController()
+    const incoming = new Request('http://localhost/x', { signal: controller.signal })
+    const seen = { aborted: false }
+    ;(() => {
+      park(followingAbort(new Request(incoming, {}), incoming.signal), seen)
+    })()
+    await collect()
+    controller.abort()
+    await settle()
+    assert.equal(incoming.signal.aborted, true)
+    assert.equal(seen.aborted, true, 'the abort reached nothing once the copy was collected')
+  })
+
+  it('adds nothing for a source that has already aborted', () => {
+    const controller = new AbortController()
+    controller.abort()
+    const request = new Request('http://localhost/x', { signal: controller.signal })
+    assert.equal(followingAbort(request, controller.signal), request)
+    assert.equal(request.signal.aborted, true)
   })
 })
