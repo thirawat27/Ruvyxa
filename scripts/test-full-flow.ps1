@@ -109,17 +109,26 @@ function Start-RuvyxaServer {
         [ValidateSet("dev", "start", "preview")][string]$Mode,
         [int]$Port,
         [string]$Root = $App,
-        [int]$TimeoutSeconds = 45
+        [int]$TimeoutSeconds = 45,
+        # The demo configures `realtime`, which only the Axum host serves, so
+        # `start` and `preview` refuse it with RUV1024 unless asked for that host.
+        [switch]$LegacyHost
     )
     $log = Join-Path $env:TEMP "ruvyxa-$Mode-$Port.log"
     Remove-Item $log -Force -ErrorAction SilentlyContinue
+    $arguments = @($Mode, "--root", $Root, "--port", $Port)
+    if ($LegacyHost) { $arguments += "--legacy-host" }
     $process = Start-Process -NoNewWindow -FilePath $Ruvyxa `
-        -ArgumentList @($Mode, "--root", $Root, "--port", $Port) `
+        -ArgumentList $arguments `
         -PassThru -RedirectStandardOutput $log -RedirectStandardError "$log.err"
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
         if ($process.HasExited) {
+            # Print what it said: the log file lives on a runner nobody can open.
+            foreach ($file in @($log, "$log.err")) {
+                if (Test-Path $file) { Get-Content $file -Tail 40 | Out-Host }
+            }
             throw "$Mode server on port $Port exited early (code $($process.ExitCode)). Log: $log"
         }
         try {
@@ -136,6 +145,9 @@ function Start-RuvyxaServer {
         Start-Sleep -Milliseconds 250
     }
     $process | Stop-Process -Force -ErrorAction SilentlyContinue
+    foreach ($file in @($log, "$log.err")) {
+        if (Test-Path $file) { Get-Content $file -Tail 40 | Out-Host }
+    }
     throw "$Mode server on port $Port did not become ready in ${TimeoutSeconds}s. Log: $log"
 }
 
@@ -431,7 +443,8 @@ if ($SkipAdapters) {
     # adapter declares the strategies it can deploy via `Adapter.supports`, and
     # RUV2202 names every route it cannot.
     #
-    # The demo also enables native realtime, which only `ruvyxa start` serves:
+    # The demo also enables native realtime, which only the Axum host serves
+    # (`ruvyxa dev`, and `ruvyxa start --legacy-host` until it is removed):
     # no build artifact holds a socket, so every adapter *reports* RUV2205 and
     # none refuses the build for it. That report is what is asserted here,
     # because a deployment that quietly ships a dead `/__ruvyxa/realtime` is the
@@ -517,7 +530,16 @@ Test-Cli "test:parity" @("test:parity") -AllowFailure
 # ==============================================================================
 Write-Section "API ROUTES"
 
-$apiServer = Start-RuvyxaServer -Mode "start" -Port $Ports.Api
+# The scenarios below run the demo through `--legacy-host`, because the demo
+# configures realtime. Without the flag `start` has to refuse it, by name.
+$refusal = Invoke-Native -Arguments @("start", "--root", $App, "--port", $Ports.Api) | Out-String
+if ($script:LastNativeExitCode -ne 0 -and $refusal -match "RUV1024") {
+    Write-Ok "start refuses a realtime project without --legacy-host (RUV1024)"
+} else {
+    Write-Fail "start without --legacy-host did not refuse the realtime demo with RUV1024`n$refusal"
+}
+
+$apiServer = Start-RuvyxaServer -Mode "start" -Port $Ports.Api -LegacyHost
 try {
     $health = Invoke-App -Port $Ports.Api -Path "/api/health"
     if ($health.StatusCode -eq 200) {
@@ -546,7 +568,7 @@ try {
 
 Write-Section "PRODUCTION SERVER (render strategies)"
 
-$ssgServer = Start-RuvyxaServer -Mode "start" -Port $Ports.Ssg
+$ssgServer = Start-RuvyxaServer -Mode "start" -Port $Ports.Ssg -LegacyHost
 try {
     $strategyRoutes = @(
         @{ Path = "/ssg-blog/hello-world"; Label = "SSG page";        RequireHtml = $true }
@@ -577,7 +599,7 @@ try {
 
 Write-Section "START / PREVIEW"
 
-$prodServer = Start-RuvyxaServer -Mode "start" -Port $Ports.Prod
+$prodServer = Start-RuvyxaServer -Mode "start" -Port $Ports.Prod -LegacyHost
 try {
     $response = Invoke-App -Port $Ports.Prod -Path "/"
     if ($response.StatusCode -eq 200) { Write-Ok "start: production server responds 200" }
@@ -589,7 +611,7 @@ try {
     Stop-RuvyxaServer $prodServer
 }
 
-$previewServer = Start-RuvyxaServer -Mode "preview" -Port $Ports.Preview
+$previewServer = Start-RuvyxaServer -Mode "preview" -Port $Ports.Preview -LegacyHost
 try {
     $response = Invoke-App -Port $Ports.Preview -Path "/"
     if ($response.StatusCode -eq 200) { Write-Ok "preview: serves the existing production build" }
@@ -629,7 +651,7 @@ Write-Section "CLIENT MANIFEST CACHE"
 $ClientBuildReportPath = Join-Path $OutDir "client-report.json"
 $CacheProbeBefore = "/catchall/manifest-cache-probe-a"
 $CacheProbeAfter  = "/catchall/manifest-cache-probe-b"
-$cacheServer = Start-RuvyxaServer -Mode "start" -Port $Ports.DevCache
+$cacheServer = Start-RuvyxaServer -Mode "start" -Port $Ports.DevCache -LegacyHost
 try {
     $originalManifest = Get-Content -LiteralPath $ClientBuildReportPath -Raw
     $before = Invoke-App -Port $Ports.DevCache -Path $CacheProbeBefore
