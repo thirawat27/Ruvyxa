@@ -2,6 +2,8 @@ import { readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import * as prettier from 'prettier'
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const contractPath = path.join(root, 'tests', 'fixtures', 'adapter-contract.json')
 const write = process.argv.includes('--write')
@@ -64,7 +66,15 @@ for (const document of documents) {
     onDemandImages ? document.yes : document.no,
   ])
   const block = [START, '', markdownTable(document.headers, rows), '', END].join('\n')
-  const updated = replaceBlock(source, block, document.file)
+  // Laid out by prettier, not by this script: the committed file has to pass
+  // `prettier --check`, and prettier measures a Thai combining mark as zero
+  // columns where `String#length` counts one. Padding here by `length` was
+  // correct until a prettier release changed that measure, and from then on
+  // this gate and `format:check` each rewrote what the other required.
+  const updated = await prettier.format(replaceBlock(source, block, document.file), {
+    ...(await prettier.resolveConfig(file)),
+    filepath: file,
+  })
   if (source === updated) continue
   if (!write) fail(`${document.file} is stale; run node scripts/sync-adapters.mjs --write`)
   await writeFile(file, updated)
@@ -82,6 +92,7 @@ function displayName(name) {
   return name === 'aws' ? 'AWS' : name[0].toUpperCase() + name.slice(1)
 }
 
+/** A valid table; prettier owns its column widths (see the caller). */
 function markdownTable(headers, rows) {
   const widths = headers.map((header, index) =>
     Math.max(header.length, 3, ...rows.map((row) => row[index].length)),

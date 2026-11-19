@@ -11,6 +11,8 @@
 export const revalidate = 60
 
 export default function IsrPage() {
+  // Impure on purpose: the stamp is how a reader sees the cached render age.
+  // oxlint-disable-next-line react/purity
   const now = new Date().toISOString()
 
   return (

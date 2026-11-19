@@ -814,7 +814,15 @@ fn strip_css_comments(source: &str) -> String {
     out
 }
 
-/// Collapse runs of whitespace and remove spaces around CSS punctuation.
+/// Collapse runs of whitespace and remove the spaces CSS does not need.
+///
+/// Whitespace is dropped only where no CSS grammar gives it meaning, and the
+/// rule is not symmetric. A space *after* `{ } ; , : (` and *before*
+/// `{ } ; , )` can always go. A space before `(` or `:` and after `)` cannot:
+/// `a :hover` is a descendant selector while `a:hover` is a compound one,
+/// `and (min-width: 1px)` is a media condition while `and(` is a function
+/// token, and `calc(100% - (2px))` needs the space after `-` *and* the one in
+/// front of `(`. Treating all seven characters alike broke each of those.
 fn collapse_css_whitespace(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     let mut prev_space = false;
@@ -825,13 +833,19 @@ fn collapse_css_whitespace(source: &str) -> String {
     while i < len {
         let ch = chars[i];
 
+        if ch == ' ' || ch == '\n' || ch == '\r' || ch == '\t' || ch == '\x0c' {
+            prev_space = true;
+            i += 1;
+            continue;
+        }
+
+        if prev_space && space_is_significant(&out, ch) {
+            out.push(' ');
+        }
+        prev_space = false;
+
         // Preserve string literals verbatim.
         if ch == '"' || ch == '\'' {
-            // Flush pending space only if output doesn't already end with punctuation.
-            if prev_space && !out.is_empty() && !ends_with_css_punct(&out) {
-                out.push(' ');
-            }
-            prev_space = false;
             out.push(ch);
             i += 1;
             while i < len && chars[i] != ch {
@@ -849,33 +863,6 @@ fn collapse_css_whitespace(source: &str) -> String {
             continue;
         }
 
-        if ch == ' ' || ch == '\n' || ch == '\r' || ch == '\t' {
-            prev_space = true;
-            i += 1;
-            continue;
-        }
-
-        // CSS punctuation: remove surrounding spaces.
-        if is_css_punct(ch) {
-            if prev_space && !out.is_empty() && !ends_with_css_punct(&out) {
-                // Only keep the space if removing it would merge identifiers/values
-                // incorrectly — but for CSS punctuation it's always safe to drop.
-            }
-            prev_space = false;
-            // Trim trailing space before punctuation.
-            if out.ends_with(' ') {
-                out.pop();
-            }
-            out.push(ch);
-            i += 1;
-            continue;
-        }
-
-        // Normal character.
-        if prev_space && !out.is_empty() && !ends_with_css_punct(&out) {
-            out.push(' ');
-        }
-        prev_space = false;
         out.push(ch);
         i += 1;
     }
@@ -883,12 +870,14 @@ fn collapse_css_whitespace(source: &str) -> String {
     out
 }
 
-fn is_css_punct(ch: char) -> bool {
-    matches!(ch, '{' | '}' | ':' | ';' | ',' | '(' | ')')
-}
-
-fn ends_with_css_punct(s: &str) -> bool {
-    s.chars().last().is_some_and(is_css_punct)
+/// Whether a run of whitespace between the end of `out` and `next` must stay.
+fn space_is_significant(out: &str, next: char) -> bool {
+    let Some(previous) = out.chars().last() else {
+        return false;
+    };
+    let drops_after = matches!(previous, '{' | '}' | ';' | ',' | ':' | '(');
+    let drops_before = matches!(next, '{' | '}' | ';' | ',' | ')');
+    !(drops_after || drops_before)
 }
 
 #[cfg(test)]
@@ -916,6 +905,40 @@ mod tests {
             minified.contains("\u{0e44}\u{0e17}\u{0e22}"),
             "a non-Latin font name must survive: {minified:?}"
         );
+    }
+
+    /// Whitespace the CSS grammar reads must survive minification. Each of
+    /// these came out of a production build changed in meaning or invalid.
+    #[test]
+    fn minification_keeps_significant_whitespace() {
+        for (source, expected) in [
+            ("a :hover { color: red }", "a :hover{color:red}"),
+            (".x :not(.a) .b { }", ".x :not(.a) .b{}"),
+            (
+                "@media screen and (min-width: 1px) { a { b: c } }",
+                "@media screen and (min-width:1px){a{b:c}}",
+            ),
+            (
+                "@supports not (display: grid) { }",
+                "@supports not (display:grid){}",
+            ),
+            (
+                "a { width: calc(100% - (2px + 1px)); }",
+                "a{width:calc(100% - (2px + 1px));}",
+            ),
+            (
+                "a { width: calc((1px) + 2px); }",
+                "a{width:calc((1px) + 2px);}",
+            ),
+            (
+                "a { width: calc( 1px + 2px ) ; }",
+                "a{width:calc(1px + 2px);}",
+            ),
+            ("a > b ~ c + d , e { }", "a > b ~ c + d,e{}"),
+            ("a { content: \"x\" \"y\" }", "a{content:\"x\" \"y\"}"),
+        ] {
+            assert_eq!(collapse_css_whitespace(source), expected, "{source}");
+        }
     }
 
     /// A comment survives minification's removal but must keep its bytes intact

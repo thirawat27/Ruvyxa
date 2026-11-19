@@ -238,7 +238,7 @@ pub(crate) fn prepare_build_assets(
 /// Print the fixed banner a summarized build opens with.
 fn print_build_header(args: &BuildArgs, target: BuildTarget, app_dir: &Path, out_dir: &Path) {
     print_header("Build");
-    print_field("target", accent(format!("{:?}", target).to_lowercase()));
+    print_field("target", accent(format!("{target:?}").to_lowercase()));
     print_field(
         "profile",
         accent(if args.server_only {
@@ -870,7 +870,7 @@ impl BuildReport<'_> {
         serde_json::json!({
             "framework": "Ruvyxa",
             "version": env!("CARGO_PKG_VERSION"),
-            "target": format!("{:?}", target).to_lowercase(),
+            "target": format!("{target:?}").to_lowercase(),
             "profile": "production",
             "createdAtUnix": SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)

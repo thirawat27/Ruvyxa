@@ -8,6 +8,13 @@ use serde::Serialize;
 
 use crate::render_cache::RenderCacheSnapshot;
 
+/// The most distinct rows either table keeps. Both are keyed by values a request
+/// supplies (an action's path and name arrive in its query, failed calls
+/// included), so without a bound a long `ruvyxa dev` session — or one script —
+/// grew them for as long as the server ran. A row already present keeps
+/// updating; a new one past the bound is not recorded.
+const MAX_METRIC_ROWS: usize = 1024;
+
 #[derive(Debug)]
 pub(crate) struct DevToolsMetrics {
     started: Instant,
@@ -63,6 +70,9 @@ impl DevToolsMetrics {
         let Ok(mut state) = self.inner.lock() else {
             return;
         };
+        if state.bundles.len() >= MAX_METRIC_ROWS && !state.bundles.contains_key(path) {
+            return;
+        }
         let metric = state
             .bundles
             .entry(path.to_string())
@@ -80,6 +90,9 @@ impl DevToolsMetrics {
             return;
         };
         let key = format!("{path}#{action}");
+        if state.actions.len() >= MAX_METRIC_ROWS && !state.actions.contains_key(&key) {
+            return;
+        }
         let metric = state
             .actions
             .entry(key.clone())
@@ -141,6 +154,27 @@ mod tests {
         assert_eq!(snapshot.actions[0].calls, 2);
         assert_eq!(snapshot.actions[0].errors, 1);
         assert_eq!(snapshot.actions[0].max_micros, 5_000);
+    }
+
+    #[tokio::test]
+    async fn metric_tables_stop_growing_at_their_bound() {
+        let metrics = DevToolsMetrics::default();
+        for index in 0..MAX_METRIC_ROWS + 50 {
+            metrics.record_bundle(&format!("/p{index}"), 1);
+            metrics.record_action("/a", &format!("n{index}"), Duration::ZERO, true);
+        }
+        // A row already present keeps counting past the bound.
+        metrics.record_bundle("/p0", 2);
+        let cache = crate::RenderCache::new(2, 60).snapshot().await;
+        let snapshot = metrics.snapshot(serde_json::json!([]), cache);
+        assert_eq!(snapshot.bundles.len(), MAX_METRIC_ROWS);
+        assert_eq!(snapshot.actions.len(), MAX_METRIC_ROWS);
+        let first = snapshot
+            .bundles
+            .iter()
+            .find(|row| row.path == "/p0")
+            .unwrap();
+        assert_eq!((first.bytes, first.builds), (2, 2));
     }
 
     #[test]

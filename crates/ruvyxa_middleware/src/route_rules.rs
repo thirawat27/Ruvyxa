@@ -402,37 +402,145 @@ fn match_rule(
 
 /// Replace `:name` tokens (with an optional trailing modifier); an absent
 /// parameter substitutes the empty string.
+///
+/// A name starts with a letter or `_`, so `:4000` in `http://localhost:4000`
+/// is a port, not a parameter.
 pub fn substitute(template: &str, params: &RuleParams) -> String {
+    substitute_with(template, params, |value| Some(value.to_string())).unwrap_or_default()
+}
+
+/// [`substitute`], each value passed through `render` first; `None` from
+/// `render` refuses the whole substitution.
+fn substitute_with(
+    template: &str,
+    params: &RuleParams,
+    render: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
     let mut output = String::new();
     let chars: Vec<char> = template.chars().collect();
     let mut index = 0;
     while index < chars.len() {
-        if chars[index] == ':' {
+        if chars[index] == ':' && chars.get(index + 1).is_some_and(|c| is_token_start(*c)) {
             let mut end = index + 1;
-            while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
+            while end < chars.len() && is_token_char(chars[end]) {
                 end += 1;
             }
-            if end > index + 1 {
-                let name: String = chars[index + 1..end].iter().collect();
-                if end < chars.len() && matches!(chars[end], '*' | '+' | '?') {
-                    end += 1;
-                }
-                output.push_str(params.get(&name).map(String::as_str).unwrap_or(""));
-                index = end;
-                continue;
+            let name: String = chars[index + 1..end].iter().collect();
+            if end < chars.len() && matches!(chars[end], '*' | '+' | '?') {
+                end += 1;
             }
+            let value = params.get(&name).map(String::as_str).unwrap_or("");
+            output.push_str(&render(value)?);
+            index = end;
+            continue;
         }
         output.push(chars[index]);
         index += 1;
     }
-    output
+    Some(output)
+}
+
+fn is_token_start(c: char) -> bool {
+    c.is_ascii_alphabetic() || c == '_'
+}
+
+fn is_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
 }
 
 fn template_uses_params(template: &str) -> bool {
     let chars: Vec<char> = template.chars().collect();
     chars
         .windows(2)
-        .any(|pair| pair[0] == ':' && (pair[1].is_ascii_alphanumeric() || pair[1] == '_'))
+        .any(|pair| pair[0] == ':' && is_token_start(pair[1]))
+}
+
+/// Substitute a destination's path half. When it is an absolute `http(s)`
+/// URL, a value landing in the authority must be a hostname
+/// (`label(.label)*`); anything else — `evil.com#`, `a/b`, `x@y` — would move
+/// the request to another host, so the rule does not match (`None`).
+///
+/// A value landing in the path is percent-encoded ([`encode_path_value`]):
+/// parameters come from the *decoded* canonical path, so `a?x=1` substituted
+/// raw would end the path and inject a query, `#` would start a fragment.
+fn substitute_destination(base: &str, params: &RuleParams) -> Option<String> {
+    let path_value = |value: &str| Some(encode_path_value(value));
+    let scheme_end = ["http://", "https://"].iter().find_map(|scheme| {
+        base.get(..scheme.len())
+            .filter(|prefix| prefix.eq_ignore_ascii_case(scheme))
+            .map(|_| scheme.len())
+    });
+    let Some(authority_start) = scheme_end else {
+        return substitute_with(base, params, path_value);
+    };
+    let authority_end = base[authority_start..]
+        .find(['/', '#'])
+        .map_or(base.len(), |at| authority_start + at);
+    let authority = substitute_with(&base[authority_start..authority_end], params, |value| {
+        is_hostname_value(value).then(|| value.to_string())
+    })?;
+    Some(format!(
+        "{}{authority}{}",
+        &base[..authority_start],
+        substitute_with(&base[authority_end..], params, path_value)?
+    ))
+}
+
+/// Substitute a destination's query half, each value encoded as a query
+/// component so `&`, `=`, `#`, and `+` in a value stay inside it.
+fn substitute_query(template: &str, params: &RuleParams) -> String {
+    substitute_with(template, params, |value| Some(encode_uri_component(value))).unwrap_or_default()
+}
+
+/// A value for a path position: each `/`-separated piece encoded as
+/// [`encode_uri_component`] does, the `/` kept. Canonicalisation refuses a
+/// segment that decodes to `/` (`%2F`), so a `/` in a value is always a real
+/// segment boundary — the joined remainder of `:path*`, `:path+`, or a regex
+/// parameter spanning segments.
+///
+/// Public so a host can turn a canonical (decoded) path back into a request
+/// target whose `?` and `#` cannot be read as a query or fragment.
+pub fn encode_path_value(value: &str) -> String {
+    value
+        .split('/')
+        .map(encode_uri_component)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// JavaScript's `encodeURIComponent`, byte for byte: `A-Z a-z 0-9 - _ . ! ~ *
+/// ' ( )` verbatim, every other UTF-8 byte as uppercase `%XX`.
+fn encode_uri_component(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'!'
+            | b'~'
+            | b'*'
+            | b'\''
+            | b'('
+            | b')' => output.push(byte as char),
+            _ => output.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    output
+}
+
+/// `^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$`
+fn is_hostname_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.split('.').all(|label| {
+            !label.is_empty()
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
 }
 
 #[derive(Debug, Clone)]
@@ -530,11 +638,13 @@ pub fn match_redirect(
         // The destination is split before substitution: a `?` after a
         // parameter name would otherwise read as the optional modifier.
         let (base, destination_query) = split_destination(&rule.rule.destination);
-        let mut location = substitute(base, &params);
+        let Some(mut location) = substitute_destination(base, &params) else {
+            continue;
+        };
         match destination_query {
             Some(query) => {
                 location.push('?');
-                location.push_str(&substitute(query, &params));
+                location.push_str(&substitute_query(query, &params));
             }
             None => {
                 if let Some(query) = request.query.filter(|query| !query.is_empty()) {
@@ -591,9 +701,13 @@ pub fn match_rewrite(rules: &[CompiledRewriteRule], request: &RuleRequest<'_>) -
         };
         let uses_params = template_uses_params(&rule.rule.destination);
         let (base_template, query_template) = split_destination(&rule.rule.destination);
-        let base = substitute(base_template, &params);
+        let Some(base) = substitute_destination(base_template, &params) else {
+            continue;
+        };
         let mut pairs = query_template
-            .map(|query| parse_query(&substitute(query, &params)))
+            // Encoded as components, then parsed back: the value survives
+            // whole and is serialized once, never twice.
+            .map(|query| parse_query(&substitute_query(query, &params)))
             .unwrap_or_default();
         if !uses_params {
             pairs.extend(params.iter().map(|(k, v)| (k.clone(), v.clone())));
@@ -737,6 +851,9 @@ pub fn parse_query(query: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// WHATWG urlencoded decoding, byte by byte: `%` decodes only when both next
+/// bytes are ASCII hex digits, so `%aé` and `%+f` stay literal as they do in
+/// `URLSearchParams` (and a multi-byte character after `%` cannot be sliced).
 fn form_decode(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut output = Vec::with_capacity(bytes.len());
@@ -744,13 +861,15 @@ fn form_decode(text: &str) -> String {
     while index < bytes.len() {
         match bytes[index] {
             b'+' => output.push(b' '),
-            b'%' if index + 2 < bytes.len() => {
-                match u8::from_str_radix(&text[index + 1..index + 3], 16) {
-                    Ok(byte) => {
-                        output.push(byte);
+            b'%' => {
+                let high = bytes.get(index + 1).copied().and_then(hex_value);
+                let low = bytes.get(index + 2).copied().and_then(hex_value);
+                match (high, low) {
+                    (Some(high), Some(low)) => {
+                        output.push(high << 4 | low);
                         index += 2;
                     }
-                    Err(_) => output.push(b'%'),
+                    _ => output.push(b'%'),
                 }
             }
             byte => output.push(byte),
@@ -758,6 +877,15 @@ fn form_decode(text: &str) -> String {
         index += 1;
     }
     String::from_utf8_lossy(&output).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// The WHATWG urlencoded serializer: alphanumerics and `*-._` verbatim, space

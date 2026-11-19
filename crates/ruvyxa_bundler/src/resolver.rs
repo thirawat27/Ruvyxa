@@ -49,7 +49,7 @@ use rayon::prelude::*;
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
-use crate::hooks::{BuildHookContext, BuildHookPipeline};
+use crate::hooks::{BuildHookContext, BuildHookPipeline, TransformOutput};
 use crate::incremental::{FreshnessStatus, IncrementalGraphCache};
 use crate::{BundleError, BundleTarget, JsxRuntime, Result};
 use crate::{ast, minifier};
@@ -76,6 +76,49 @@ pub struct ResolvedModule {
     pub glob_matches: Vec<PathBuf>,
     /// Whether this module is part of `node_modules` (external).
     pub is_external: bool,
+    /// The build transform hooks' output for this module, when a host is
+    /// installed.
+    ///
+    /// The graph walk runs the transform *before* scanning imports, because a
+    /// transform may add imports of its own — the React compiler adds
+    /// `react/compiler-runtime`. Scanning the pre-transform source left those
+    /// unresolved, so the client linker stubbed them and every compiled
+    /// component threw on `_c`. The JavaScript graph already scans the
+    /// transformed source. The compiler reuses this output rather than running
+    /// the hooks a second time, so the code it compiles is exactly the code
+    /// whose imports `deps` describes.
+    pub hook_output: Option<TransformOutput>,
+}
+
+/// Run the build transform hooks over a module the way the compiler would.
+///
+/// Returns `None` when no host is installed, and for the module kinds the
+/// compiler never hands to a transform hook: JSON documents and CSS Modules.
+pub(crate) fn transform_for_graph(
+    source: &str,
+    path: &Path,
+    project_root: &Path,
+    target: BundleTarget,
+    build_hooks: &BuildHookPipeline,
+) -> Result<Option<TransformOutput>> {
+    if build_hooks.host_count() == 0 || crate::style_module::is_css_module_path(path) {
+        return Ok(None);
+    }
+    let is_json = matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some(extension) if extension.eq_ignore_ascii_case("json")
+    );
+    if is_json {
+        return Ok(None);
+    }
+    let context = BuildHookContext {
+        project_root: project_root.to_path_buf(),
+        importer: Some(path.to_path_buf()),
+        target,
+    };
+    build_hooks
+        .transform_with_map(source, path, &context)
+        .map(Some)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1876,8 +1919,14 @@ pub(crate) fn resolve_graph_with_incremental(
     let entry_key = PathBuf::from(entry_label);
 
     // Phase 1: Resolve the entry module (always sequential — it's a single node).
+    // The entry is compiled through the transform hooks like any module, so its
+    // imports are read from what the hooks return.
+    let entry_hook_output =
+        transform_for_graph(entry_source, &entry_key, &project_root, target, build_hooks)?;
     let entry_deps = collect_deps_cached(
-        entry_source,
+        entry_hook_output
+            .as_ref()
+            .map_or(entry_source, |output| output.code.as_str()),
         // The synthetic entry is generated JSX with no file behind it, so it has
         // no extension to read. `tsx` names what it is; the seed still waits on
         // the source guess, so an entry with no element seeds nothing.
@@ -1905,6 +1954,7 @@ pub(crate) fn resolve_graph_with_incremental(
             watch_paths: Vec::new(),
             glob_matches: Vec::new(),
             is_external: false,
+            hook_output: entry_hook_output,
         },
     );
 
@@ -2004,6 +2054,22 @@ pub(crate) fn resolve_graph_with_incremental(
                     None
                 };
 
+                // Transform before scanning: a hook may add imports (the React
+                // compiler adds `react/compiler-runtime`), and those have to be
+                // in the graph for the linker to bind them. The compiler reuses
+                // this output instead of running the hooks again.
+                let hook_output = if is_json {
+                    None
+                } else {
+                    transform_for_graph(
+                        compiled_content.as_deref().unwrap_or(source.as_str()),
+                        dep_path,
+                        &project_root,
+                        target,
+                        build_hooks,
+                    )?
+                };
+
                 // Reuse a persisted resolution only when it is complete. Paths
                 // and aliases are one answer: the linker consults the alias map
                 // first and only then matches by path suffix, and an alias like
@@ -2042,8 +2108,10 @@ pub(crate) fn resolve_graph_with_incremental(
                     // branch that only has to borrow. The content arm keeps the
                     // shared `Arc<str>` the content cache already holds instead
                     // of copying out of it.
-                    let dependency_source: &str =
-                        compiled_content.as_deref().unwrap_or(source.as_str());
+                    let dependency_source: &str = match &hook_output {
+                        Some(output) => output.code.as_str(),
+                        None => compiled_content.as_deref().unwrap_or(source.as_str()),
+                    };
                     collect_deps_cached(
                         dependency_source,
                         // The real file's extension, even when the source being
@@ -2088,6 +2156,7 @@ pub(crate) fn resolve_graph_with_incremental(
                         watch_paths: glob_expansion.watch_roots,
                         glob_matches: glob_expansion.matches,
                         is_external,
+                        hook_output,
                     },
                 ))
             })
@@ -2629,9 +2698,8 @@ fn resolve_file_candidate(joined: &Path) -> Option<PathBuf> {
 }
 
 fn is_project_local(path: &Path, project_root: &Path) -> bool {
-    let rel = match path.strip_prefix(project_root) {
-        Ok(r) => r,
-        Err(_) => return false,
+    let Ok(rel) = path.strip_prefix(project_root) else {
+        return false;
     };
     !rel.starts_with("node_modules")
 }

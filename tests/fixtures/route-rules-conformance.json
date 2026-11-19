@@ -31,6 +31,12 @@
     "    or whose regex does not compile, is refused at config time.",
     "  - Substitution replaces `:name` (with an optional trailing modifier) in a",
     "    destination or header key/value; an absent parameter substitutes ``.",
+    "    Request paths below are canonical (decoded), so a value is raw text: in",
+    "    a destination's path it is encoded as `encodeURIComponent` does (uppercase",
+    "    hex), each `/`-separated piece on its own with the `/` kept; in its query",
+    "    it is encoded as a query component; in a host it must be a hostname.",
+    "    Header values substitute raw. A value never holds an encoded `/`: the",
+    "    hosts refuse a path whose segment decodes to `/` (`%2F`) before rules run.",
     "  - `has`/`missing`: every `has` entry must match and no `missing` entry may.",
     "    `value` is a whole-value regex; named captures become parameters. Header",
     "    keys are case-insensitive; `host` needs no key.",
@@ -366,6 +372,117 @@
       "rules": [{ "source": "/a", "destination": "/b", "permanent": false }],
       "request": { "path": "/c" },
       "result": null
+    },
+    {
+      "$why": "a port in a destination is literal, not a parameter",
+      "rules": [
+        {
+          "source": "/docs/:slug",
+          "destination": "https://docs.example.com:8443/:slug",
+          "permanent": true
+        }
+      ],
+      "request": { "path": "/docs/intro" },
+      "result": { "location": "https://docs.example.com:8443/intro", "status": 308 }
+    },
+    {
+      "$why": "a parameter in the host position substitutes a hostname",
+      "rules": [
+        {
+          "source": "/t/:tenant",
+          "destination": "https://:tenant.example.com/",
+          "permanent": false
+        }
+      ],
+      "request": { "path": "/t/acme" },
+      "result": { "location": "https://acme.example.com/", "status": 307 }
+    },
+    {
+      "$why": "a host-position value that is not a hostname (fragment) does not match",
+      "rules": [
+        {
+          "source": "/t/:tenant",
+          "destination": "https://:tenant.example.com/",
+          "permanent": false
+        }
+      ],
+      "request": { "path": "/t/evil.com%23" },
+      "result": null
+    },
+    {
+      "$why": "a host-position value carrying userinfo does not match",
+      "rules": [
+        {
+          "source": "/t/:tenant",
+          "destination": "https://:tenant.example.com/",
+          "permanent": false
+        }
+      ],
+      "request": { "path": "/t/x@y" },
+      "result": null
+    },
+    {
+      "$why": "a host-position value spanning segments does not match",
+      "rules": [
+        { "source": "/h/:rest*", "destination": "https://:rest.example.com/", "permanent": false }
+      ],
+      "request": { "path": "/h/a/b" },
+      "result": null
+    },
+    {
+      "$why": "a decoded `?` in a path value is encoded, not a query it injects",
+      "rules": [{ "source": "/blog/:slug", "destination": "/posts/:slug", "permanent": true }],
+      "request": { "path": "/blog/a?x=1" },
+      "result": { "location": "/posts/a%3Fx%3D1", "status": 308 }
+    },
+    {
+      "$why": "a decoded `#` in a path value is encoded, not a fragment",
+      "rules": [{ "source": "/blog/:slug", "destination": "/posts/:slug", "permanent": true }],
+      "request": { "path": "/blog/a#b" },
+      "result": { "location": "/posts/a%23b", "status": 308 }
+    },
+    {
+      "$why": "a space in a path value is encoded as %20",
+      "rules": [{ "source": "/blog/:slug", "destination": "/posts/:slug", "permanent": true }],
+      "request": { "path": "/blog/a b" },
+      "result": { "location": "/posts/a%20b", "status": 308 }
+    },
+    {
+      "$why": "a non-ASCII path value is UTF-8 percent-encoded, so Location stays a byte string",
+      "rules": [{ "source": "/blog/:slug", "destination": "/posts/:slug", "permanent": true }],
+      "request": { "path": "/blog/สวัสดี" },
+      "result": {
+        "location": "/posts/%E0%B8%AA%E0%B8%A7%E0%B8%B1%E0%B8%AA%E0%B8%94%E0%B8%B5",
+        "status": 308
+      }
+    },
+    {
+      "$why": "encodeURIComponent's unreserved marks stay literal",
+      "rules": [{ "source": "/blog/:slug", "destination": "/posts/:slug", "permanent": true }],
+      "request": { "path": "/blog/it's(1)!~*_-." },
+      "result": { "location": "/posts/it's(1)!~*_-.", "status": 308 }
+    },
+    {
+      "$why": "a catch-all keeps its `/` and encodes each segment",
+      "rules": [{ "source": "/docs/:path*", "destination": "/d/:path*", "permanent": false }],
+      "request": { "path": "/docs/a b/c?d/ไทย" },
+      "result": { "location": "/d/a%20b/c%3Fd/%E0%B9%84%E0%B8%97%E0%B8%A2", "status": 307 }
+    },
+    {
+      "$why": "a path value under an external host is encoded too",
+      "rules": [
+        { "source": "/ext/:slug", "destination": "https://example.com/p/:slug", "permanent": false }
+      ],
+      "request": { "path": "/ext/a?b#c" },
+      "result": { "location": "https://example.com/p/a%3Fb%23c", "status": 307 }
+    },
+    {
+      "$why": "a value in the destination query is one query component, not new parameters",
+      "rules": [
+        { "source": "/blog/:slug", "destination": "/posts?slug=:slug", "permanent": false }
+      ],
+      "request": { "path": "/blog/a&b=c d+e" },
+      "result": { "location": "/posts?slug=a%26b%3Dc%20d%2Be", "status": 307 }
     }
   ],
 
@@ -411,6 +528,54 @@
       "rules": [{ "source": "/a", "destination": "/b" }],
       "request": { "path": "/c" },
       "result": null
+    },
+    {
+      "$why": "a port in a destination is literal; the path parameter still substitutes",
+      "rules": [{ "source": "/api/:path*", "destination": "http://localhost:4000/:path*" }],
+      "request": { "path": "/api/a/b" },
+      "result": "http://localhost:4000/a/b"
+    },
+    {
+      "$why": "a port is not a parameter use, so unused parameters still go to the query",
+      "rules": [{ "source": "/svc/:id", "destination": "http://localhost:4000/svc" }],
+      "request": { "path": "/svc/7" },
+      "result": "http://localhost:4000/svc?id=7"
+    },
+    {
+      "$why": "a host-position value that is not a hostname does not rewrite",
+      "rules": [{ "source": "/t/:tenant", "destination": "https://:tenant.example.com/" }],
+      "request": { "path": "/t/evil.com%23" },
+      "result": null
+    },
+    {
+      "$why": "a percent sign before a multi-byte character stays literal, as URLSearchParams leaves it",
+      "rules": [{ "source": "/search", "destination": "/find" }],
+      "request": { "path": "/search", "query": "q=%aé" },
+      "result": "/find?q=%25a%C3%A9"
+    },
+    {
+      "$why": "a percent sign before a non-hex byte stays literal; a plus is still a space",
+      "rules": [{ "source": "/search", "destination": "/find" }],
+      "request": { "path": "/search", "query": "q=%+f" },
+      "result": "/find?q=%25+f"
+    },
+    {
+      "$why": "an internal rewrite encodes a path value; the host decodes it again to route",
+      "rules": [{ "source": "/blog/:slug", "destination": "/posts/:slug" }],
+      "request": { "path": "/blog/a b?c#d" },
+      "result": "/posts/a%20b%3Fc%23d"
+    },
+    {
+      "$why": "a catch-all rewrite keeps its `/` and encodes each segment",
+      "rules": [{ "source": "/api/:path*", "destination": "http://localhost:4000/:path*" }],
+      "request": { "path": "/api/a b/ไทย" },
+      "result": "http://localhost:4000/a%20b/%E0%B9%84%E0%B8%97%E0%B8%A2"
+    },
+    {
+      "$why": "a value in the destination query stays one parameter, serialized once",
+      "rules": [{ "source": "/s/:term", "destination": "/search?q=:term" }],
+      "request": { "path": "/s/a&b+c d" },
+      "result": "/search?q=a%26b%2Bc+d"
     }
   ],
 

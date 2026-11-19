@@ -621,11 +621,25 @@ rl.on('line', async (line) => {
       return
     }
     // Or the host may have withdrawn it while it queued. Starting the render now
-    // would burn the slot on a response nobody is waiting for, and no frame is
-    // owed: the host abandoned this request before it ever ran.
+    // would burn the slot on a response nobody is waiting for. It still ends
+    // with a terminal frame, the same one a request cancelled mid-dispatch gets
+    // from the `catch` below: every request this worker read is answered
+    // exactly once, so the host never has to know which stage the cancel
+    // reached. The host releases its own pending entry when it abandons a
+    // request, so this frame normally finds none and is dropped — it is the
+    // protocol's guarantee, not the host's only way out.
     if (cancellation.signal.aborted) {
       admission.release()
       inflightRequests.delete(id)
+      try {
+        await writeWorkerMessage({
+          id,
+          ...workerError(cancellation.signal.reason),
+          retainedModuleUrls: registeredModuleUrls.size,
+        })
+      } catch {
+        shutdown('stdout-write-failed')
+      }
       return
     }
   }

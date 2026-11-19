@@ -168,6 +168,16 @@ impl PendingResponseSet {
 
     async fn remove(&self, id: &str) -> Option<PendingResponse> {
         let mut entries = self.entries.lock().await;
+        self.remove_locked(&mut entries, id)
+    }
+
+    /// The one place an entry leaves the map one at a time, so the count and
+    /// the idle notification cannot drift between the async and `Drop` paths.
+    fn remove_locked(
+        &self,
+        entries: &mut BTreeMap<String, PendingResponse>,
+        id: &str,
+    ) -> Option<PendingResponse> {
         let removed = entries.remove(id);
         if removed.is_some() {
             let previous = self.count.fetch_sub(1, Ordering::AcqRel);
@@ -177,6 +187,30 @@ impl PendingResponseSet {
             }
         }
         removed
+    }
+
+    /// Remove `id` from a context that cannot await — a `Drop`.
+    ///
+    /// Synchronous when the lock is free, which is the common case: the map is
+    /// only ever held for a single insert or remove. When it is contended the
+    /// removal is spawned instead, because blocking a runtime thread inside a
+    /// drop would stall whatever task happened to own it. Idempotent, like
+    /// [`Self::remove`]: an entry the stdout reader already took is a no-op.
+    fn remove_detached(self: &Arc<Self>, id: &str) {
+        if let Ok(mut entries) = self.entries.try_lock() {
+            self.remove_locked(&mut entries, id);
+            return;
+        }
+        let pending = Arc::clone(self);
+        let id = id.to_string();
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move {
+                    pending.remove(&id).await;
+                });
+            }
+            Err(_) => warn!(id, "pending worker entry dropped outside a runtime"),
+        }
     }
 
     async fn response(&self, id: &str, terminal: bool) -> Option<PendingResponse> {
@@ -217,6 +251,56 @@ impl PendingResponseSet {
 }
 
 type PendingResponses = Arc<PendingResponseSet>;
+
+/// Owns one pending entry from the moment it is registered.
+///
+/// The entry is `in_flight`: while it exists, `select_worker` steers work away
+/// from the process, `retire_worker_if_saturated` counts it as load, and
+/// `wait_until_idle` cannot return. Its removal used to be a statement after an
+/// `.await`, so a future dropped at that `.await` — a client disconnecting
+/// mid-render, or while the request was still being queued to stdin — skipped
+/// it. The stdout reader removes an entry only on a terminal frame, and the
+/// worker owes none for a request withdrawn before it was admitted, so such an
+/// entry stayed for the life of the process. Holding it in a guard makes every
+/// exit path, including the ones nobody writes, release it.
+///
+/// [`Self::hand_off`] is the one exception: a streamed body takes the entry
+/// over, because it must outlive the request's first frame until the worker
+/// ends the stream (see `WorkerBodyStream::cancel_abandoned_stream`).
+struct PendingEntry {
+    pending: PendingResponses,
+    id: String,
+    armed: bool,
+}
+
+impl PendingEntry {
+    fn new(pending: &PendingResponses, id: &str) -> Self {
+        Self {
+            pending: Arc::clone(pending),
+            id: id.to_string(),
+            armed: true,
+        }
+    }
+
+    /// Release the entry now. A no-op if the reader already took it.
+    async fn release(mut self) {
+        self.armed = false;
+        self.pending.remove(&self.id).await;
+    }
+
+    /// A body stream now owns the entry's lifetime.
+    fn hand_off(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingEntry {
+    fn drop(&mut self) {
+        if self.armed {
+            self.pending.remove_detached(&self.id);
+        }
+    }
+}
 
 struct ResponseChannel {
     id: String,
@@ -853,7 +937,7 @@ impl Worker {
         // a poisoned lock and a request that will not serialize — are neither,
         // but both are unreachable in practice and replacing the process is a
         // safe answer to them.
-        let mut channel = self
+        let (mut channel, entry) = self
             .open_response(request, response_timeout)
             .await
             .map_err(WorkerSendFailure::Transport)?;
@@ -870,8 +954,11 @@ impl Worker {
         // would leave an entry whose receiver has just been dropped, which
         // `wait_until_idle` can never observe as idle: retiring that worker
         // would then hang until `WORKER_DRAIN_TIMEOUT`. Removing an entry the
-        // reader already took is a no-op, so this costs one lock.
-        self.pending.remove(&channel.id).await;
+        // reader already took is a no-op, so this costs one lock. If this
+        // future is dropped during the wait above, `entry`'s own `Drop` does
+        // the same — the worker owes no frame for a request it withdrew before
+        // admitting it, so nothing else ever would.
+        entry.release().await;
 
         match received {
             Ok(Some(response)) => {
@@ -896,12 +983,14 @@ impl Worker {
         request: &WorkerRequest,
         response_timeout: std::time::Duration,
     ) -> std::result::Result<WorkerApiResponse, WorkerSendFailure> {
-        let mut channel = self
+        let (mut channel, entry) = self
             .open_response(request, response_timeout)
             .await
             .map_err(WorkerSendFailure::Transport)?;
         // Covers the wait for the *first* frame only. Once the body exists,
-        // `WorkerBodyStream` owns cancellation for the rest of the response.
+        // `WorkerBodyStream` owns cancellation — and the pending entry — for
+        // the rest of the response. Until then `entry` releases it on every
+        // early exit, including this future being dropped.
         let cancel = CancelOnDrop::new(&channel.id, self.cancel_handle());
         let response = match tokio::time::timeout(response_timeout, channel.receiver.recv()).await {
             Ok(Some(response)) => {
@@ -915,7 +1004,7 @@ impl Worker {
                 )));
             }
             Err(_) => {
-                self.pending.remove(&channel.id).await;
+                entry.release().await;
                 return Err(self.record_timeout(response_timeout));
             }
         };
@@ -923,6 +1012,7 @@ impl Worker {
         match response.frame.as_deref() {
             Some("api-start") => {
                 cancel.answered();
+                entry.hand_off();
                 // The stdout reader already flagged this request as streaming;
                 // repeat it here so the flag holds for any caller that builds a
                 // body stream without going through that reader.
@@ -951,7 +1041,7 @@ impl Worker {
                 })
             }
             frame => {
-                self.pending.remove(&channel.id).await;
+                entry.release().await;
                 // A live worker that opens with a frame this side cannot
                 // interpret has lost the protocol, not merely this request:
                 // treat it the way a broken pipe is treated.
@@ -1006,7 +1096,7 @@ impl Worker {
         &self,
         request: &WorkerRequest,
         response_timeout: std::time::Duration,
-    ) -> Result<ResponseChannel> {
+    ) -> Result<(ResponseChannel, PendingEntry)> {
         if !self.alive.load(Ordering::Acquire) {
             return Err(RuvyxaError::Message(
                 "Worker process has exited".to_string(),
@@ -1035,8 +1125,12 @@ impl Worker {
                 },
             )
             .await;
+        // Created before the first `.await` that follows the insert: a caller
+        // dropped while its line waits for a full stdin queue has sent the
+        // worker nothing, so no cancel is owed, but the entry still has to go.
+        let entry = PendingEntry::new(&self.pending, &id);
         if !self.alive.load(Ordering::Acquire) {
-            self.pending.remove(&id).await;
+            entry.release().await;
             return Err(RuvyxaError::Message(
                 "Worker process has exited".to_string(),
             ));
@@ -1045,13 +1139,13 @@ impl Worker {
         match tokio::time::timeout(response_timeout, stdin_tx.send(line)).await {
             Ok(Ok(())) => {}
             Ok(Err(_)) => {
-                self.pending.remove(&id).await;
+                entry.release().await;
                 return Err(RuvyxaError::Message(
                     "Worker process stdin closed".to_string(),
                 ));
             }
             Err(_) => {
-                self.pending.remove(&id).await;
+                entry.release().await;
                 return Err(RuvyxaError::Message(format!(
                     "Worker did not accept a request within {}ms; its input queue is full",
                     response_timeout.as_millis()
@@ -1059,11 +1153,14 @@ impl Worker {
             }
         }
 
-        Ok(ResponseChannel {
-            id,
-            receiver,
-            streaming,
-        })
+        Ok((
+            ResponseChannel {
+                id,
+                receiver,
+                streaming,
+            },
+            entry,
+        ))
     }
 }
 
@@ -2648,7 +2745,8 @@ mod tests {
         let worker = stub_worker(Some(stdin_tx));
         let response_timeout = std::time::Duration::from_millis(200);
 
-        worker
+        // Held: dropping it would abandon the request and release its entry.
+        let _first = worker
             .open_response(&ssg_request(true), response_timeout)
             .await
             .expect("the first request takes the one free queue slot");
@@ -4357,6 +4455,67 @@ process.stdin.resume()
         let cancel = parse_frame(&stdin_rx.recv().await.expect("dropping it cancels it"));
         assert_eq!(cancel["type"], "cancel");
         assert_eq!(cancel["id"], request.id());
+        // The worker owes no frame for a request withdrawn before admission,
+        // and this stub sends none, so only the host can release the entry.
+        assert_eq!(
+            worker.in_flight(),
+            0,
+            "a dropped waiter left its pending entry behind"
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            worker.pending.wait_until_idle(),
+        )
+        .await
+        .expect("a worker whose only waiter was dropped must be idle");
+    }
+
+    /// The same drop on the streamed path, before the first frame arrives.
+    #[tokio::test]
+    async fn abandoning_a_stream_before_its_first_frame_releases_its_entry() {
+        let (stdin_tx, _stdin_rx) = mpsc::channel::<String>(8);
+        let worker = stub_worker(Some(stdin_tx));
+
+        let abandoned = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            worker.start_api_response(&api_stream_request(), std::time::Duration::from_secs(30)),
+        )
+        .await;
+        assert!(abandoned.is_err(), "the first frame never arrives");
+        assert_eq!(worker.in_flight(), 0);
+    }
+
+    /// A caller dropped while its line waits for room in a full stdin queue.
+    ///
+    /// The entry is registered before the enqueue, and the enqueue is an
+    /// `.await` with no cancel guard yet — the worker has been sent nothing —
+    /// so the entry's own guard is the only thing that can release it.
+    #[tokio::test]
+    async fn abandoning_a_request_while_it_is_queued_releases_its_entry() {
+        let (stdin_tx, _stdin_rx) = mpsc::channel::<String>(1);
+        let worker = stub_worker(Some(stdin_tx));
+        let response_timeout = std::time::Duration::from_secs(30);
+
+        let first = worker
+            .open_response(&ssg_request(true), response_timeout)
+            .await
+            .expect("the first request takes the one free queue slot");
+        assert_eq!(worker.in_flight(), 1);
+
+        let abandoned = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            worker.send(&ssg_request(true), response_timeout),
+        )
+        .await;
+        assert!(abandoned.is_err(), "the second request is still queueing");
+        assert_eq!(
+            worker.in_flight(),
+            1,
+            "only the request still held may remain in flight"
+        );
+
+        drop(first);
+        assert_eq!(worker.in_flight(), 0);
     }
 
     /// A worker script whose API responses stream until they are cancelled.

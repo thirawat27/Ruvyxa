@@ -23,7 +23,7 @@ strip = "symbols"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/thirawat27/Ruvyxa"
-rust-version = "1.98"
+rust-version = "1.100"
 
 [workspace.lints.clippy]
 # Nursery lint, off by default. Turned on because the JavaScript side now has
@@ -31,13 +31,25 @@ rust-version = "1.98"
 # functions - the resolver, the linker, the dev server - are the same ones
 # that have taken repeat regressions.
 cognitive_complexity = "warn"
+# Pedantic lints that each point at a newer spelling the MSRV above already has:
+# `let … else`, inline format arguments, `Option::is_some_and`/`is_none_or`,
+# `String::new()`, and `.clone()` over an implicit `to_owned`/`to_string`.
+# CI runs clippy with `-D warnings`, so these hold the code at the toolchain it
+# declares instead of drifting back to the older forms. clippy reads
+# `rust-version` and never suggests an API newer than it.
+cloned_instead_of_copied = "warn"
+implicit_clone = "warn"
+manual_is_variant_and = "warn"
+manual_let_else = "warn"
+manual_string_new = "warn"
+option_as_ref_cloned = "warn"
+uninlined_format_args = "warn"
 
 [workspace.dependencies]
 anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["ws"] }
 base64 = "0.23.1"
 blake3 = "1.8.7"
-chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.6.6", features = ["derive"] }
 fancy-regex = "0.19.0"
 dashmap = "6.2.1"
@@ -64,6 +76,9 @@ image-webp = "0.2.4"
 # Test fixtures only: the decoders above are decode-only, and several tests need
 # to produce a real JPEG on disk to exercise the build-time optimizer.
 jpeg-encoder = "0.7.1"
+# Replaced `chrono` (RUSTSEC-2026-0543, unmaintained). The default features are
+# the ones that find the host's local time zone, which the terminal clock needs.
+jiff = "1.0.1"
 # SIMD (AVX2/SSE4.1/NEON) convolution resize.
 #
 # `fast_image_resize` filled this role and was measurably the fastest, but it
@@ -85,12 +100,14 @@ notify = "8.2.0"
 # packages/ruvyxa/package.json: the Rust bundler compiles the client bundle and
 # the Node runtime compiles the server bundle, so a version split would let the
 # two halves of one page disagree. `scripts/check-oxc-lockstep.mjs` enforces it.
-oxc = { version = "=0.148.0", default-features = false, features = ["codegen", "minifier", "semantic", "transformer"] }
+oxc = { version = "=0.159.0", default-features = false, features = ["codegen", "minifier", "semantic", "transformer"] }
 parking_lot = "0.12.5"
 rayon = "1.12.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-serde_yaml_ng = "0.10.0"
+# Pure Rust YAML; replaced `serde_yaml_ng`, whose `unsafe-libyaml` is
+# unmaintained (RUSTSEC-2024-0449). Only the deserializer is used.
+serde-saphyr = { version = "2.2.0", default-features = false, features = ["deserialize"] }
 tempfile = "3.27.0"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["full"] }

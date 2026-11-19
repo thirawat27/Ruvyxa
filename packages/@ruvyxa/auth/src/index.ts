@@ -1060,10 +1060,16 @@ function safeReturnTo(value: string | null): string {
   // the Location header into a cross-origin redirect. Resolve against a fixed
   // base and require the origin to survive — only a genuine same-origin path
   // round-trips, so every normalization trick collapses to "/".
+  //
+  // The check applies to what is emitted, not to what came in: dot segments
+  // are resolved *inside* the path, so "/.//evil.com" stays same-origin while
+  // its normalized pathname is "//evil.com" — a protocol-relative Location.
   try {
-    const resolved = new URL(value, 'http://ruvyxa.invalid')
-    if (resolved.origin !== 'http://ruvyxa.invalid') return '/'
-    return `${resolved.pathname}${resolved.search}${resolved.hash}`
+    const base = 'http://ruvyxa.invalid'
+    const resolved = new URL(value, base)
+    if (resolved.origin !== base) return '/'
+    const path = `${resolved.pathname}${resolved.search}${resolved.hash}`
+    return new URL(path, base).origin === base && !path.startsWith('//') ? path : '/'
   } catch {
     return '/'
   }

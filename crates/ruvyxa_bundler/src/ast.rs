@@ -1973,13 +1973,13 @@ const computed = process.env[dynamicKey]
         for statement in &parsed.program.body {
             match statement {
                 Statement::ImportDeclaration(declaration) => {
-                    found.push(declaration.source.value.to_string());
+                    found.push(declaration.source.value.display().to_string());
                 }
                 Statement::ExportFromDeclaration(declaration) => {
-                    found.push(declaration.source.value.to_string());
+                    found.push(declaration.source.value.display().to_string());
                 }
                 Statement::ExportAllDeclaration(declaration) => {
-                    found.push(declaration.source.value.to_string());
+                    found.push(declaration.source.value.display().to_string());
                 }
                 _ => {}
             }

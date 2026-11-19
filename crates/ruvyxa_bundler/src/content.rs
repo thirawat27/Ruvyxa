@@ -386,12 +386,27 @@ fn parse_frontmatter(source: Option<&str>) -> Result<Value, String> {
     if source.trim().is_empty() {
         return Ok(json!({}));
     }
-    let value = serde_yaml_ng::from_str::<Value>(source)
+    let value = serde_saphyr::from_str_with_options::<Value>(source, frontmatter_yaml_options())
         .map_err(|error| format!("RUV1312: invalid YAML frontmatter: {error}"))?;
     if !value.is_object() {
         return Err("RUV1312: frontmatter must be a YAML mapping".to_string());
     }
     Ok(value)
+}
+
+/// The YAML 1.2 core schema, which is what the JavaScript half reads
+/// (`parseDocument(source, { schema: 'core' })` in `runtime/compiler.mjs`):
+/// `yes`/`no`/`on`/`off` stay strings, `1_000` stays a string, and `<<` is an
+/// ordinary key rather than a merge. Duplicate keys and non-finite numbers are
+/// errors on both sides (the crate's defaults). The shared cases are in
+/// `tests/fixtures/frontmatter-yaml-conformance.json`.
+fn frontmatter_yaml_options() -> serde_saphyr::Options {
+    serde_saphyr::options! {
+        strict_booleans: true,
+        underscored_numbers_as_strings: true,
+        merge_keys: serde_saphyr::MergeKeyPolicy::AsOrdinary,
+        with_snippet: false,
+    }
 }
 
 #[derive(Clone)]
@@ -1135,6 +1150,49 @@ mod tests {
             "headings"
         ));
         assert!(!has_named_export("export type { meta }", "meta"));
+    }
+
+    /// Replays `tests/fixtures/frontmatter-yaml-conformance.json`, whose
+    /// JavaScript half is `tests/packages/ruvyxa/frontmatter-yaml-conformance.test.mjs`.
+    #[test]
+    fn parses_the_shared_frontmatter_yaml_conformance_cases() {
+        /// Numbers by value: Rust keeps `1.0` a float where JavaScript has `1`.
+        fn same(left: &Value, right: &Value) -> bool {
+            match (left, right) {
+                (Value::Number(a), Value::Number(b)) => a.as_f64() == b.as_f64(),
+                (Value::Array(a), Value::Array(b)) => {
+                    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same(a, b))
+                }
+                (Value::Object(a), Value::Object(b)) => {
+                    a.len() == b.len()
+                        && a.iter()
+                            .all(|(key, a)| b.get(key).is_some_and(|b| same(a, b)))
+                }
+                _ => left == right,
+            }
+        }
+
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/frontmatter-yaml-conformance.json");
+        let value: Value = serde_json::from_str(&fs::read_to_string(fixture).unwrap()).unwrap();
+        let cases = value["cases"].as_array().unwrap();
+        assert!(!cases.is_empty(), "the fixture must carry cases");
+
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            let parsed = parse_frontmatter(Some(case["yaml"].as_str().unwrap()));
+            if case["error"].as_bool() == Some(true) {
+                let error = parsed.expect_err(name);
+                assert!(error.starts_with("RUV1312"), "{name}: {error}");
+            } else {
+                let parsed = parsed.unwrap_or_else(|error| panic!("{name}: {error}"));
+                assert!(
+                    same(&parsed, &case["frontmatter"]),
+                    "{name}: parsed {parsed} but the fixture says {}",
+                    case["frontmatter"]
+                );
+            }
+        }
     }
 
     /// The `.mdx` shapes both content compilers have to read as code.

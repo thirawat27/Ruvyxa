@@ -58,7 +58,36 @@ pub(crate) fn locale_redirect_path(
                 .filter(|matched| matched.route.kind == RouteKind::Page)
                 .map(|_| fallback)
         })
-        .map(|location| with_query(location, query))
+        .map(|location| with_query(encoded_path(&location), query))
+}
+
+/// Spell a decoded route path the way `URL.pathname` spells it.
+///
+/// Routing matches the *decoded* path, so the candidate built from it carries
+/// literal spaces and raw non-ASCII. A `Location` is a URI reference and may
+/// carry neither: this host sent raw UTF-8 bytes in the header, and the deployed
+/// handler threw outright — `Headers` refuses any character above U+00FF — so
+/// every unprefixed Thai URL failed instead of redirecting. `%` is encoded too,
+/// because a `%` in a decoded path was a `%25` in the request.
+fn encoded_path(path: &str) -> String {
+    let mut encoded = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        match byte {
+            0x00..=0x20
+            | 0x7F..=0xFF
+            | b'"'
+            | b'#'
+            | b'%'
+            | b'<'
+            | b'>'
+            | b'?'
+            | b'`'
+            | b'{'
+            | b'}' => encoded.push_str(&format!("%{byte:02X}")),
+            _ => encoded.push(char::from(byte)),
+        }
+    }
+    encoded
 }
 
 /// Reattach the request's query to a redirect target.
@@ -97,9 +126,13 @@ fn with_query(location: String, query: Option<&str>) -> String {
 ///
 /// What `URL` does, exactly:
 ///
-/// - space, `"`, `<`, `>` are percent-encoded;
+/// - space, `"`, `'`, `<`, `>` are percent-encoded (`'` because the URL is
+///   of a special scheme);
 /// - tab, line feed and carriage return are **removed**, not encoded;
-/// - other C0 controls and `DEL` are percent-encoded;
+/// - other C0 controls, `DEL` and every non-ASCII byte are percent-encoded —
+///   a non-ASCII character as its UTF-8 bytes. Pushing such a byte as a
+///   `char` reinterpreted it as Latin-1 and re-encoded it, so `?q=é` came back
+///   as `?q=Ã©`, a different query;
 /// - everything else, `%` and `&` and `=` and `+` included, is passed through.
 ///
 /// That last point is why this is not a general-purpose encoder. Re-encoding
@@ -119,9 +152,10 @@ fn encoded_query(query: &str) -> String {
             b'\t' | b'\n' | b'\r' => {}
             b' ' => encoded.push_str("%20"),
             b'"' => encoded.push_str("%22"),
+            b'\'' => encoded.push_str("%27"),
             b'<' => encoded.push_str("%3C"),
             b'>' => encoded.push_str("%3E"),
-            0x00..=0x1F | 0x7F => {
+            0x00..=0x1F | 0x7F..=0xFF => {
                 encoded.push('%');
                 encoded.push_str(&format!("{byte:02X}"));
             }

@@ -990,7 +990,10 @@ pub(crate) async fn client_bundle(
             if state.config.watch {
                 state
                     .devtools
-                    .record_bundle(&query.path, bundle.document.html.len());
+                    // By route pattern, not by the URL asked for: every
+                    // `/posts/<slug>` is one bundle, and keying on the request
+                    // grew the dashboard by one row per URL ever visited.
+                    .record_bundle(&bundle.route_path, bundle.document.html.len());
             }
             // Stamped here rather than cached stamped: the version is a hash of
             // the unstamped script, and the route manifest and the Flight

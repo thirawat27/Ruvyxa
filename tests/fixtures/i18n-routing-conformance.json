@@ -59,7 +59,7 @@
     "`locale_redirect_path` directly. The two replays would then disagree about",
     "every case here for a reason that has nothing to do with locales."
   ],
-  "routes": ["/[lang]/about", "/[lang]/__ruvyxa-notes"],
+  "routes": ["/[lang]/about", "/[lang]/__ruvyxa-notes", "/[lang]/ข่าว", "/[lang]/a b"],
   "$queryNote": [
     "`query` is the request's query string without its leading `?`, and is absent",
     "on a case that sends none. Routing never consults it — it exists here only",
@@ -147,6 +147,22 @@
       "headers": {},
       "detectLocale": true,
       "redirect": null
+    },
+    {
+      "$why": "A non-ASCII path is percent-encoded in `Location`. Both hosts match on the decoded path, and the deployed handler put that decoded path into the header: `Headers` refuses any character above U+00FF, so every unprefixed Thai URL threw instead of redirecting, while the native host sent raw UTF-8 bytes.",
+      "method": "GET",
+      "path": "/ข่าว",
+      "headers": {},
+      "detectLocale": true,
+      "redirect": "/en/%E0%B8%82%E0%B9%88%E0%B8%B2%E0%B8%A7"
+    },
+    {
+      "$why": "A space in the decoded path is encoded again, as `URL.pathname` would spell it; a literal space is not allowed in a URI reference.",
+      "method": "GET",
+      "path": "/a b",
+      "headers": {},
+      "detectLocale": true,
+      "redirect": "/en/a%20b"
     },
     {
       "$why": "The query survives the locale prefix. A search or a paginated deep link shared without the prefix keeps its parameters.",
@@ -269,6 +285,16 @@
         "name": "other control characters are encoded",
         "query": "a=\u0000b",
         "expect": "a=%00b"
+      },
+      {
+        "name": "a non-ASCII character is encoded as its UTF-8 bytes",
+        "query": "q=é&t=ก",
+        "expect": "q=%C3%A9&t=%E0%B8%81"
+      },
+      {
+        "name": "an apostrophe is encoded in a special-scheme query",
+        "query": "a='x'",
+        "expect": "a=%27x%27"
       }
     ]
   }

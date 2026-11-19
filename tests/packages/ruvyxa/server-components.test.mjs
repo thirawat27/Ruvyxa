@@ -154,10 +154,29 @@ describe('the server graph', () => {
   })
 })
 
+/**
+ * The `I` rows that import `id`. React 19.2 wrote the id inline
+ * (`I["ruv:m_…",…]`); 19.3 outlines a repeated string into its own row
+ * (`c:"ruv:m_…"`) and points at it (`I["$c",…]`). Both are the same reference,
+ * so the assertions accept either rather than pinning one React release.
+ */
+function importRowsFor(payload, id) {
+  const lines = payload.split('\n')
+  const handles = new Set([id])
+  for (const line of lines) {
+    const match = /^([0-9a-f]+):"(.*)"$/.exec(line)
+    if (match && match[2] === id) handles.add(`$${match[1]}`)
+  }
+  return lines.filter((line) => {
+    const match = /^[0-9a-f]+:I\["([^"]*)"/.exec(line)
+    return match !== null && handles.has(match[1])
+  })
+}
+
 describe('the Flight payload', () => {
   it('serialises the client component as a reference and the server output as data', () => {
     const id = clientModuleId('app/counter.tsx')
-    assert.match(rendered.payload, new RegExp(`I\\["${id}"`))
+    assert.ok(importRowsFor(rendered.payload, id).length > 0, rendered.payload)
     assert.match(rendered.payload, /only-on-the-server/)
     // `$L<n>` is how the tree points at a reference row; without it the client
     // component was inlined rather than referenced.
@@ -166,8 +185,7 @@ describe('the Flight payload', () => {
 
   it('names one reference per module, not per imported export', () => {
     const id = clientModuleId('app/counter.tsx')
-    const rows = rendered.payload.split('\n').filter((line) => line.includes(`I["${id}"`))
-    assert.equal(rows.length, 2, rendered.payload)
+    assert.equal(importRowsFor(rendered.payload, id).length, 2, rendered.payload)
   })
 })
 

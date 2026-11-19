@@ -702,42 +702,54 @@ describe('@ruvyxa/auth', () => {
       return Response.json({ sub: 'oauth-1', email: 'oauth@example.com' })
     }) as typeof fetch
     try {
-      const auth = runtime({
-        providers: {
-          example: {
-            type: 'oauth',
-            id: 'example',
-            authorizationUrl: 'https://provider.example/authorize',
-            tokenUrl: 'https://provider.example/token',
-            userInfoUrl: 'https://provider.example/me',
-            clientId: 'client-id',
-            clientSecret: 'client-secret',
-            scopes: ['openid'],
-            mapProfile(profile: unknown) {
-              const value = profile as { sub: string; email: string }
-              return { id: value.sub, email: value.email }
+      // Attacker sends "/\evil.com": a browser folds the backslash into
+      // "//evil.com" and follows the Location cross-origin. Dot segments do the
+      // same through normalization: "/.//evil.com" is same-origin as written but
+      // its resolved pathname is "//evil.com". Every payload must collapse to "/".
+      for (const payload of [
+        '/\\evil.com',
+        '/.//evil.com',
+        '/..//evil.com',
+        '/%2e%2e//evil.com',
+        '/a/..//evil.com',
+      ]) {
+        const auth = runtime({
+          providers: {
+            example: {
+              type: 'oauth',
+              id: 'example',
+              authorizationUrl: 'https://provider.example/authorize',
+              tokenUrl: 'https://provider.example/token',
+              userInfoUrl: 'https://provider.example/me',
+              clientId: 'client-id',
+              clientSecret: 'client-secret',
+              scopes: ['openid'],
+              mapProfile(profile: unknown) {
+                const value = profile as { sub: string; email: string }
+                return { id: value.sub, email: value.email }
+              },
             },
           },
-        },
-      })
-      // Attacker sends "/\evil.com": a browser folds the backslash into
-      // "//evil.com" and follows the Location cross-origin. The callback must
-      // collapse the payload back to a same-origin "/".
-      const start = await auth.handle(
-        new Request(`${origin}/__ruvyxa/auth/oauth/example/start?returnTo=%2F%5Cevil.com`, {
-          headers: { 'user-agent': 'oauth-redirect-test' },
-        }),
-      )
-      const authorization = new URL(start?.headers.get('location') ?? '')
-      const state = authorization.searchParams.get('state')!
-      const stateCookie = start?.headers.get('set-cookie')?.split(';')[0]
-      const completed = await auth.handle(
-        new Request(`${origin}/__ruvyxa/auth/oauth/example/callback?code=one&state=${state}`, {
-          headers: { cookie: stateCookie! },
-        }),
-      )
-      assert.equal(completed?.status, 303)
-      assert.equal(completed?.headers.get('location'), '/')
+        })
+        const start = await auth.handle(
+          new Request(
+            `${origin}/__ruvyxa/auth/oauth/example/start?returnTo=${encodeURIComponent(payload)}`,
+            {
+              headers: { 'user-agent': 'oauth-redirect-test' },
+            },
+          ),
+        )
+        const authorization = new URL(start?.headers.get('location') ?? '')
+        const state = authorization.searchParams.get('state')!
+        const stateCookie = start?.headers.get('set-cookie')?.split(';')[0]
+        const completed = await auth.handle(
+          new Request(`${origin}/__ruvyxa/auth/oauth/example/callback?code=one&state=${state}`, {
+            headers: { cookie: stateCookie! },
+          }),
+        )
+        assert.equal(completed?.status, 303)
+        assert.equal(completed?.headers.get('location'), '/', payload)
+      }
     } finally {
       globalThis.fetch = originalFetch
     }

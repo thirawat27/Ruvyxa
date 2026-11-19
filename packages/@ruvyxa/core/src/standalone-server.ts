@@ -218,13 +218,58 @@ const TRUSTED_PROXIES = parseTrustedProxies(runtimePolicy.security?.trustedProxy
  * be named in \`security.trustedProxyIps\`.
  */
 function peerMayStateClientIdentity(peer) {
-  if (typeof peer !== 'string' || peer.trim() === '') return false;
-  // \`parseTrustedProxies\` drops whatever is not an address, so a one-entry
-  // result is the proof that the peer parsed as one. Without this a peer that
-  // is not an address at all — a closed socket, a Unix domain socket — would
-  // reach the check below, be attributed to nobody, and read as trusted.
-  if (parseTrustedProxies([peer]).length !== 1) return false;
+  // Without this a peer that is not an address at all — a closed socket, a
+  // Unix domain socket — would reach the check below, be attributed to nobody,
+  // and read as trusted.
+  if (!peerIsAddress(peer)) return false;
   return clientAddress(new Headers({ 'x-forwarded-for': peer }), TRUSTED_PROXIES) === 'unknown';
+}
+
+/**
+ * Whether the transport reported a peer that parses as an address.
+ * \`parseTrustedProxies\` drops whatever is not one, so a one-entry result is the
+ * proof.
+ */
+function peerIsAddress(peer) {
+  return typeof peer === 'string' && peer.trim() !== '' && parseTrustedProxies([peer]).length === 1;
+}
+
+/**
+ * Attribute the request to the peer it arrived from, in place.
+ *
+ * The handler has no socket, so \`clientAddress\` can only name a client that a
+ * forwarded header names. Dropping an untrusted peer's headers and stopping
+ * there left every direct client reading as \`unknown\` — one shared bucket for
+ * the \`rate\` middleware, the server-action limiter, and the replay quota, so
+ * one busy client throttled every other. \`ruvyxa start\` keys on the transport
+ * peer, and this does what a proxy does to say the same thing: append the peer
+ * it actually saw.
+ *
+ * - A trusted peer's chain is kept and the peer appended, which \`clientAddress\`
+ *   then skips as a trusted hop. A trusted peer that sent only \`x-real-ip\` is
+ *   left alone: an \`x-forwarded-for\` holding only the proxy would shadow it.
+ * - Otherwise whatever the caller wrote is dropped and the peer becomes the
+ *   whole chain. A peer that is not an address leaves no chain at all, and
+ *   \`clientAddress\` falls through to \`unknown\` — the direction a limiter is
+ *   allowed to be wrong in.
+ *
+ * Returns whether anything changed, so a transport that has to rebuild its
+ * \`Request\` to change it can skip that when nothing did.
+ */
+function attributeToPeer(headers, peer) {
+  const stated = FORWARDED_IDENTITY_HEADERS.some((name) => headers.has(name));
+  if (stated && peerMayStateClientIdentity(peer)) {
+    const chain = headers.get('x-forwarded-for');
+    if (chain === null) return false;
+    headers.set('x-forwarded-for', chain + ', ' + peer.trim());
+    return true;
+  }
+  for (const name of FORWARDED_IDENTITY_HEADERS) headers.delete(name);
+  if (peerIsAddress(peer)) {
+    headers.set('x-forwarded-for', peer.trim());
+    return true;
+  }
+  return stated;
 }
 
 // Serialized from STATIC_CONTENT_TYPES so this server and the Rust one answer
@@ -1202,22 +1247,16 @@ const server = createServer(async (req, res) => {
       }
     }
 
-    // The trust decision is made here, where the peer exists, and the headers
-    // an untrusted peer wrote are dropped rather than weighed: with them gone
-    // \`clientAddress\` falls through to \`unknown\`, which buckets more
-    // aggressively than the traffic warrants — the direction a limiter is
-    // allowed to be wrong in. \`node:http\` has already lowercased every field
-    // name and joined repeated field lines with \`", "\`. The peer is weighed
-    // only when there is something to weigh it against, so a request that
-    // carries neither header pays two property lookups.
-    const forwardedAllowed =
-      !FORWARDED_IDENTITY_HEADERS.some((name) => req.headers[name] !== undefined) ||
-      peerMayStateClientIdentity(req.socket?.remoteAddress);
+    // The trust decision is made here, where the peer exists: the headers an
+    // untrusted peer wrote are dropped rather than weighed, and the peer itself
+    // is what the handler is told — see \`attributeToPeer\`. \`node:http\` has
+    // already lowercased every field name and joined repeated field lines with
+    // \`", "\`.
     const headers = new Headers();
     for (const [key, value] of Object.entries(req.headers)) {
-      if (!forwardedAllowed && FORWARDED_IDENTITY_HEADERS.includes(key)) continue;
       if (value) headers.set(key, Array.isArray(value) ? value.join(', ') : value);
     }
+    attributeToPeer(headers, req.socket?.remoteAddress);
     // The body is read with a slot in hand, which is what makes
     // MAX_CONCURRENT_RENDERS bound it: reading first meant a burst larger than
     // the machine became a heap holding every upload at once, before anything
@@ -1749,19 +1788,15 @@ function withCompression(response, request) {
 /**
  * The request as the handler is allowed to see it.
  *
- * A forwarded identity from a peer that is neither loopback nor listed in
- * \`security.trustedProxyIps\` is the caller's own text, so it is deleted rather
- * than weighed — with it gone \`clientAddress\` falls through to \`unknown\`, which
- * buckets more aggressively than the traffic warrants. Rebuilt rather than
- * mutated: a \`Request\` these runtimes hand a fetch handler does not promise
- * mutable headers, and only \`init.headers\` is replaced, so the body is carried
- * across untouched and unread.
+ * Attributed to the peer it arrived from by \`attributeToPeer\`, which the Node
+ * transport applies too. Rebuilt rather than mutated: a \`Request\` these
+ * runtimes hand a fetch handler does not promise mutable headers, and only
+ * \`init.headers\` is replaced, so the body is carried across untouched and
+ * unread.
  */
 function admissibleRequest(request, peer) {
-  if (!FORWARDED_IDENTITY_HEADERS.some((name) => request.headers.has(name))) return request;
-  if (peerMayStateClientIdentity(peer)) return request;
   const headers = new Headers(request.headers);
-  for (const name of FORWARDED_IDENTITY_HEADERS) headers.delete(name);
+  if (!attributeToPeer(headers, peer)) return request;
   return new Request(request, { headers });
 }
 
@@ -1796,8 +1831,9 @@ async function handleRequest(request, connection) {
     if (plan) return withCompression(await staticResponse(plan, request.method), request);
   }
 
-  // The request goes to the handler as it arrived, minus a forwarded identity
-  // nothing in front of this server vouched for. Its own \`security.apiLimit\`
+  // The request goes to the handler as it arrived, attributed to its peer
+  // rather than to a forwarded identity nothing in front of this server
+  // vouched for. Its own \`security.apiLimit\`
   // check reads \`content-length\` and answers 413 before a body is consumed,
   // so there is nothing for this transport to buffer or bound — the Node one
   // buffers only because \`node:http\` gave it a stream and not a \`Request\`.

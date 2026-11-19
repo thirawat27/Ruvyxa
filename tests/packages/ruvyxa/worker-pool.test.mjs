@@ -1382,6 +1382,95 @@ test('an API route handler receives a signal the host can abort', async (t) => {
   assert.deepEqual(JSON.parse(frame.body), { aborted: true })
 })
 
+test('a request withdrawn while it waits for admission still gets one terminal frame', async (t) => {
+  // The host releases its own pending entry when it abandons a request, but the
+  // protocol should not depend on that: every request the worker reads ends
+  // with exactly one terminal frame, whichever stage the cancel reached. This
+  // one never runs — the only slot is held by a handler that waits for abort.
+  const projectRoot = await mkdtemp(path.join(fixtureWorkspace, 'cancel-queued-'))
+  const appDir = path.join(projectRoot, 'app/api/wait')
+  const routeFile = path.join(appDir, 'route.ts')
+  await mkdir(appDir, { recursive: true })
+  await writeFile(
+    routeFile,
+    // Checks `aborted` first: under load the route compiles slowly enough that
+    // the cancel can land before the listener is attached, and an `abort`
+    // event already fired never fires again — the handler would hold the only
+    // slot until the worker's own request timeout.
+    `export function GET({ request }) {
+  return new Promise((resolve) => {
+    const done = () => resolve(Response.json({ aborted: true }))
+    if (request.signal.aborted) return done()
+    request.signal.addEventListener('abort', done)
+  })
+}
+`,
+  )
+
+  const worker = spawn(process.execPath, [workerScript], {
+    cwd: repoRoot,
+    env: { ...process.env, RUVYXA_WORKER_MAX_CONCURRENCY: '1' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  const lines = createInterface({ input: worker.stdout })
+  t.after(async () => {
+    lines.close()
+    worker.stdin.end()
+    await Promise.race([
+      new Promise((resolve) => worker.once('exit', resolve)),
+      new Promise((resolve) => setTimeout(resolve, 2_000)),
+    ])
+    if (worker.exitCode === null) worker.kill()
+    await rm(projectRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  })
+
+  const frames = []
+  lines.on('line', (line) => frames.push(JSON.parse(line)))
+  const framesFor = (id) => frames.filter((frame) => frame.id === id)
+  const waitFor = async (predicate, what) => {
+    const deadline = Date.now() + 10_000
+    while (!predicate()) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+  }
+  const api = (id) =>
+    `${JSON.stringify({
+      id,
+      type: 'api',
+      projectRoot,
+      routeFile,
+      method: 'GET',
+      requestPath: '/api/wait',
+      headers: {},
+      params: {},
+    })}\n`
+
+  worker.stdin.write(api('busy'))
+  worker.stdin.write(`${JSON.stringify({ id: 'admitted', type: 'ping' })}\n`)
+  await waitFor(() => framesFor('admitted').length === 1, 'the busy request to be admitted')
+  worker.stdin.write(api('queued'))
+  worker.stdin.write(`${JSON.stringify({ id: 'parked', type: 'ping' })}\n`)
+  await waitFor(() => framesFor('parked').length === 1, 'the queued request to park')
+  assert.equal(framesFor('parked')[0].activeRequests, 1, 'only one request may hold the slot')
+
+  worker.stdin.write(`${JSON.stringify({ type: 'cancel', id: 'queued' })}\n`)
+  // Freeing the slot lets admission settle the parked request as withdrawn.
+  worker.stdin.write(`${JSON.stringify({ type: 'cancel', id: 'busy' })}\n`)
+
+  await waitFor(() => framesFor('queued').length === 1, 'the withdrawn request to be answered')
+  await waitFor(() => framesFor('busy').length === 1, 'the busy request to be answered')
+  const [withdrawn] = framesFor('queued')
+  assert.equal(withdrawn.ok, false)
+  assert.equal(withdrawn.code, 'RUV1700')
+  assert.match(withdrawn.message, /cancelled by the host/)
+  assert.equal(withdrawn.body, undefined, 'a withdrawn request must not have run')
+
+  // Exactly one: nothing may follow the terminal frame.
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  assert.equal(framesFor('queued').length, 1)
+})
+
 test('a change inside a directory input invalidates the bundle that globbed it', async (t) => {
   // `import.meta.glob` records its watch *root* — a directory — as a bundle
   // input, so the only thing that can invalidate on a new or removed match is

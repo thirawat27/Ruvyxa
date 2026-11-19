@@ -1,6 +1,6 @@
 [package]
 name = "ruvyxa_cli"
-version = "1.1.5"
+version = "1.1.6"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -14,7 +14,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 blake3.workspace = true
-chrono.workspace = true
+jiff.workspace = true
 clap.workspace = true
 # Decoding, resizing, and WebP encoding all live in `ruvyxa_dev_server`
 # (`image_decode` and `image_codec`), which this crate calls. The decoder,
@@ -61,7 +61,7 @@ libc = "0.2.189"
 # `tests/ci_workflows.rs` asserts properties of `.github/workflows/*.yml`, and
 # a workflow is a machine-read document: matching its text passes on exactly
 # the bugs that class produces, so the gate parses it.
-serde_yaml_ng = { workspace = true }
+serde-saphyr = { workspace = true }
 # Test fixtures only: these tests must put real encoded files on disk for the
 # optimizer to sniff and decode. Decoding in this crate goes through
 # `ruvyxa_dev_server::image_decode`.

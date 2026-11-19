@@ -74,7 +74,13 @@ function stageDeployment(
     apiLimit,
     hangingRoute = false,
     trustedProxyIps,
-  }: { apiLimit?: number; hangingRoute?: boolean; trustedProxyIps?: string[] } = {},
+    rewrites,
+  }: {
+    apiLimit?: number
+    hangingRoute?: boolean
+    trustedProxyIps?: string[]
+    rewrites?: { beforeFiles: { source: string; destination: string }[] }
+  } = {},
 ): string {
   const root = mkdtempSync(path.join(tmpdir(), `ruvyxa-standalone-${runtime}-`))
   const server = path.join(root, 'server')
@@ -90,12 +96,12 @@ function stageDeployment(
   if (!securityHeaders) security.headers = false
   if (trustedProxyIps) security.trustedProxyIps = trustedProxyIps
   if (apiLimit !== undefined) security.apiLimit = apiLimit
+  const runtimePolicy: Record<string, unknown> = {}
+  if (Object.keys(security).length > 0) runtimePolicy.security = security
+  if (rewrites) runtimePolicy.rewrites = rewrites
   writeFileSync(
     path.join(server, 'index.mjs'),
-    standaloneServerSource({
-      runtime,
-      runtimePolicy: Object.keys(security).length > 0 ? { security } : {},
-    }),
+    standaloneServerSource({ runtime, runtimePolicy }),
     'utf8',
   )
   writeFileSync(
@@ -1723,7 +1729,7 @@ describe('generated standalone server forwarded identity', () => {
   // comes from 127.0.0.1, and loopback is trusted without configuration — which
   // is exactly why a naive test of this cannot fail.
   for (const runtime of ['bun', 'deno'] as const) {
-    it(`drops a forwarded identity from an untrusted peer (${runtime})`, async () => {
+    it(`replaces a forwarded identity from an untrusted peer with the peer (${runtime})`, async () => {
       const server = stageDeployment(runtime, true, { trustedProxyIps: ['10.0.0.0/8'] })
       const started = await startFetchServer(server)
       const seen = await forwardedHeadersSeen(
@@ -1731,22 +1737,49 @@ describe('generated standalone server forwarded identity', () => {
       )
       assert.deepEqual(
         seen,
-        [],
+        [['x-forwarded-for', '198.51.100.4']],
         'a peer that is not a configured proxy must not be able to rename itself',
       )
       started.stop()
     })
 
-    it(`believes a peer inside the configured prefix (${runtime})`, async () => {
+    it(`attributes a direct client to its own peer (${runtime})`, async () => {
+      // With nothing forwarded, the handler used to be told nothing, and
+      // `clientAddress` read every direct client as `unknown`: one shared
+      // bucket for the rate limiter, the action limiter, and the replay quota.
+      const server = stageDeployment(runtime, true, { trustedProxyIps: ['10.0.0.0/8'] })
+      const started = await startFetchServer(server)
+      const first = await forwardedHeadersSeen(await started.peerClient('/whoami', '198.51.100.4'))
+      const second = await forwardedHeadersSeen(await started.peerClient('/whoami', '198.51.100.5'))
+      assert.deepEqual(first, [['x-forwarded-for', '198.51.100.4']])
+      assert.deepEqual(second, [['x-forwarded-for', '198.51.100.5']])
+      started.stop()
+    })
+
+    it(`believes a peer inside the configured prefix and appends it (${runtime})`, async () => {
       const server = stageDeployment(runtime, true, { trustedProxyIps: ['10.0.0.0/8'] })
       const started = await startFetchServer(server)
       const seen = await forwardedHeadersSeen(
         await started.peerClient('/whoami', '10.0.0.9', { headers: forwarded }),
       )
       assert.deepEqual(seen, [
-        ['x-forwarded-for', '203.0.113.7'],
+        ['x-forwarded-for', '203.0.113.7, 10.0.0.9'],
         ['x-real-ip', '203.0.113.7'],
       ])
+      started.stop()
+    })
+
+    it(`keeps a trusted peer's x-real-ip unshadowed (${runtime})`, async () => {
+      // An `x-forwarded-for` holding only the proxy would be read first and
+      // name nobody, hiding the client the proxy did state.
+      const server = stageDeployment(runtime, true, { trustedProxyIps: ['10.0.0.0/8'] })
+      const started = await startFetchServer(server)
+      const seen = await forwardedHeadersSeen(
+        await started.peerClient('/whoami', '10.0.0.9', {
+          headers: { 'x-real-ip': '203.0.113.7' },
+        }),
+      )
+      assert.deepEqual(seen, [['x-real-ip', '203.0.113.7']])
       started.stop()
     })
 
@@ -1760,7 +1793,7 @@ describe('generated standalone server forwarded identity', () => {
         await started.peerClient('/whoami', '127.0.0.1', { headers: forwarded }),
       )
       assert.deepEqual(seen, [
-        ['x-forwarded-for', '203.0.113.7'],
+        ['x-forwarded-for', '203.0.113.7, 127.0.0.1'],
         ['x-real-ip', '203.0.113.7'],
       ])
       started.stop()
@@ -1789,14 +1822,136 @@ describe('generated standalone server forwarded identity', () => {
     const started = await startProcessServer(process.execPath, [], server)
     try {
       const response = await started.client('/whoami', { headers: forwarded })
-      assert.equal(response.status, 200)
-      const pairs = (await response.json()) as [string, string][]
-      assert.ok(
-        pairs.some(([name, value]) => name === 'x-forwarded-for' && value === '203.0.113.7'),
+      const chain = new Map(await forwardedHeadersSeen(response)).get('x-forwarded-for') ?? ''
+      // Node reports a dual-stack peer as `::ffff:127.0.0.1`; either spelling
+      // is the loopback peer, appended after the chain it vouched for.
+      assert.match(
+        chain,
+        /^203\.0\.113\.7, (::ffff:)?127\.0\.0\.1$/,
         'a proxy terminating on the same host must still be believed',
       )
+
+      // And a client with nothing forwarded is named by its socket rather than
+      // left as `unknown`.
+      const direct = new Map(await forwardedHeadersSeen(await started.client('/whoami')))
+      assert.match(direct.get('x-forwarded-for') ?? '', /^(::ffff:)?127\.0\.0\.1$/)
     } finally {
       started.stop()
+    }
+  })
+
+  it('relays an external rewrite through the node transport to a real upstream', async () => {
+    // A real socket on both sides, because the two failures live in `node:http`
+    // and undici and a stubbed `fetch` has neither: undici refused the
+    // inbound `keep-alive` / `connection: upgrade` fields (a 500), and the
+    // upstream's `content-encoding: gzip` was relayed over a body `fetch` had
+    // already decoded.
+    const { createServer: createHttpServer } = await import('node:http')
+    const { gzipSync } = await import('node:zlib')
+    const payload = JSON.stringify({ message: 'from upstream', padding: 'y'.repeat(2048) })
+    let received: Record<string, string | string[] | undefined> = {}
+    const upstream = createHttpServer((req, res) => {
+      received = req.headers
+      const body = gzipSync(payload)
+      res.writeHead(200, {
+        'content-type': 'application/json',
+        'content-encoding': 'gzip',
+        'content-length': String(body.length),
+      })
+      res.end(body)
+    })
+    await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve))
+    const address = upstream.address()
+    const upstreamPort = typeof address === 'object' && address ? address.port : 0
+
+    const server = stageDeployment('node', true, {
+      rewrites: {
+        beforeFiles: [
+          { source: '/upstream', destination: `http://127.0.0.1:${upstreamPort}/data` },
+        ],
+      },
+    })
+    const started = await startProcessServer(process.execPath, [], server)
+    try {
+      // `fetch` will not send hop-by-hop fields itself, so they go over a raw
+      // socket exactly as a browser or a client library sends them.
+      const raw = await new Promise<string>((resolve, reject) => {
+        const socket = netConnect(started.port, '127.0.0.1', () => {
+          socket.write(
+            [
+              'GET /upstream HTTP/1.1',
+              `Host: front.example:${started.port}`,
+              'Connection: keep-alive, Upgrade, x-hop',
+              'Keep-Alive: timeout=5',
+              'Upgrade: websocket',
+              'X-Hop: drop-me',
+              'X-End-To-End: keep-me',
+              'Accept-Encoding: identity',
+              '',
+              '',
+            ].join('\r\n'),
+          )
+        })
+        let text = ''
+        socket.setEncoding('latin1')
+        socket.on('data', (chunk: string) => {
+          text += chunk
+          const split = text.indexOf('\r\n\r\n')
+          if (split < 0) return
+          const head = text.slice(0, split)
+          const length = /\r\ncontent-length: (\d+)/i.exec(head)
+          const chunked = /\r\ntransfer-encoding: chunked/i.test(head)
+          if (
+            (length && text.length >= split + 4 + Number(length[1])) ||
+            (chunked && text.endsWith('\r\n0\r\n\r\n'))
+          ) {
+            socket.end()
+            resolve(text)
+          }
+        })
+        socket.on('error', reject)
+        socket.setTimeout(10_000, () => {
+          socket.destroy()
+          reject(new Error(`no complete response:\n${text}\n${started.output()}`))
+        })
+      })
+
+      const split = raw.indexOf('\r\n\r\n')
+      const head = raw.slice(0, split)
+      assert.match(head, /^HTTP\/1\.1 200 /, `${head}\n${started.output()}`)
+      assert.doesNotMatch(head, /\r\ncontent-encoding:/i, head)
+      let body = raw.slice(split + 4)
+      if (/\r\ntransfer-encoding: chunked/i.test(head)) {
+        let decoded = ''
+        let rest = body
+        for (;;) {
+          const lineEnd = rest.indexOf('\r\n')
+          const size = parseInt(rest.slice(0, lineEnd), 16)
+          if (!size) break
+          decoded += rest.slice(lineEnd + 2, lineEnd + 2 + size)
+          rest = rest.slice(lineEnd + 2 + size + 2)
+        }
+        body = decoded
+      }
+      assert.equal(body, payload)
+
+      assert.equal(received.host, `127.0.0.1:${upstreamPort}`, 'the front Host was forwarded')
+      assert.equal(received['x-end-to-end'], 'keep-me')
+      for (const name of ['keep-alive', 'upgrade', 'x-hop', 'transfer-encoding']) {
+        assert.equal(received[name], undefined, `${name} reached the upstream`)
+      }
+      assert.doesNotMatch(String(received.connection ?? ''), /upgrade/i)
+
+      // And through `fetch`, which decodes whatever it is told is encoded: a
+      // stale `content-encoding: gzip` over plain bytes is a decode error here.
+      const response = await started.client('/upstream')
+      assert.equal(response.status, 200)
+      assert.deepEqual(await response.json(), JSON.parse(payload))
+    } finally {
+      started.stop()
+      // A kept-alive socket would otherwise hold the runner open after a failure.
+      upstream.closeAllConnections()
+      upstream.close()
     }
   })
 
@@ -1815,9 +1970,12 @@ describe('generated standalone server forwarded identity', () => {
         source.includes(peerExpressions[runtime]),
         `the ${runtime} transport no longer reads the peer the socket arrived on`,
       )
-      assert.ok(
-        source.includes('peerMayStateClientIdentity('),
-        `the ${runtime} transport no longer weighs the peer before the handler sees a forwarded header`,
+      // One call site per transport, beside the definition: the Node one in
+      // its request listener, Bun's and Deno's in `admissibleRequest`.
+      assert.equal(
+        source.split('attributeToPeer(').length - 1,
+        2,
+        `the ${runtime} transport no longer attributes the request to its peer`,
       )
     }
   })

@@ -1275,8 +1275,7 @@ var __ruv_bbbb2222bbbb2222__ = (function() {
             .collect();
         assert!(
             active_lines.is_empty(),
-            "unused export should not appear as active: {:?}",
-            active_lines
+            "unused export should not appear as active: {active_lines:?}"
         );
     }
 
@@ -1327,8 +1326,7 @@ var __ruv_cccc3333cccc3333__ = (function() {
             .collect();
         assert!(
             active_lines.is_empty(),
-            "unused re-export chain should fully collapse: {:?}",
-            active_lines
+            "unused re-export chain should fully collapse: {active_lines:?}"
         );
         assert!(result.contains("[tree-shaken] __exports.unused = unused;"));
         assert!(

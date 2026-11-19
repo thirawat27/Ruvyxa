@@ -19,7 +19,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use chrono::Local;
+use jiff::ZonedDateTime;
 
 use crate::gradient::{HEAT, RULE};
 use crate::mascot::{Frame, glyphs};
@@ -80,7 +80,9 @@ pub fn spaces(width: usize, len: usize) -> String {
 }
 
 pub fn current_timestamp() -> String {
-    Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+    ZonedDateTime::now()
+        .strftime("%Y-%m-%d %H:%M:%S")
+        .to_string()
 }
 
 pub fn format_duration(duration: Duration) -> String {

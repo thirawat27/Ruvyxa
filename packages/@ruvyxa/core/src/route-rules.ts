@@ -320,16 +320,101 @@ export function matchRule(
   return { ...fromPath, ...fromConditions }
 }
 
-const TOKEN = /:([A-Za-z0-9_]+)[*+?]?/g
+// A name starts with a letter or `_`, so `:4000` in `http://localhost:4000` is
+// a port, not a parameter.
+const TOKEN = /:([A-Za-z_][A-Za-z0-9_]*)[*+?]?/g
 
-/** Replace `:name` tokens; an absent parameter substitutes the empty string. */
+/**
+ * Replace `:name` tokens; an absent parameter substitutes the empty string.
+ */
 export function substitute(template: string, params: RuleParams): string {
-  return template.replace(TOKEN, (_, name: string) => params[name] ?? '')
+  return substituteWith(template, params, (value) => value) ?? ''
+}
+
+/**
+ * {@link substitute}, each value passed through `render` first; `null` from
+ * `render` refuses the whole substitution.
+ */
+function substituteWith(
+  template: string,
+  params: RuleParams,
+  render: (value: string) => string | null,
+): string | null {
+  let refused = false
+  const output = template.replace(TOKEN, (_, name: string) => {
+    const rendered = render(params[name] ?? '')
+    if (rendered === null) refused = true
+    return rendered ?? ''
+  })
+  return refused ? null : output
+}
+
+/** Substitute a destination's query half, each value encoded as a query component. */
+function substituteQuery(template: string, params: RuleParams): string {
+  return substituteWith(template, params, encodeUriComponent) ?? ''
+}
+
+/**
+ * A value for a path position: each `/`-separated piece encoded as
+ * {@link encodeUriComponent} does, the `/` kept. Canonicalisation refuses a
+ * segment that decodes to `/` (`%2F`), so a `/` in a value is always a real
+ * segment boundary — the joined remainder of `:path*`, `:path+`, or a regex
+ * parameter spanning segments.
+ */
+function encodePathValue(value: string): string {
+  return value.split('/').map(encodeUriComponent).join('/')
+}
+
+const UNRESERVED_BYTE = /^[A-Za-z0-9\-_.!~*'()]$/
+const UTF8 = new TextEncoder()
+
+/**
+ * `encodeURIComponent`, byte for byte, except that a lone surrogate becomes
+ * U+FFFD instead of throwing — the Rust host cannot hold one, and a throw here
+ * would fail the request.
+ */
+function encodeUriComponent(value: string): string {
+  let output = ''
+  for (const byte of UTF8.encode(value)) {
+    const char = String.fromCharCode(byte)
+    output += UNRESERVED_BYTE.test(char)
+      ? char
+      : `%${byte.toString(16).toUpperCase().padStart(2, '0')}`
+  }
+  return output
 }
 
 function templateUsesParams(template: string): boolean {
   TOKEN.lastIndex = 0
   return TOKEN.test(template)
+}
+
+const ABSOLUTE_HTTP = /^https?:\/\//i
+const HOSTNAME_VALUE = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*$/
+
+/**
+ * Substitute a destination's path half. When it is an absolute `http(s)` URL,
+ * a value landing in the authority must be a hostname (`label(.label)*`);
+ * anything else — `evil.com#`, `a/b`, `x@y` — would move the request to
+ * another host, so the rule does not match (`null`).
+ *
+ * A value landing in the path is percent-encoded ({@link encodePathValue}):
+ * parameters come from the *decoded* canonical path, so `a?x=1` substituted
+ * raw would end the path and inject a query, `#` would start a fragment.
+ */
+function substituteDestination(base: string, params: RuleParams): string | null {
+  const scheme = ABSOLUTE_HTTP.exec(base)
+  if (scheme === null) return substituteWith(base, params, encodePathValue)
+  const authorityStart = scheme[0].length
+  const rest = base.slice(authorityStart).search(/[/#]/)
+  const authorityEnd = rest === -1 ? base.length : authorityStart + rest
+  const authority = substituteWith(base.slice(authorityStart, authorityEnd), params, (value) =>
+    HOSTNAME_VALUE.test(value) ? value : null,
+  )
+  if (authority === null) return null
+  const path = substituteWith(base.slice(authorityEnd), params, encodePathValue)
+  if (path === null) return null
+  return base.slice(0, authorityStart) + authority + path
 }
 
 export interface CompiledHeaderRule {
@@ -390,8 +475,9 @@ export function matchRedirect(
     // Split before substitution: a `?` after a parameter name would otherwise
     // read as the optional modifier.
     const [base, destinationQuery] = splitQuery(rule.destination)
-    let location = substitute(base, params)
-    if (destinationQuery !== undefined) location += `?${substitute(destinationQuery, params)}`
+    let location = substituteDestination(base, params)
+    if (location === null) continue
+    if (destinationQuery !== undefined) location += `?${substituteQuery(destinationQuery, params)}`
     else if (request.query) location += `?${request.query}`
     const status = rule.statusCode ?? (rule.permanent ? 308 : 307)
     return { location, status }
@@ -423,9 +509,12 @@ export function matchRewrite(
     if (params === null) continue
     const usesParams = templateUsesParams(rule.destination)
     const [baseTemplate, queryTemplate] = splitQuery(rule.destination)
-    const base = substitute(baseTemplate, params)
+    const base = substituteDestination(baseTemplate, params)
+    if (base === null) continue
+    // Encoded as components, then parsed back: the value survives whole and
+    // is serialized once, never twice.
     const query = new URLSearchParams(
-      queryTemplate === undefined ? '' : substitute(queryTemplate, params),
+      queryTemplate === undefined ? '' : substituteQuery(queryTemplate, params),
     )
     if (!usesParams) {
       for (const [name, value] of Object.entries(params)) query.append(name, value)

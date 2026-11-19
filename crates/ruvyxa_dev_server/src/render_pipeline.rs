@@ -330,39 +330,36 @@ pub(crate) fn render_request_cached(
         return Ok(public_response);
     }
 
-    let route_match = match context.router.find(&context.manifest, request_path) {
-        Some(route_match) => route_match,
-        None => {
-            let headers = HeaderMap::new();
-            if let Some(location) = crate::i18n::locale_redirect_path(
-                config.i18n.as_ref(),
-                &context.manifest,
-                &context.router,
-                request_path,
-                // This path renders from a route table alone — the build's
-                // prerenderer and `ruvyxa bench` are its only callers — so
-                // there is no request URI here and no query to carry.
-                None,
-                method,
-                &headers,
-            ) {
-                return Ok(with_security_headers(
-                    (
-                        StatusCode::TEMPORARY_REDIRECT,
-                        [(header::LOCATION, location)],
-                    )
-                        .into_response(),
-                ));
-            }
-            return Ok(html_response(
-                StatusCode::NOT_FOUND,
-                error_page(
-                    StatusCode::NOT_FOUND,
-                    "Route not found",
-                    config.watch && config.error_overlay,
-                ),
+    let Some(route_match) = context.router.find(&context.manifest, request_path) else {
+        let headers = HeaderMap::new();
+        if let Some(location) = crate::i18n::locale_redirect_path(
+            config.i18n.as_ref(),
+            &context.manifest,
+            &context.router,
+            request_path,
+            // This path renders from a route table alone — the build's
+            // prerenderer and `ruvyxa bench` are its only callers — so
+            // there is no request URI here and no query to carry.
+            None,
+            method,
+            &headers,
+        ) {
+            return Ok(with_security_headers(
+                (
+                    StatusCode::TEMPORARY_REDIRECT,
+                    [(header::LOCATION, location)],
+                )
+                    .into_response(),
             ));
         }
+        return Ok(html_response(
+            StatusCode::NOT_FOUND,
+            error_page(
+                StatusCode::NOT_FOUND,
+                "Route not found",
+                config.watch && config.error_overlay,
+            ),
+        ));
     };
     if is_missing_static_asset(request_path, &route_match.route.path) {
         return Ok(html_response(
@@ -443,9 +440,13 @@ pub(crate) fn rewrite_target(target: &str) -> std::result::Result<(String, Strin
     };
     let canonical = crate::worker_bridge::canonical_request_path(path)
         .map_err(|error| Box::new((StatusCode::BAD_REQUEST, error.to_string()).into_response()))?;
+    // The full target is read again by splitting at its first `?`, so its path
+    // is the canonical one re-encoded: a decoded `?` or `#` from a parameter
+    // must not become the query an API handler or the worker sees.
+    let encoded = ruvyxa_middleware::route_rules::encode_path_value(&canonical);
     let full = match query {
-        Some(query) => format!("{canonical}?{query}"),
-        None => canonical.clone(),
+        Some(query) => format!("{encoded}?{query}"),
+        None => encoded,
     };
     Ok((canonical, full))
 }
@@ -633,49 +634,46 @@ async fn render_request_inner(
             .await;
         }
     }
-    let route_match = match found {
-        Some(route_match) => route_match,
-        None => {
-            if let Some(location) = crate::i18n::locale_redirect_path(
-                state.config.i18n.as_ref(),
-                &manifest,
-                &router,
-                request_path,
-                // `request_path` is the canonical path and carries no query by
-                // construction; `request_target` is the value that does. A 307
-                // preserves the method and the body and says nothing about the
-                // query, so the redirect has to reproduce it explicitly.
-                request_target.split_once('?').map(|(_, query)| query),
-                method,
-                request_headers,
-            ) {
-                return Ok(with_security_headers(
-                    (
-                        StatusCode::TEMPORARY_REDIRECT,
-                        [(header::LOCATION, location)],
-                    )
-                        .into_response(),
-                ));
-            }
-            // The application's own not-found page, if it has one.
-            //
-            // `app/not-found.tsx` is the file every reader coming from another
-            // framework writes for this, and it was rendered for nothing: only
-            // a `notFound()` call inside a matched route reached it, so an
-            // unmatched URL got the framework's own error card — which also
-            // links `/ruvyxa.png`, an image most projects do not publish.
-            if let Some(html) = render_root_not_found(state, request_path, request_headers).await {
-                return Ok(html_response(StatusCode::NOT_FOUND, html));
-            }
-            return Ok(html_response(
-                StatusCode::NOT_FOUND,
-                error_page(
-                    StatusCode::NOT_FOUND,
-                    "Route not found",
-                    state.config.watch && state.config.error_overlay,
-                ),
+    let Some(route_match) = found else {
+        if let Some(location) = crate::i18n::locale_redirect_path(
+            state.config.i18n.as_ref(),
+            &manifest,
+            &router,
+            request_path,
+            // `request_path` is the canonical path and carries no query by
+            // construction; `request_target` is the value that does. A 307
+            // preserves the method and the body and says nothing about the
+            // query, so the redirect has to reproduce it explicitly.
+            request_target.split_once('?').map(|(_, query)| query),
+            method,
+            request_headers,
+        ) {
+            return Ok(with_security_headers(
+                (
+                    StatusCode::TEMPORARY_REDIRECT,
+                    [(header::LOCATION, location)],
+                )
+                    .into_response(),
             ));
         }
+        // The application's own not-found page, if it has one.
+        //
+        // `app/not-found.tsx` is the file every reader coming from another
+        // framework writes for this, and it was rendered for nothing: only
+        // a `notFound()` call inside a matched route reached it, so an
+        // unmatched URL got the framework's own error card — which also
+        // links `/ruvyxa.png`, an image most projects do not publish.
+        if let Some(html) = render_root_not_found(state, request_path, request_headers).await {
+            return Ok(html_response(StatusCode::NOT_FOUND, html));
+        }
+        return Ok(html_response(
+            StatusCode::NOT_FOUND,
+            error_page(
+                StatusCode::NOT_FOUND,
+                "Route not found",
+                state.config.watch && state.config.error_overlay,
+            ),
+        ));
     };
     if is_missing_static_asset(request_path, &route_match.route.path) {
         return Ok(html_response(
@@ -3651,6 +3649,16 @@ mod tests {
         assert_eq!(
             rewrite_target("/a?second=b&x=1").unwrap(),
             ("/a".to_string(), "/a?second=b&x=1".to_string())
+        );
+        // The rule substituted the decoded parameter re-encoded; routing reads
+        // it decoded again, the `?` and `#` still inside the segment, and the
+        // full target keeps them encoded so its query is only the real one.
+        assert_eq!(
+            rewrite_target("/posts/a%20b%3Fc%23d?x=1").unwrap(),
+            (
+                "/posts/a b?c#d".to_string(),
+                "/posts/a%20b%3Fc%23d?x=1".to_string()
+            )
         );
         let external = rewrite_target("https://old.example/blog/x").unwrap_err();
         assert_eq!(external.status(), StatusCode::BAD_GATEWAY);

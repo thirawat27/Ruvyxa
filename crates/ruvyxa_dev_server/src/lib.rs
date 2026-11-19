@@ -3417,7 +3417,7 @@ mod tests {
             env.get("DATABASE_URL"),
             Some(&"postgres://localhost/db".to_string())
         );
-        assert_eq!(env.get("EMPTY"), Some(&"".to_string()));
+        assert_eq!(env.get("EMPTY"), Some(&String::new()));
         assert!(!env.contains_key("INVALID"));
         // Shell-sourceable files prefix assignments with `export`; the prefix
         // is not part of the key.

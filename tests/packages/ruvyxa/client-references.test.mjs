@@ -15,6 +15,7 @@
  * inferred from its documentation.
  */
 import assert from 'node:assert/strict'
+import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { describe, it } from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -27,6 +28,8 @@ const {
   CLIENT_MODULE_REGISTRY_GLOBAL,
   RSC_CLIENT_RUNTIME_SPECIFIER,
   clientManifest,
+  clientReferenceInstallPath,
+  clientReferenceRuntimePath,
   clientModuleId,
   clientProxyModuleSource,
   clientRegistrySource,
@@ -55,6 +58,26 @@ const {
   resolveServerReference,
   serverReferenceProxy,
 } = await import(runtimeUrl('rsc-client-runtime.mjs'))
+
+describe('the runtime import paths a browser entry names', () => {
+  // These are import paths, not ids. They once went through the id
+  // normaliser, which strips a leading slash: on Linux and macOS
+  // `/home/…/rsc-client-runtime.mjs` became the bare `home/…`, and an installed
+  // package collapsed to `node_modules/ruvyxa/…`. Windows hid both, because a
+  // drive letter is not a slash and this checkout has no `node_modules/` above
+  // the runtime.
+  for (const [name, read] of [
+    ['install', clientReferenceInstallPath],
+    ['runtime', clientReferenceRuntimePath],
+  ]) {
+    it(`names the ${name} module by an absolute path that exists`, () => {
+      const value = read()
+      assert.ok(!value.includes('\\'), value)
+      assert.ok(path.isAbsolute(value), value)
+      assert.ok(existsSync(value), value)
+    })
+  }
+})
 
 describe('client module identity', () => {
   it('is stable for one path and different for another', () => {

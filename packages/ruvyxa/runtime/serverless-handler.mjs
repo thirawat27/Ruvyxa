@@ -660,10 +660,22 @@ export function createHandler(options) {
    * the "rewrite to an external URL" every migration guide leans on. Anything
    * else is a path on this application, dispatched again with the rules
    * skipped: a rewrite is checked once, never against its own result.
+   *
+   * The external fetch is a proxy hop, so it is held to a proxy's rules in both
+   * directions: see `upstreamRequestHeaders` and `relayedUpstreamResponse`.
    */
   async function rewriteTo(target, request, runtimeContext) {
     if (/^https?:\/\//i.test(target)) {
-      return fetch(new Request(target, request))
+      const upstream = await fetch(
+        new Request(target, {
+          method: request.method,
+          headers: upstreamRequestHeaders(request.headers),
+          body: request.body,
+          duplex: 'half',
+          signal: request.signal,
+        }),
+      )
+      return relayedUpstreamResponse(upstream)
     }
     const url = new URL(target, request.url)
     return dispatch(new Request(url, request), runtimeContext, { rewritten: true })
@@ -2028,11 +2040,35 @@ function localeRedirect(request, pathname, search, basePath, matchRoute, config)
       // empty query never leaves a dangling `?` on the target — which is the
       // same answer `locale_redirect_path` gives after splitting the raw
       // request target.
-      return `${basePath === '/' ? '' : basePath}${candidate}${search ?? ''}`
+      return `${basePath === '/' ? '' : basePath}${encodedLocationPath(candidate)}${search ?? ''}`
     }
   }
   return null
 }
+
+/**
+ * Spell a decoded route path the way `URL.pathname` spells it.
+ *
+ * Routing matches the decoded path, so the candidate carries literal spaces and
+ * raw non-ASCII. `Headers` refuses any character above U+00FF, so putting the
+ * candidate into `Location` as-is threw for every unprefixed Thai URL instead of
+ * redirecting. `encoded_path` in `crates/ruvyxa_dev_server/src/i18n.rs` is the
+ * other host's copy; `tests/fixtures/i18n-routing-conformance.json` holds both.
+ */
+function encodedLocationPath(path) {
+  let encoded = ''
+  for (const char of path) {
+    const code = char.codePointAt(0)
+    encoded +=
+      code <= 0x20 || code >= 0x7f || LOCATION_PATH_RESERVED.has(char)
+        ? encodeURIComponent(char)
+        : char
+  }
+  return encoded
+}
+
+/** The printable ASCII characters `URL.pathname` percent-encodes, plus `%`. */
+const LOCATION_PATH_RESERVED = new Set(['"', '#', '%', '<', '>', '?', '`', '{', '}'])
 
 function preferredLocale(headers, config) {
   // Detection off means the cookie and Accept-Language are not consulted, not
@@ -2525,6 +2561,76 @@ export function clientAddress(headers, trustedProxies, ingressHeaders = []) {
   // bucket limits more aggressively than the traffic warrants, which is the
   // direction a limiter is allowed to be wrong in.
   return 'unknown'
+}
+
+/**
+ * Header fields that describe one connection rather than the message, per RFC
+ * 9110 section 7.6.1. A proxy consumes them on each hop and never forwards them.
+ */
+const HOP_BY_HOP_HEADERS = [
+  'connection',
+  'keep-alive',
+  'proxy-connection',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+]
+
+/** The hop-by-hop set plus whatever this message's `Connection` names. */
+function hopByHopNames(headers) {
+  const names = new Set(HOP_BY_HOP_HEADERS)
+  for (const token of String(headers.get('connection') ?? '').split(',')) {
+    const name = token.trim().toLowerCase()
+    if (name) names.add(name)
+  }
+  return names
+}
+
+/**
+ * The request headers an external rewrite sends upstream.
+ *
+ * Copying the inbound request whole was a 500 on the Node standalone server:
+ * undici refuses to send `keep-alive`, `transfer-encoding`, or `connection:
+ * upgrade`, and a browser sends `keep-alive` on most requests. `Host` is the
+ * front door's name, not the upstream's — `fetch` derives the right one from
+ * the target — and forwarding it sends a virtual-hosted upstream to the wrong
+ * site.
+ */
+function upstreamRequestHeaders(inbound) {
+  const dropped = hopByHopNames(inbound)
+  dropped.add('host')
+  const headers = new Headers()
+  for (const [name, value] of inbound) {
+    if (!dropped.has(name)) headers.append(name, value)
+  }
+  return headers
+}
+
+/**
+ * The upstream response as this server can relay it.
+ *
+ * `fetch` has already decoded the body, so the upstream's `content-encoding`
+ * and `content-length` describe bytes nobody is sending any more: relayed
+ * as-is, a gzip upstream reached the client as plain text labelled gzip and
+ * was undecodable, and the compression stage skipped it because an encoding
+ * was already declared. Hop-by-hop fields describe the upstream connection.
+ */
+function relayedUpstreamResponse(upstream) {
+  const dropped = hopByHopNames(upstream.headers)
+  dropped.add('content-encoding')
+  dropped.add('content-length')
+  // Iterating `Headers` yields each `set-cookie` as its own entry, so a second
+  // cookie survives the copy.
+  const headers = new Headers()
+  for (const [name, value] of upstream.headers) {
+    if (!dropped.has(name)) headers.append(name, value)
+  }
+  return new Response(upstream.body, {
+    status: upstream.status,
+    statusText: upstream.statusText,
+    headers,
+  })
 }
 
 /** Stable text form of a parsed address, for use as a bucket key. */

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.1.6 (2026-11-19)
 
 ### `ruvyxa-axum`: a Ruvyxa site and a Rust API in one binary
 
@@ -19,6 +19,58 @@ scaffold. A new `axum` lane in `scripts/smoke-runtime-adapter.mjs` builds `examp
 for the static target and serves it through that program in CI, holding it to the same five checks
 as the static lane. Scaffold files may now be written at the project root (`ScaffoldFile::at_root`);
 the three application scaffolds still write under `appDir`, and a test holds that.
+
+### Fixes
+
+- **Security:**
+  - `@ruvyxa/auth`'s `returnTo` could still redirect off-site after a real OAuth sign-in. Dot
+    segments normalize `/.//evil.com` to `//evil.com` after the same-origin check, so the emitted
+    path is now checked as well.
+  - Route-rule destinations read `:4000` in `http://localhost:4000/:path*` as a parameter and
+    dropped the port.
+  - A parameter in the host position (`https://:tenant.example.com`) accepted `evil.com#` and moved
+    the request to another host. A value there must now be a hostname, or the rule does not match.
+    This holds on both hosts, and `tests/fixtures/route-rules-conformance.json` replays it.
+- **Native host:** `?q=%aé` in a query read by a route rule panicked the connection's task, and
+  `%+f` decoded differently than `URLSearchParams` does. Both now decode byte by byte.
+- **`reactCompiler`:** the Rust module graph scanned imports before the build transform ran, so the
+  `react/compiler-runtime` import the compiler adds was stubbed, and every compiled component threw.
+  The graph now scans the transformed source, as `runtime/compiler.mjs` already did.
+- **Server components on Linux and macOS:** the browser entry imported the client runtime by a path
+  with its leading `/` stripped, and an installed package by a bare `node_modules/…`.
+- **Production CSS:** the minifier removed whitespace that carries meaning. `a :hover` became
+  `a:hover`, `and (min-width…)` became a function token, and `calc(100% - (2px))` became invalid.
+- **i18n redirects:**
+  - A deployed build threw on every unprefixed URL with a character above U+00FF, such as a Thai
+    path.
+  - The native host sent such a path as raw bytes and garbled a non-ASCII query (`é` became `Ã©`).
+  - Both hosts now encode `Location` the way `URL` does.
+- **Worker pool:** a request abandoned before its response left its entry behind. The worker's load
+  stayed inflated, healthy workers were retired, and draining waited out its full timeout.
+- **Standalone server:**
+  - An external rewrite forwarded hop-by-hop headers and `Host`, which failed with a 500.
+  - It also relayed the upstream `content-encoding` over a body `fetch` had already decoded.
+  - Every direct client was identified as `unknown`, so they all shared one rate-limit bucket.
+- **`ruvyxa-axum`:** `_headers` rules now match the decoded path, and `_headers` itself is no longer
+  served.
+- **tsconfig `paths`:** the JavaScript resolver let a pattern's prefix and suffix overlap (`@o/*/o`
+  matched `@o/o`). TypeScript and the Rust resolver refuse that.
+- **Workspace React:** React was pinned to 19.2.8 while `react-server-dom-webpack` 19.3.1 requires
+  `^19.3.1`. `fast-uri` and `source-map-js` are raised past their advisories.
+- **Route-rule params are percent-encoded:**
+  - Params now go into a destination path or query encoded, on both hosts. Before, they went in
+    decoded, so `/blog/a%3Fx=1` redirected to `/posts/a?x=1` and `%23` became a fragment.
+  - The native host's rewrite target no longer turns a decoded `?` into a query.
+- **Frontmatter YAML:** `serde_yaml_ng` and the unmaintained `unsafe-libyaml` it pulled in are
+  replaced by `serde-saphyr`. `tests/fixtures/frontmatter-yaml-conformance.json` holds the Rust and
+  JavaScript parsers to one answer. Duplicate keys and non-finite numbers are now errors, as they
+  already were in the content engine.
+- **Dates:** `chrono` (unmaintained) is replaced by `jiff`. A sitemap `lastmod` date must now be
+  exactly `YYYY-MM-DD` or RFC 3339.
+- **oxc:** the Rust bundler moved to 0.159.0, in lockstep with `oxc-transform`.
+- **Dev tools:** the bundle and action tables are bounded, and bundles are keyed by route pattern.
+- **Clippy:** the workspace now gates newer spellings (`let … else`, inline format arguments,
+  `is_some_and`) against the declared `rust-version`.
 
 ## v1.1.5 (2026-09-06)
 

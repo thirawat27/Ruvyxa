@@ -2595,6 +2595,107 @@ export default function Page() { return null }
         );
     }
 
+    /// An import a build transform hook adds is part of the module graph.
+    ///
+    /// The React compiler rewrites every component to import `_c` from
+    /// `react/compiler-runtime`. The native graph scanned imports before the
+    /// transform ran, so that import was never resolved, the client linker
+    /// stubbed it with `RUV1611`, and every compiled component threw on `_c`.
+    /// The hook here stands in for the compiler: it injects an import of a
+    /// project module the page never names. The module must be bundled, the
+    /// import bound to it, and the transform must run once per module — the
+    /// compiler reuses the graph walk's output rather than transforming again.
+    #[test]
+    fn imports_added_by_a_transform_hook_are_resolved_and_linked() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct InjectImport {
+            page_transforms: Arc<AtomicUsize>,
+        }
+
+        impl hooks::BuildHooks for InjectImport {
+            fn host_name(&self) -> &str {
+                "inject-import"
+            }
+
+            fn transform(
+                &self,
+                code: &str,
+                id: &std::path::Path,
+                _context: &hooks::BuildHookContext,
+            ) -> Result<Option<hooks::TransformOutput>> {
+                if id.file_name().and_then(|name| name.to_str()) != Some("page.tsx") {
+                    return Ok(None);
+                }
+                self.page_transforms.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(hooks::TransformOutput::code(format!(
+                    "import {{ injectedRuntime }} from './injected-runtime';\ninjectedRuntime();\n{code}"
+                ))))
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("injected-runtime.ts"),
+            "export function injectedRuntime() { return 'INJECTED_RUNTIME_BODY'; }\n",
+        )
+        .unwrap();
+        let page = app.join("page.tsx");
+        fs::write(
+            &page,
+            "export default function Page() { return <main>x</main>; }\n",
+        )
+        .unwrap();
+
+        let page_transforms = Arc::new(AtomicUsize::new(0));
+        let pipeline = hooks::BuildHookPipeline::new(vec![Arc::new(InjectImport {
+            page_transforms: Arc::clone(&page_transforms),
+        })]);
+        let context = BundleContext::with_build_hooks_for_build(
+            cache::CompileCache::new(&root, false),
+            resolver::ResolveGraphCache::new(),
+            incremental::IncrementalGraphCache::new(&root, false),
+            pipeline,
+            &root.join(".ruvyxa-test-cache"),
+            "transform-hook-imports",
+            false,
+        );
+
+        let mut input = client_input(&root, &app, page, vec![], "/");
+        input.options.source_map = false;
+        input.options.emit_chunk_manifest = false;
+        let output = bundle_with_context(input, &context).unwrap();
+
+        assert!(
+            output.code.contains("INJECTED_RUNTIME_BODY"),
+            "the hook-added import must be bundled: {}",
+            &output.code[..output.code.len().min(2000)]
+        );
+        // The fixture has no `react` installed, so the JSX runtime import is
+        // stubbed; the assertion is about the hook-added specifier only.
+        assert!(
+            !output
+                .code
+                .contains("__ruvyxaMissingImport__(\"./injected-runtime\""),
+            "the hook-added import must be linked, not stubbed: {}",
+            &output.code[..output.code.len().min(2000)]
+        );
+        assert!(
+            output.code.contains("const injectedRuntime = __ruv_"),
+            "the hook-added import must bind to the bundled module: {}",
+            &output.code[..output.code.len().min(2000)]
+        );
+        assert_eq!(
+            page_transforms.load(Ordering::SeqCst),
+            1,
+            "the compiler must reuse the graph walk's transform output"
+        );
+    }
+
     /// An unresolvable bare import must not reach the browser as a bare ESM
     /// specifier: nothing resolves it from a `<script type="module">`, so the
     /// whole chunk failed to load and the browser's message named neither the

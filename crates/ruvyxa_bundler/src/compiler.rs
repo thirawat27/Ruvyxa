@@ -477,22 +477,28 @@ fn compile_module(
         });
     }
 
-    let content_source = if let Some(compiled) = &module.compiled_content {
-        compiled.to_string()
-    } else if matches!(ext, "md" | "mdx") {
-        crate::content::compile_content_module(&module.source, &module.path)
-            .map_err(BundleError::Compiler)?
+    // The graph walk already ran the transform hooks — it had to, to scan the
+    // imports they add — so `deps` describes that output. Compiling anything
+    // else would let the two disagree, and would run every hook twice.
+    let hook_output = if let Some(output) = &module.hook_output {
+        output.clone()
     } else {
-        module.source.clone()
-    };
+        let content_source = if let Some(compiled) = &module.compiled_content {
+            compiled.to_string()
+        } else if matches!(ext, "md" | "mdx") {
+            crate::content::compile_content_module(&module.source, &module.path)
+                .map_err(BundleError::Compiler)?
+        } else {
+            module.source.clone()
+        };
 
-    let hook_context = BuildHookContext {
-        project_root: input.project_root.clone(),
-        importer: Some(module.path.clone()),
-        target: input.target,
+        let hook_context = BuildHookContext {
+            project_root: input.project_root.clone(),
+            importer: Some(module.path.clone()),
+            target: input.target,
+        };
+        build_hooks.transform_with_map(&content_source, &module.path, &hook_context)?
     };
-    let hook_output =
-        build_hooks.transform_with_map(&content_source, &module.path, &hook_context)?;
     let source = hook_output.code;
     let hook_source_map = hook_output.map.or_else(|| module.load_source_map.clone());
 
@@ -1641,6 +1647,7 @@ mod tests {
             watch_paths: Vec::new(),
             glob_matches: Vec::new(),
             is_external: false,
+            hook_output: None,
         };
         let input = BundleInput {
             entry: path.clone(),

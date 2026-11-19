@@ -858,15 +858,91 @@ fn validate_entry_metadata(value: &SitemapEntryMetadata, field: &str) -> std::io
 }
 
 fn validate_last_modified(value: &str, field: &str) -> std::io::Result<()> {
-    let valid = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok()
-        || chrono::DateTime::parse_from_rfc3339(value).is_ok();
-    if valid {
+    if is_calendar_date(value) || is_rfc3339_timestamp(value) {
         Ok(())
     } else {
         Err(invalid_input(format!(
             "{field} must be an ISO 8601 date or RFC 3339 timestamp"
         )))
     }
+}
+
+/// `YYYY-MM-DD`, a real day of the proleptic Gregorian calendar.
+///
+/// Exactly the W3C Datetime date a sitemap `<lastmod>` carries. The value is
+/// written into the sitemap as given, so a spelling the sitemap format does not
+/// accept — `2026-1-9`, `+2026-11-19`, a leading space — is refused here
+/// rather than published.
+fn is_calendar_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    let (Some(year), Some(month), Some(day)) = (
+        ascii_digits(&bytes[0..4]),
+        ascii_digits(&bytes[5..7]),
+        ascii_digits(&bytes[8..10]),
+    ) else {
+        return false;
+    };
+    // Four digits, so every value fits `i16`; two digits fit `i8`.
+    jiff::civil::Date::new(year as i16, month as i8, day as i8).is_ok()
+}
+
+/// RFC 3339 `date-time`: `T`, `t` or a space between date and time, a leap
+/// second allowed, any number of fractional digits, and `Z`/`z` or a
+/// `±HH:MM` offset that is required.
+fn is_rfc3339_timestamp(value: &str) -> bool {
+    // Bytes throughout: a multi-byte character can never be a digit or a
+    // separator, so it fails a comparison instead of splitting a `str` slice.
+    let bytes = value.as_bytes();
+    if bytes.len() < 20 || !value.is_char_boundary(10) || !is_calendar_date(&value[..10]) {
+        return false;
+    }
+    if !matches!(bytes[10], b'T' | b't' | b' ') || bytes[13] != b':' || bytes[16] != b':' {
+        return false;
+    }
+    let (Some(hour), Some(minute), Some(second)) = (
+        ascii_digits(&bytes[11..13]),
+        ascii_digits(&bytes[14..16]),
+        ascii_digits(&bytes[17..19]),
+    ) else {
+        return false;
+    };
+    if hour > 23 || minute > 59 || second > 60 {
+        return false;
+    }
+    let mut rest = &bytes[19..];
+    if let Some(fraction) = rest.strip_prefix(b".") {
+        let digits = fraction
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        if digits == 0 {
+            return false;
+        }
+        rest = &fraction[digits..];
+    }
+    match rest {
+        [b'Z' | b'z'] => true,
+        [b'+' | b'-', h1, h2, b':', m1, m2] => matches!(
+            (ascii_digits(&[*h1, *h2]), ascii_digits(&[*m1, *m2])),
+            (Some(hours), Some(minutes)) if hours <= 23 && minutes <= 59
+        ),
+        _ => false,
+    }
+}
+
+/// A run of ASCII digits as a number; anything else, including a sign, is `None`.
+fn ascii_digits(digits: &[u8]) -> Option<u16> {
+    if digits.is_empty() || digits.len() > 4 || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    Some(
+        digits
+            .iter()
+            .fold(0, |number, digit| number * 10 + u16::from(digit - b'0')),
+    )
 }
 
 fn validate_priority(value: f64, field: &str) -> std::io::Result<()> {
@@ -1531,6 +1607,76 @@ mod tests {
             "<video:description>A &lt;production&gt; sitemap example</video:description>"
         ));
         assert_eq!(xml.matches("<url>").count(), 2);
+    }
+
+    /// The validator replaced `chrono`'s `NaiveDate::parse_from_str(_, "%Y-%m-%d")`
+    /// and `DateTime::parse_from_rfc3339`. Every RFC 3339 answer below is the one
+    /// `chrono` gave; the only change is the date branch, where `chrono` also took
+    /// unpadded, signed, and space-led years, months and days.
+    #[test]
+    fn last_modified_accepts_a_calendar_date_or_an_rfc3339_timestamp() {
+        let accepted = [
+            "2026-11-19",
+            "2024-02-29",
+            "2000-02-29",
+            "0000-01-01",
+            "2026-11-19T10:00:00Z",
+            "2026-11-19t10:00:00z",
+            "2026-11-19 10:00:00Z",
+            "2026-11-19T10:00:00+07:00",
+            "2026-11-19T10:00:00-00:00",
+            "2026-11-19T10:00:00+23:59",
+            "2026-07-29T04:30:00.000Z",
+            "2026-11-19T10:00:00.123456789Z",
+            "2026-11-19T10:00:00.1234567891Z",
+            "2016-12-31T23:59:60Z",
+            "9999-12-31T23:59:59Z",
+        ];
+        let rejected = [
+            "",
+            "yesterday",
+            "2026-02-30",
+            "2023-02-29",
+            "1900-02-29",
+            "2026-13-10",
+            "2026-00-10",
+            "2026-12-32",
+            "2026-11-19T10:00:00",
+            "2026-11-19T10:00Z",
+            "2026-11-19T24:00:00Z",
+            "2026-11-19T10:60:00Z",
+            "2026-11-19T10:00:61Z",
+            "2026-11-19T10:00:00.Z",
+            "2026-11-19T10:00:00,5Z",
+            "2026-11-19T10:00:00+0700",
+            "2026-11-19T10:00:00+07",
+            "2026-11-19T10:00:00+24:00",
+            "2026-11-19T10:00:00+07:60",
+            "2026-11-19T10:00:00Z ",
+            "2026-11-19\n",
+            "20261119",
+            "02026-11-19",
+            "2026-11-19T10:00:0\u{e9}Z",
+            "\u{e9}026-11-19T10:00:00Z",
+            // Accepted by chrono's `%Y-%m-%d`, refused now: none is a W3C
+            // Datetime, and the value is written into `<lastmod>` verbatim.
+            "2026-1-9",
+            "+2026-11-19",
+            "-0001-01-01",
+            " 2026-11-19",
+        ];
+        for value in accepted {
+            assert!(
+                validate_last_modified(value, "f").is_ok(),
+                "{value:?} should be accepted"
+            );
+        }
+        for value in rejected {
+            assert!(
+                validate_last_modified(value, "f").is_err(),
+                "{value:?} should be rejected"
+            );
+        }
     }
 
     #[test]

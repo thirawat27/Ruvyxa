@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde_yaml_ng::Value;
+use serde_json::Value;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -36,7 +36,10 @@ fn workflows() -> BTreeMap<String, Value> {
             .to_string();
         let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-        let document: Value = serde_yaml_ng::from_str(&source)
+        // YAML 1.2 core booleans, as GitHub reads a workflow: a bare `on:` key
+        // is the string "on", not the YAML 1.1 boolean `true`.
+        let options = serde_saphyr::options! { strict_booleans: true };
+        let document: Value = serde_saphyr::from_str_with_options(&source, options)
             .unwrap_or_else(|error| panic!("{name} is not valid YAML: {error}"));
         parsed.insert(name, document);
     }
@@ -46,19 +49,17 @@ fn workflows() -> BTreeMap<String, Value> {
 
 /// Every job in a workflow, by name.
 fn jobs_of(document: &Value) -> Vec<(String, &Value)> {
-    let Some(jobs) = document.get("jobs").and_then(Value::as_mapping) else {
+    let Some(jobs) = document.get("jobs").and_then(Value::as_object) else {
         return Vec::new();
     };
-    jobs.iter()
-        .map(|(name, job)| (name.as_str().unwrap_or("<unnamed>").to_string(), job))
-        .collect()
+    jobs.iter().map(|(name, job)| (name.clone(), job)).collect()
 }
 
 /// Every step in a workflow, paired with the job it belongs to.
 fn steps_of(document: &Value) -> Vec<(String, &Value)> {
     let mut steps = Vec::new();
     for (name, job) in jobs_of(document) {
-        if let Some(list) = job.get("steps").and_then(Value::as_sequence) {
+        if let Some(list) = job.get("steps").and_then(Value::as_array) {
             for step in list {
                 steps.push((name.clone(), step));
             }
@@ -147,7 +148,7 @@ fn the_javascript_publish_job_never_reaches_cargo() {
         .expect("release.yml declares a publish-packages job");
     let steps = job
         .get("steps")
-        .and_then(Value::as_sequence)
+        .and_then(Value::as_array)
         .expect("publish-packages has steps");
 
     let installs_rust = steps.iter().any(|step| {
@@ -229,7 +230,7 @@ fn nothing_publishes_before_the_release_candidate_is_verified() {
             .unwrap_or_else(|| panic!("{wanted} declares no needs"))
         {
             Value::String(one) => vec![one.clone()],
-            Value::Sequence(many) => many
+            Value::Array(many) => many
                 .iter()
                 .filter_map(|entry| entry.as_str().map(str::to_string))
                 .collect(),
@@ -272,14 +273,14 @@ fn platforms_of(job: &Value) -> Vec<String> {
         // repository uses so each leg can carry its own Node and Rust target.
         let mut found: Vec<String> = matrix
             .get("os")
-            .and_then(Value::as_sequence)
+            .and_then(Value::as_array)
             .map(|list| {
                 list.iter()
                     .filter_map(|entry| entry.as_str().map(str::to_string))
                     .collect()
             })
             .unwrap_or_default();
-        if let Some(include) = matrix.get("include").and_then(Value::as_sequence) {
+        if let Some(include) = matrix.get("include").and_then(Value::as_array) {
             for entry in include {
                 if let Some(os) = entry.get("os").and_then(Value::as_str) {
                     found.push(os.to_string());
@@ -299,7 +300,7 @@ fn platforms_of(job: &Value) -> Vec<String> {
 /// Every `run:` script in a job, concatenated.
 fn run_scripts_of(job: &Value) -> String {
     job.get("steps")
-        .and_then(Value::as_sequence)
+        .and_then(Value::as_array)
         .map(|steps| {
             steps
                 .iter()
@@ -331,12 +332,12 @@ fn the_release_gate_covers_more_than_one_platform_and_runs_the_end_to_end_lanes(
     let workflows = workflows();
     let release = &workflows["release.yml"];
 
-    // `expect` rather than a silent `None`: YAML 1.1 reads a bare `on:` key as
-    // the boolean `true`, and a lookup that quietly found nothing would turn the
+    // `expect` rather than a silent `None`: a YAML 1.1 reader takes a bare `on:`
+    // key as the boolean `true` (which is why `workflows()` asks for core
+    // booleans), and a lookup that quietly found nothing would turn the
     // `workflow_run` escape hatch below into a branch that can never be taken.
     let triggers = release
-        .get(Value::String("on".into()))
-        .or_else(|| release.get(Value::Bool(true)))
+        .get("on")
         .expect("release.yml declares triggers under `on:`");
     if triggers.get("workflow_run").is_some() {
         return;
@@ -425,7 +426,7 @@ fn codeql_analyzes_every_language_this_repository_is_written_in() {
     let workflows = workflows();
     let codeql = &workflows["codeql.yml"];
     let analyzed = codeql["jobs"]["analyze"]["strategy"]["matrix"]["include"]
-        .as_sequence()
+        .as_array()
         .expect("codeql.yml declares a matrix of languages")
         .iter()
         .filter_map(|entry| entry.get("language").and_then(Value::as_str))
@@ -451,11 +452,11 @@ fn codeql_analyzes_every_language_this_repository_is_written_in() {
 fn no_job_may_write_anything_that_changes_the_repository() {
     for (file, document) in workflows() {
         for (name, job) in jobs_of(&document) {
-            let Some(permissions) = job.get("permissions").and_then(Value::as_mapping) else {
+            let Some(permissions) = job.get("permissions").and_then(Value::as_object) else {
                 continue;
             };
             for (key, value) in permissions {
-                let (Some(key), Some(value)) = (key.as_str(), value.as_str()) else {
+                let (key, Some(value)) = (key.as_str(), value.as_str()) else {
                     continue;
                 };
                 if value != "write" {
@@ -488,7 +489,7 @@ fn no_job_may_write_anything_that_changes_the_repository() {
 fn no_workflow_builds_packages_before_it_tests_rust() {
     for (file, document) in workflows() {
         for (name, job) in jobs_of(&document) {
-            let Some(steps) = job.get("steps").and_then(Value::as_sequence) else {
+            let Some(steps) = job.get("steps").and_then(Value::as_array) else {
                 continue;
             };
             let position_of = |needle: &str| {

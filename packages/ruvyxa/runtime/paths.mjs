@@ -208,6 +208,9 @@ function matchPattern(pattern, specifier) {
   if (pattern.indexOf('*', star + 1) >= 0) return null
   const prefix = pattern.slice(0, star)
   const suffix = pattern.slice(star + 1)
+  // The prefix and suffix may not share characters: `@o/*/o` does not match
+  // `@o/o`. TypeScript and the Rust resolver both refuse it.
+  if (specifier.length < prefix.length + suffix.length) return null
   if (!specifier.startsWith(prefix) || !specifier.endsWith(suffix)) return null
   const end = suffix.length === 0 ? specifier.length : specifier.length - suffix.length
   return specifier.slice(prefix.length, end)

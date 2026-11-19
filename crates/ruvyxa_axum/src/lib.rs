@@ -375,7 +375,13 @@ where
     }
 
     fn call(&mut self, request: Request<ReqBody>) -> Self::Future {
-        let matched = headers_for(&self.rules, request.uri().path());
+        // Matched on the decoded path, the spelling the file is served by:
+        // `/%5F%5Fruvyxa/client/a.js` is the same bundle as
+        // `/__ruvyxa/client/a.js`, and matching the raw bytes served it without
+        // its `immutable` caching rule.
+        let raw = request.uri().path();
+        let decoded = percent_decode(raw);
+        let matched = headers_for(&self.rules, decoded.as_deref().unwrap_or(raw));
         let future = self.inner.call(request);
         Box::pin(async move {
             let mut response = future.await?;
@@ -430,11 +436,32 @@ impl Resolver {
     }
 }
 
+impl Resolver {
+    /// The site's own 404 page with a 404 status, or a bare 404 without one.
+    async fn not_found(&self, request: Request) -> Response<Body> {
+        if !self.has_not_found_page {
+            let mut response = Response::new(Body::empty());
+            *response.status_mut() = StatusCode::NOT_FOUND;
+            return response;
+        }
+        let page = ServeFile::new(self.root.join(NOT_FOUND_PAGE));
+        let mut response = match tower::ServiceExt::oneshot(page, request).await {
+            Ok(response) => response.map(Body::new),
+            Err(never) => match never {},
+        };
+        *response.status_mut() = StatusCode::NOT_FOUND;
+        response.headers_mut().insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static(content_type_for(Path::new(NOT_FOUND_PAGE))),
+        );
+        response
+    }
+}
+
 async fn is_file(path: &Path) -> bool {
     tokio::fs::metadata(path)
         .await
-        .ok()
-        .is_some_and(|metadata| metadata.is_file())
+        .is_ok_and(|metadata| metadata.is_file())
 }
 
 /// The publish-directory-relative path a request names, or `None` when the
@@ -497,6 +524,14 @@ async fn serve_resolved(
     mut request: Request,
     next: Next,
 ) -> Response<Body> {
+    // The policy file is configuration, not content: Netlify and Cloudflare
+    // Pages never serve it, so a site moved here must not start to. Answered
+    // here rather than as a resolver miss, because a miss still reaches
+    // `ServeDir`, which would serve the file anyway.
+    if safe_relative_path(request.uri().path()).is_some_and(|path| path == Path::new(HEADERS_FILE))
+    {
+        return resolver.not_found(request).await;
+    }
     let resolved = resolver.resolve(request.uri().path()).await;
     if let Some(resolved) = &resolved
         && resolved.uri_path != request.uri().path()
@@ -735,6 +770,28 @@ mod tests {
         // A document is not an asset: no cache rule names it.
         let (_, headers, _) = get_path(&router, "/").await;
         assert_eq!(header(&headers, "cache-control"), None);
+
+        // An encoded spelling of a path is the same file, and carries the same
+        // rule: the file service decodes before it serves.
+        for path in ["/%5F%5Fruvyxa/client/abc123.js", "/smoke%2Esvg"] {
+            let (status, headers, _) = get_path(&router, path).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert!(
+                header(&headers, "cache-control").is_some(),
+                "{path} lost its cache rule"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_headers_file_itself_is_not_served() {
+        let temp = publish_dir();
+        let router = site(&temp).router();
+        for path in ["/_headers", "/%5Fheaders", "/./_headers"] {
+            let (status, _, body) = get_path(&router, path).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+            assert!(body.contains("SMOKE-NOT-FOUND-MARKER"), "{path}: {body}");
+        }
     }
 
     #[tokio::test]

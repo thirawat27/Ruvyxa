@@ -80,6 +80,19 @@ describe('redirects() on the deployed host', () => {
     assert.equal(response.headers.get('location'), '/blog/first?ref=1')
   })
 
+  it('re-encodes a decoded parameter, so it cannot inject a query or break Location', async () => {
+    const handler = handlerWith({
+      redirects: [{ source: '/old/:slug', destination: '/blog/:slug', permanent: true }],
+    })
+    const query = await get(handler, '/old/a%3Fx=1')
+    assert.equal(query.status, 308)
+    assert.equal(query.headers.get('location'), '/blog/a%3Fx%3D1')
+    // A raw character above U+00FF makes a `Headers` Location throw.
+    const thai = await get(handler, '/old/%E0%B9%84')
+    assert.equal(thai.status, 308)
+    assert.equal(thai.headers.get('location'), '/blog/%E0%B9%84')
+  })
+
   it('never touches a framework endpoint', async () => {
     const handler = handlerWith({
       redirects: [{ source: '/:path*', destination: '/', permanent: false }],
@@ -97,6 +110,15 @@ describe('rewrites() on the deployed host', () => {
     const response = await get(handler, '/docs/hello')
     assert.equal(response.status, 200)
     assert.match(await response.text(), /data-params='\{"slug":"[a-z]+"\}'/)
+  })
+
+  it('an encoded parameter routes to the decoded value after the rewrite', async () => {
+    const handler = handlerWith({
+      rewrites: { beforeFiles: [{ source: '/docs/:slug', destination: '/blog/:slug' }] },
+    })
+    const response = await get(handler, '/docs/a%20b%3Fc%23d')
+    assert.equal(response.status, 200)
+    assert.match(await response.text(), /data-params='\{"slug":"a b\?c#d"\}'/)
   })
 
   it('a bare list is afterFiles: a static page wins, a dynamic route yields', async () => {

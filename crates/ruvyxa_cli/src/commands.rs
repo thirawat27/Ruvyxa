@@ -83,7 +83,7 @@ pub(crate) fn print_routes(args: RoutesArgs) -> anyhow::Result<()> {
     for (row, route) in rows.iter().zip(manifest.routes.iter()) {
         let strategy = match route.kind {
             ruvyxa_graph::RouteKind::Page => styled_strategy_word(route.render.strategy),
-            _ => dim("-").to_string(),
+            _ => dim("-").clone(),
         };
         print_box_row(
             [&row[0], &row[1], &row[2], &row[3]],
@@ -787,8 +787,7 @@ pub(crate) async fn test_parity(args: ProjectArgs) -> anyhow::Result<()> {
             Some(prod_route) if prod_route == dev_route => matched += 1,
             Some(prod_route) => {
                 failures.push(format!(
-                    "{key} mismatch\n  dev:  {:?}\n  prod: {:?}",
-                    dev_route, prod_route
+                    "{key} mismatch\n  dev:  {dev_route:?}\n  prod: {prod_route:?}"
                 ));
             }
             None => failures.push(format!("{key} exists in dev but not production")),

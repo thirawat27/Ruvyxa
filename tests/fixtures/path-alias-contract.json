@@ -9,7 +9,7 @@
     "src/fake-react.ts": "export const value = 'forbidden'"
   },
   "configs": {
-    "config/tsconfig.base.json": "{\n  // inherited aliases\n  \"compilerOptions\": {\n    \"paths\": {\n      \"@/button\": [\"../src/exact.ts\"],\n      \"@/*\": [\"../src/wild/*\"],\n      \"@ui/*\": [\"../missing/*\", \"../src/fallback/*\"],\n      \"@pkg/*/test\": [\"../src/scoped/*\"],\n      \"react\": [\"../src/fake-react.ts\"],\n      \"@escape/*\": [\"../../outside/*\"],\n    },\n  },\n}",
+    "config/tsconfig.base.json": "{\n  // inherited aliases\n  \"compilerOptions\": {\n    \"paths\": {\n      \"@/button\": [\"../src/exact.ts\"],\n      \"@/*\": [\"../src/wild/*\"],\n      \"@ui/*\": [\"../missing/*\", \"../src/fallback/*\"],\n      \"@pkg/*/test\": [\"../src/scoped/*\"],\n      \"react\": [\"../src/fake-react.ts\"],\n      \"@escape/*\": [\"../../outside/*\"],\n      \"@o/*/o\": [\"../src/exact.ts*\"],\n    },\n  },\n}",
     "tsconfig.json": "{ \"extends\": \"./config/tsconfig.base.json\" }"
   },
   "outsideFiles": {
@@ -25,6 +25,11 @@
       "expected": "src/scoped/button.ts"
     },
     { "name": "reserved framework dependency", "specifier": "react", "expected": null },
+    {
+      "name": "prefix and suffix may not overlap",
+      "specifier": "@o/o",
+      "expected": null
+    },
     { "name": "root escape", "specifier": "@escape/secret", "expected": null }
   ],
   "inheritedBaseUrl": {

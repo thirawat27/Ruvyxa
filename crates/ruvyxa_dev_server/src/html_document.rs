@@ -951,11 +951,7 @@ pub(crate) fn extract_code_frame(file: &Path, line: Option<u32>) -> Option<Strin
         let prefix = if i == idx { ">" } else { " " };
         let marker = if i == idx { "  ← error" } else { "" };
         frame.push_str(&format!(
-            " {prefix} {:>width$} │ {}{}\n",
-            num,
-            line_text,
-            marker,
-            width = max_digits
+            " {prefix} {num:>max_digits$} │ {line_text}{marker}\n"
         ));
     }
     Some(frame)

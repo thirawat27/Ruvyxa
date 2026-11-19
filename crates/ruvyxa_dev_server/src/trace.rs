@@ -168,7 +168,7 @@ mod tests {
         assert_eq!(store.snapshot(None).len(), TRACE_LIMIT);
         assert!(store.snapshot(Some("app/0.tsx")).is_empty());
         assert_eq!(store.snapshot(Some("app/128.tsx")).len(), 1);
-        assert!(store.record(&format!("{:032x}", TRACE_LIMIT), "browser", "received"));
+        assert!(store.record(&format!("{TRACE_LIMIT:032x}"), "browser", "received"));
         assert!(!store.record("ffffffffffffffffffffffffffffffff", "browser", "missing"));
     }
 

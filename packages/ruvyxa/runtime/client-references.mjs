@@ -104,11 +104,14 @@ export const RSC_RENDERER_SPECIFIER = 'ruvyxa:server-components'
  *
  * Only a browser entry imports it, and only as its first import: see
  * `rsc-client-install.mjs` for why that side effect is a file of its own.
+ *
+ * This is an import path, not a module id: only its separators change. Passing
+ * it through {@link normalizeClientModulePath} — the id normaliser — dropped the
+ * leading `/` of every POSIX path and collapsed an installed package to a bare
+ * `node_modules/ruvyxa/…`, neither of which resolves.
  */
 export function clientReferenceInstallPath() {
-  return normalizeClientModulePath(
-    fileURLToPath(new URL('./rsc-client-install.mjs', import.meta.url)),
-  )
+  return toModuleSpecifier(fileURLToPath(new URL('./rsc-client-install.mjs', import.meta.url)))
 }
 
 /**
@@ -121,9 +124,7 @@ export function clientReferenceInstallPath() {
  * into a browser target, so the path is the spelling both understand.
  */
 export function clientReferenceRuntimePath() {
-  return normalizeClientModulePath(
-    fileURLToPath(new URL('./rsc-client-runtime.mjs', import.meta.url)),
-  )
+  return toModuleSpecifier(fileURLToPath(new URL('./rsc-client-runtime.mjs', import.meta.url)))
 }
 
 /**

@@ -1,0 +1,129 @@
+{
+  "why": "Markdown and MDX frontmatter is parsed by two YAML libraries: `serde-saphyr` in `crates/ruvyxa_bundler/src/content.rs` and the `yaml` package (core schema) in `packages/ruvyxa/runtime/compiler.mjs`. The page a build pre-renders and the page the Node half compiles must see the same object. Each case is the text between the `---` delimiters and either the frontmatter it parses to or `error: true`. Numbers compare by value: Rust emits `1.0` where JavaScript emits `1`, which evaluate to the same number.",
+  "cases": [
+    {
+      "name": "nested mappings and sequences",
+      "yaml": "title: Hello\nauthor:\n  name: Ada\ntags: [rust, mdx]\nempty_map: {}\nempty_seq: []\n",
+      "frontmatter": {
+        "title": "Hello",
+        "author": { "name": "Ada" },
+        "tags": ["rust", "mdx"],
+        "empty_map": {},
+        "empty_seq": []
+      }
+    },
+    {
+      "name": "YAML 1.1 boolean spellings stay strings",
+      "why": "The core schema knows only true/false. serde-saphyr reads yes/no/on/off as booleans unless strict_booleans is set.",
+      "yaml": "a: yes\nb: no\nc: on\nd: off\ne: y\nf: n\ng: Yes\nh: NO\n",
+      "frontmatter": {
+        "a": "yes",
+        "b": "no",
+        "c": "on",
+        "d": "off",
+        "e": "y",
+        "f": "n",
+        "g": "Yes",
+        "h": "NO"
+      }
+    },
+    {
+      "name": "core schema booleans in every case",
+      "yaml": "a: True\nb: FALSE\nc: true\n",
+      "frontmatter": { "a": true, "b": false, "c": true }
+    },
+    {
+      "name": "every null spelling",
+      "yaml": "a: ~\nb: null\nc: Null\nd:\ne: NULL\n",
+      "frontmatter": { "a": null, "b": null, "c": null, "d": null, "e": null }
+    },
+    {
+      "name": "dates and timestamps stay strings",
+      "why": "The core schema has no timestamp type, so a date is the text the author wrote.",
+      "yaml": "date: 2026-11-19\nts: 2026-11-19T10:00:00Z\ninvalid: 2026-02-30\nclock: 12:30:00\n",
+      "frontmatter": {
+        "date": "2026-11-19",
+        "ts": "2026-11-19T10:00:00Z",
+        "invalid": "2026-02-30",
+        "clock": "12:30:00"
+      }
+    },
+    {
+      "name": "integers in the core schema's spellings",
+      "why": "Underscored numbers are strings in the core schema; serde-saphyr parses them unless underscored_numbers_as_strings is set. A leading zero is decimal, not octal.",
+      "yaml": "a: 1_000\nb: 0x1F\nc: 0o17\nd: 017\ne: +12\nf: -0\ng: 007\nh: 08\ni: 0x_1F\n",
+      "frontmatter": {
+        "a": "1_000",
+        "b": 31,
+        "c": 15,
+        "d": 17,
+        "e": 12,
+        "f": 0,
+        "g": 7,
+        "h": 8,
+        "i": "0x_1F"
+      }
+    },
+    {
+      "name": "floats",
+      "yaml": "a: 1.0\nb: 1.5\nc: 1e3\nd: .5\ne: 1.\nf: -2.0\ng: 0.1\nh: 1E-2\ni: +1.5e+3\nj: 1_0.5\n",
+      "frontmatter": {
+        "a": 1,
+        "b": 1.5,
+        "c": 1000,
+        "d": 0.5,
+        "e": 1,
+        "f": -2,
+        "g": 0.1,
+        "h": 0.01,
+        "i": 1500,
+        "j": "1_0.5"
+      }
+    },
+    {
+      "name": "the merge key is an ordinary key",
+      "why": "YAML 1.2 dropped `<<`; the yaml package only merges under YAML 1.1 or with merge: true.",
+      "yaml": "base: &b\n  x: 1\nother:\n  <<: *b\n  y: 2\n",
+      "frontmatter": { "base": { "x": 1 }, "other": { "<<": { "x": 1 }, "y": 2 } }
+    },
+    {
+      "name": "aliases copy the anchored node",
+      "yaml": "list: &l [1, 2]\ncopy: *l\n",
+      "frontmatter": { "list": [1, 2], "copy": [1, 2] }
+    },
+    {
+      "name": "block scalars and their chomping",
+      "yaml": "text: |\n  line one\n  line two\nfolded: >\n  a\n  b\nkeep: |+\n  k\n\nstrip: |-\n  s\n",
+      "frontmatter": {
+        "text": "line one\nline two\n",
+        "folded": "a b\n",
+        "keep": "k\n\n",
+        "strip": "s"
+      }
+    },
+    {
+      "name": "quoted scalars are strings",
+      "yaml": "s: '010'\nt: \"yes\"\nu: \"multi\n  line\"\n\"quoted key\": 1\n'single': 2\n",
+      "frontmatter": { "s": "010", "t": "yes", "u": "multi line", "quoted key": 1, "single": 2 }
+    },
+    {
+      "name": "explicit standard tags",
+      "yaml": "a: !!str 12\nb: !!int '7'\nc: !!bool true\n",
+      "frontmatter": { "a": "12", "b": 7, "c": true }
+    },
+    {
+      "name": "an unknown tag keeps the value",
+      "yaml": "a: !custom value\n",
+      "frontmatter": { "a": "value" }
+    },
+    { "name": "a duplicate key", "yaml": "a: 1\na: 2\n", "error": true },
+    { "name": "positive infinity", "yaml": "a: .inf\n", "error": true },
+    { "name": "negative infinity", "yaml": "a: -.inf\n", "error": true },
+    { "name": "not a number", "yaml": "a: .NaN\n", "error": true },
+    { "name": "a decimal that overflows", "yaml": "a: 1e400\n", "error": true },
+    { "name": "an unclosed flow sequence", "yaml": "author: [broken\n", "error": true },
+    { "name": "a sequence at the top", "yaml": "- a\n- b\n", "error": true },
+    { "name": "a scalar at the top", "yaml": "just a string\n", "error": true },
+    { "name": "a null key", "yaml": "null: x\n", "error": true }
+  ]
+}
