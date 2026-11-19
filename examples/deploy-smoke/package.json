@@ -12,16 +12,16 @@
   },
   "dependencies": {
     "@ruvyxa/react": "workspace:*",
-    "react": "^19.2.8",
-    "react-dom": "^19.2.8",
-    "react-server-dom-webpack": "19.2.8",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-server-dom-webpack": "19.3.1",
     "ruvyxa": "workspace:*"
   },
   "devDependencies": {
     "@ruvyxa/adapter-bun": "workspace:^",
     "@ruvyxa/adapter-deno": "workspace:^",
     "@ruvyxa/adapter-node": "workspace:^",
-    "@types/react": "^19.2.18"
+    "@types/react": "^19.3.0"
   },
   "engines": {
     "node": ">=24.19.0"

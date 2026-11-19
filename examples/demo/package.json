@@ -24,9 +24,9 @@
   },
   "dependencies": {
     "@ruvyxa/react": "workspace:*",
-    "react": "^19.2.8",
-    "react-dom": "^19.2.8",
-    "react-server-dom-webpack": "19.2.8",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-server-dom-webpack": "19.3.1",
     "ruvyxa": "workspace:*"
   },
   "devDependencies": {
@@ -36,8 +36,8 @@
     "@ruvyxa/adapter-node": "workspace:^",
     "@ruvyxa/adapter-static": "workspace:^",
     "@ruvyxa/adapter-vercel": "workspace:^",
-    "@types/react": "^19.2.18",
-    "@types/react-dom": "^19.2.7"
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0"
   },
   "engines": {
     "node": ">=24.19.0"
