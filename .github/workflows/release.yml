@@ -314,6 +314,12 @@ jobs:
           VERSION="${{ needs.resolve-version.outputs.version }}"
           PACKAGE_LIST="$(node scripts/validate-release-publish-plan.mjs --list)"
           NPM_REGISTRY="https://registry.npmjs.org"
+          # Publish everything first, then wait for propagation once. Waiting
+          # after each package serialised ~2 minutes of registry lag per
+          # package; nineteen of them overran the job timeout and v1.1.6 was
+          # cancelled half-published. `pnpm publish` rewrites `workspace:`
+          # ranges locally and never asks the registry for a dependency, so
+          # dependency order needs no propagation in between.
           for PACKAGE in $PACKAGE_LIST; do
             if npm view "$PACKAGE@$VERSION" version --registry "$NPM_REGISTRY" >/dev/null 2>&1; then
               echo "$PACKAGE@$VERSION already exists; skipping"
@@ -321,18 +327,26 @@ jobs:
               echo "Publishing $PACKAGE@$VERSION"
               pnpm --filter "$PACKAGE" publish --access public --no-git-checks
             fi
-            for ATTEMPT in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+          done
+          PENDING="$PACKAGE_LIST"
+          DEADLINE=$((SECONDS + 600))
+          while [ -n "$PENDING" ]; do
+            STILL=""
+            for PACKAGE in $PENDING; do
               if npm view "$PACKAGE@$VERSION" version --registry "$NPM_REGISTRY" >/dev/null 2>&1; then
                 echo "$PACKAGE@$VERSION is available on npm"
-                break
+              else
+                STILL="$STILL $PACKAGE"
               fi
-              if [ "$ATTEMPT" = 20 ]; then
-                echo "::error::${PACKAGE}@${VERSION} is not available on npm after publish (waited 5 minutes)"
-                exit 1
-              fi
-              echo "Waiting for ${PACKAGE}@${VERSION} to propagate to npm (attempt ${ATTEMPT}/20)..."
-              sleep 15
             done
+            PENDING="${STILL# }"
+            [ -z "$PENDING" ] && break
+            if [ "$SECONDS" -ge "$DEADLINE" ]; then
+              echo "::error::not available on npm after 10 minutes:$STILL"
+              exit 1
+            fi
+            echo "Waiting for npm propagation:$STILL"
+            sleep 15
           done
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
